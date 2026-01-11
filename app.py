@@ -1,27 +1,49 @@
 from __future__ import annotations
 
 import io
-import sys
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 import streamlit as st
 
 from keyflip.main import main as keyflip_main
 
+# =========================
+# Paths / constants
+# =========================
 ROOT = Path(__file__).parent
 WATCHLIST = ROOT / "watchlist.csv"
 SCANS = ROOT / "scans.csv"
 PASSES = ROOT / "passes.csv"
 DB = ROOT / "price_cache.sqlite"
 
+
+# =========================
+# Streamlit setup
+# =========================
 st.set_page_config(page_title="Keyflip Scanner", layout="wide")
 
 st.title("Keyflip — Fanatical → Eneba Scanner (No Playwright)")
 st.caption("Builds a fresh watchlist (<= max buy) then scans for edge. HTTP-only (requests + bs4).")
 
 
+# =========================
+# Session state
+# =========================
+if "running" not in st.session_state:
+    st.session_state.running = False
+if "last_output" not in st.session_state:
+    st.session_state.last_output = ""
+if "last_exit_code" not in st.session_state:
+    st.session_state.last_exit_code = None
+
+
+# =========================
+# Helpers
+# =========================
 def run_keyflip(argv: list[str]) -> tuple[int, str]:
     """
     Run keyflip.main.main(argv) and capture stdout/stderr into a string.
@@ -31,9 +53,10 @@ def run_keyflip(argv: list[str]) -> tuple[int, str]:
     code = 0
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
-            code = int(keyflip_main(argv))
+            rv = keyflip_main(argv)
+        # Be tolerant: many "main" funcs return None on success
+        code = int(rv) if rv is not None else 0
     except SystemExit as e:
-        # argparse may raise SystemExit
         code = int(e.code) if isinstance(e.code, int) else 1
     except Exception as e:
         code = 1
@@ -41,6 +64,112 @@ def run_keyflip(argv: list[str]) -> tuple[int, str]:
     return code, buf.getvalue()
 
 
+def safe_read_csv(path: Path) -> pd.DataFrame | None:
+    """
+    Read CSV safely for Streamlit:
+    - returns None if file missing or empty
+    - shows an error (but doesn't crash the app) on parse problems
+    """
+    try:
+        if not path.exists():
+            return None
+        if path.stat().st_size == 0:
+            return None
+        return pd.read_csv(path).fillna("")
+    except Exception as e:
+        st.error(f"Failed to read {path.name}: {type(e).__name__}: {e}")
+        return None
+
+
+def file_status_line(p: Path) -> str:
+    try:
+        if not p.exists():
+            return f"- {p.name}: —  ({p.resolve()})"
+        size = p.stat().st_size
+        return f"- {p.name}: ✅  ({p.resolve()})  • {size:,} bytes"
+    except Exception:
+        return f"- {p.name}: ✅  ({p})"
+
+
+@dataclass(frozen=True)
+class Settings:
+    max_buy: float
+    watchlist_target: int
+    verify_candidates: int
+    pages_per_source: int
+    verify_limit: int
+    safety_cap: int
+    scan_limit: int
+    avoid_recent_days: int
+    allow_eur: bool
+    eur_to_gbp: float
+    debug: bool
+    item_budget: float
+    run_budget: float
+
+
+def build_args_common(s: Settings) -> list[str]:
+    args = [
+        "--max-buy",
+        str(float(s.max_buy)),
+        "--watchlist-target",
+        str(int(s.watchlist_target)),
+        "--verify-candidates",
+        str(int(s.verify_candidates)),
+        "--pages-per-source",
+        str(int(s.pages_per_source)),
+        "--verify-limit",
+        str(int(s.verify_limit)),
+        "--verify-safety-cap",
+        str(int(s.safety_cap)),
+        "--scan-limit",
+        str(int(s.scan_limit)),
+        "--avoid-recent-days",
+        str(int(s.avoid_recent_days)),
+        "--item-budget",
+        str(float(s.item_budget)),
+        "--run-budget",
+        str(float(s.run_budget)),
+        "--cache-fail-ttl",
+        "1200",
+    ]
+    if s.allow_eur:
+        args += ["--allow-eur", "--eur-to-gbp", str(float(s.eur_to_gbp))]
+    if s.debug:
+        args += ["--debug"]
+    return args
+
+
+def run_action(label: str, argv: list[str]) -> None:
+    """
+    Runs keyflip with a 'running' lock so users can't spam-click actions.
+    Stores last output in session_state and shows it.
+    """
+    st.session_state.running = True
+    try:
+        with st.spinner(f"Running {label}…"):
+            code, out = run_keyflip(argv)
+        st.session_state.last_exit_code = code
+        st.session_state.last_output = out
+    finally:
+        st.session_state.running = False
+
+
+def show_last_run() -> None:
+    if st.session_state.last_exit_code is None:
+        return
+    st.subheader("Run output")
+    st.code(st.session_state.last_output or "(no output)")
+    code = st.session_state.last_exit_code
+    if code != 0:
+        st.error(f"Exited with code {code}")
+    else:
+        st.success("Done")
+
+
+# =========================
+# Sidebar settings
+# =========================
 with st.sidebar:
     st.header("Settings")
 
@@ -64,108 +193,102 @@ with st.sidebar:
     run_budget = st.number_input("Run budget (0 disables)", min_value=0.0, max_value=3600.0, value=0.0, step=10.0)
 
     st.divider()
+
+    # Convenience settings object
+    settings = Settings(
+        max_buy=float(max_buy),
+        watchlist_target=int(watchlist_target),
+        verify_candidates=int(verify_candidates),
+        pages_per_source=int(pages_per_source),
+        verify_limit=int(verify_limit),
+        safety_cap=int(safety_cap),
+        scan_limit=int(scan_limit),
+        avoid_recent_days=int(avoid_recent_days),
+        allow_eur=bool(allow_eur),
+        eur_to_gbp=float(eur_to_gbp),
+        debug=bool(debug),
+        item_budget=float(item_budget),
+        run_budget=float(run_budget),
+    )
+
+    # Maintenance buttons
     colA, colB = st.columns(2)
-    clear_cache = colA.button("Clear cache")
-    clear_recent = colB.button("Clear recent")
+    clear_cache = colA.button("Clear cache", disabled=st.session_state.running, use_container_width=True)
+    clear_recent = colB.button("Clear recent", disabled=st.session_state.running, use_container_width=True)
 
-
-def build_args_common() -> list[str]:
-    args = [
-        "--max-buy", str(float(max_buy)),
-        "--watchlist-target", str(int(watchlist_target)),
-        "--verify-candidates", str(int(verify_candidates)),
-        "--pages-per-source", str(int(pages_per_source)),
-        "--verify-limit", str(int(verify_limit)),
-        "--verify-safety-cap", str(int(safety_cap)),
-        "--scan-limit", str(int(scan_limit)),
-        "--avoid-recent-days", str(int(avoid_recent_days)),
-        "--item-budget", str(float(item_budget)),
-        "--run-budget", str(float(run_budget)),
-        "--cache-fail-ttl", "1200",
-    ]
-    if allow_eur:
-        args += ["--allow-eur", "--eur-to-gbp", str(float(eur_to_gbp))]
-    if debug:
-        args += ["--debug"]
-    return args
-
-
+# Handle maintenance actions immediately
 if clear_cache:
-    code, out = run_keyflip(build_args_common() + ["--clear-cache"])
-    st.subheader("Output")
-    st.code(out)
-    st.success("Cache cleared" if code == 0 else f"Clear cache failed ({code})")
+    argv = build_args_common(settings) + ["--clear-cache"]
+    run_action("clear-cache", argv)
+    show_last_run()
     st.stop()
 
 if clear_recent:
-    code, out = run_keyflip(build_args_common() + ["--clear-recent"])
-    st.subheader("Output")
-    st.code(out)
-    st.success("Recent cleared" if code == 0 else f"Clear recent failed ({code})")
+    argv = build_args_common(settings) + ["--clear-recent"]
+    run_action("clear-recent", argv)
+    show_last_run()
     st.stop()
 
 
-# Actions
+# =========================
+# Main action buttons
+# =========================
 c1, c2, c3 = st.columns(3)
-do_play = c1.button("▶ PLAY (build + scan)", use_container_width=True)
-do_build = c2.button("🔨 Build watchlist", use_container_width=True)
-do_scan = c3.button("🔍 Scan watchlist", use_container_width=True)
+do_play = c1.button("▶ PLAY (build + scan)", use_container_width=True, disabled=st.session_state.running)
+do_build = c2.button("🔨 Build watchlist", use_container_width=True, disabled=st.session_state.running)
+do_scan = c3.button("🔍 Scan watchlist", use_container_width=True, disabled=st.session_state.running)
 
 if do_play or do_build or do_scan:
-    args = build_args_common()
+    argv = build_args_common(settings)
     if do_play:
-        args += ["--play"]
+        argv += ["--play"]
+        run_action("PLAY", argv)
     elif do_build:
-        args += ["--build"]
+        argv += ["--build"]
+        run_action("BUILD", argv)
     else:
-        args += ["--scan"]
+        argv += ["--scan"]
+        run_action("SCAN", argv)
 
-    with st.spinner("Running…"):
-        code, out = run_keyflip(args)
-
-    st.subheader("Run output")
-    st.code(out)
-
-    if code != 0:
-        st.error(f"Exited with code {code}")
-    else:
-        st.success("Done")
-
+show_last_run()
 
 st.divider()
 st.subheader("Results")
 
+
+# =========================
+# Results tabs
+# =========================
 tabs = st.tabs(["passes.csv", "latest scan", "watchlist.csv", "files"])
 
 with tabs[0]:
-    if PASSES.exists():
-        df = pd.read_csv(PASSES).fillna("")
-        st.dataframe(df, use_container_width=True)
+    df = safe_read_csv(PASSES)
+    if df is None:
+        st.info("No passes.csv yet (or it’s empty).")
     else:
-        st.info("No passes.csv yet.")
+        st.dataframe(df, use_container_width=True)
 
 with tabs[1]:
-    if SCANS.exists():
-        df = pd.read_csv(SCANS).fillna("")
+    df = safe_read_csv(SCANS)
+    if df is None:
+        st.info("No scans.csv yet (or it’s empty).")
+    else:
         if "timestamp" in df.columns and not df.empty:
-            last_ts = df["timestamp"].iloc[-1]
+            ts = df["timestamp"].astype(str)
+            last_ts = ts.max()
             st.caption(f"Latest timestamp: {last_ts}")
-            df_latest = df[df["timestamp"] == last_ts]
-            st.dataframe(df_latest, use_container_width=True)
+            st.dataframe(df[ts == last_ts], use_container_width=True)
         else:
             st.dataframe(df.tail(50), use_container_width=True)
-    else:
-        st.info("No scans.csv yet.")
 
 with tabs[2]:
-    if WATCHLIST.exists():
-        df = pd.read_csv(WATCHLIST).fillna("")
-        st.dataframe(df, use_container_width=True)
+    df = safe_read_csv(WATCHLIST)
+    if df is None:
+        st.info("No watchlist.csv yet (or it’s empty). Run Build or Play.")
     else:
-        st.info("No watchlist.csv yet. Run Build or Play.")
+        st.dataframe(df, use_container_width=True)
 
 with tabs[3]:
     st.write("Working directory files:")
     for p in [WATCHLIST, PASSES, SCANS, DB]:
-        st.write(f"- {p.name}: {'✅' if p.exists() else '—'}  ({p.resolve()})")
-
+        st.write(file_status_line(p))
