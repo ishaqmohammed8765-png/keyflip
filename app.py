@@ -4,7 +4,6 @@ import io
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import pandas as pd
 import streamlit as st
@@ -14,7 +13,7 @@ from keyflip.main import main as keyflip_main
 # =========================
 # Paths / constants
 # =========================
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).parent.resolve()
 WATCHLIST = ROOT / "watchlist.csv"
 SCANS = ROOT / "scans.csv"
 PASSES = ROOT / "passes.csv"
@@ -28,7 +27,6 @@ st.set_page_config(page_title="Keyflip Scanner", layout="wide")
 
 st.title("Keyflip — Fanatical → Eneba Scanner (No Playwright)")
 st.caption("Builds a fresh watchlist (<= max buy) then scans for edge. HTTP-only (requests + bs4).")
-
 
 # =========================
 # Session state
@@ -54,7 +52,6 @@ def run_keyflip(argv: list[str]) -> tuple[int, str]:
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
             rv = keyflip_main(argv)
-        # Be tolerant: many "main" funcs return None on success
         code = int(rv) if rv is not None else 0
     except SystemExit as e:
         code = int(e.code) if isinstance(e.code, int) else 1
@@ -65,15 +62,8 @@ def run_keyflip(argv: list[str]) -> tuple[int, str]:
 
 
 def safe_read_csv(path: Path) -> pd.DataFrame | None:
-    """
-    Read CSV safely for Streamlit:
-    - returns None if file missing or empty
-    - shows an error (but doesn't crash the app) on parse problems
-    """
     try:
-        if not path.exists():
-            return None
-        if path.stat().st_size == 0:
+        if not path.exists() or path.stat().st_size == 0:
             return None
         return pd.read_csv(path).fillna("")
     except Exception as e:
@@ -85,8 +75,7 @@ def file_status_line(p: Path) -> str:
     try:
         if not p.exists():
             return f"- {p.name}: —  ({p.resolve()})"
-        size = p.stat().st_size
-        return f"- {p.name}: ✅  ({p.resolve()})  • {size:,} bytes"
+        return f"- {p.name}: ✅  ({p.resolve()})  • {p.stat().st_size:,} bytes"
     except Exception:
         return f"- {p.name}: ✅  ({p})"
 
@@ -109,7 +98,10 @@ class Settings:
 
 
 def build_args_common(s: Settings) -> list[str]:
+    # IMPORTANT: always pass --root so CLI writes CSVs to the same folder as Streamlit
     args = [
+        "--root",
+        str(ROOT),
         "--max-buy",
         str(float(s.max_buy)),
         "--watchlist-target",
@@ -141,10 +133,6 @@ def build_args_common(s: Settings) -> list[str]:
 
 
 def run_action(label: str, argv: list[str]) -> None:
-    """
-    Runs keyflip with a 'running' lock so users can't spam-click actions.
-    Stores last output in session_state and shows it.
-    """
     st.session_state.running = True
     try:
         with st.spinner(f"Running {label}…"):
@@ -158,8 +146,10 @@ def run_action(label: str, argv: list[str]) -> None:
 def show_last_run() -> None:
     if st.session_state.last_exit_code is None:
         return
+
     st.subheader("Run output")
     st.code(st.session_state.last_output or "(no output)")
+
     code = st.session_state.last_exit_code
     if code != 0:
         st.error(f"Exited with code {code}")
@@ -194,7 +184,6 @@ with st.sidebar:
 
     st.divider()
 
-    # Convenience settings object
     settings = Settings(
         max_buy=float(max_buy),
         watchlist_target=int(watchlist_target),
@@ -211,12 +200,11 @@ with st.sidebar:
         run_budget=float(run_budget),
     )
 
-    # Maintenance buttons
     colA, colB = st.columns(2)
     clear_cache = colA.button("Clear cache", disabled=st.session_state.running, use_container_width=True)
     clear_recent = colB.button("Clear recent", disabled=st.session_state.running, use_container_width=True)
 
-# Handle maintenance actions immediately
+# Handle maintenance
 if clear_cache:
     argv = build_args_common(settings) + ["--clear-cache"]
     run_action("clear-cache", argv)
@@ -231,14 +219,16 @@ if clear_recent:
 
 
 # =========================
-# Main action buttons
+# Main action buttons (with diagnostics)
 # =========================
-c1, c2, c3 = st.columns(3)
-do_play = c1.button("▶ PLAY (build + scan)", use_container_width=True, disabled=st.session_state.running)
-do_build = c2.button("🔨 Build watchlist", use_container_width=True, disabled=st.session_state.running)
-do_scan = c3.button("🔍 Scan watchlist", use_container_width=True, disabled=st.session_state.running)
+c1, c2, c3, c4, c5 = st.columns(5)
+do_play = c1.button("▶ PLAY", use_container_width=True, disabled=st.session_state.running)
+do_build = c2.button("🔨 Build", use_container_width=True, disabled=st.session_state.running)
+do_scan = c3.button("🔍 Scan", use_container_width=True, disabled=st.session_state.running)
+do_diag_h = c4.button("🧪 Harvest diag", use_container_width=True, disabled=st.session_state.running)
+do_diag_p = c5.button("🧪 Price diag", use_container_width=True, disabled=st.session_state.running)
 
-if do_play or do_build or do_scan:
+if do_play or do_build or do_scan or do_diag_h or do_diag_p:
     argv = build_args_common(settings)
     if do_play:
         argv += ["--play"]
@@ -246,19 +236,21 @@ if do_play or do_build or do_scan:
     elif do_build:
         argv += ["--build"]
         run_action("BUILD", argv)
-    else:
+    elif do_scan:
         argv += ["--scan"]
         run_action("SCAN", argv)
+    elif do_diag_h:
+        argv += ["--diag-harvest"]
+        run_action("DIAG-HARVEST", argv)
+    elif do_diag_p:
+        argv += ["--diag-price", "5"]
+        run_action("DIAG-PRICE", argv)
 
 show_last_run()
 
 st.divider()
 st.subheader("Results")
 
-
-# =========================
-# Results tabs
-# =========================
 tabs = st.tabs(["passes.csv", "latest scan", "watchlist.csv", "files"])
 
 with tabs[0]:
