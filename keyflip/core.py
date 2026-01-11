@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -43,6 +44,7 @@ class RunConfig:
 
 WATCHLIST_COLS = ["title", "buy_url", "buy_price_gbp", "buy_notes"]
 SCANS_COLS = [
+    "batch_id",
     "timestamp",
     "title",
     "buy_price",
@@ -60,13 +62,19 @@ SCANS_COLS = [
 ]
 
 
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
+# ---------- small helpers ----------
+
+def _now_iso_ms() -> str:
+    # stable, sortable, includes milliseconds
+    t = time.time()
+    lt = time.localtime(t)
+    ms = int((t - int(t)) * 1000)
+    return time.strftime("%Y-%m-%d %H:%M:%S", lt) + f".{ms:03d}"
 
 
 def _dedupe(seq: List[str]) -> List[str]:
     seen = set()
-    out = []
+    out: List[str] = []
     for x in seq:
         if x not in seen:
             seen.add(x)
@@ -78,48 +86,139 @@ def _buy_key(url: str) -> str:
     return url.split("?")[0].rstrip("/").lower()
 
 
-def get_cached_or_fetch_buy(cache: PriceCache, url: str) -> Tuple[Optional[float], str]:
+def _join_notes(*parts: str) -> str:
+    clean = [p.strip() for p in parts if p and str(p).strip()]
+    return "; ".join(clean)
+
+
+def _remaining_ok(start: float, budget_s: float) -> bool:
+    return (budget_s <= 0) or ((time.time() - start) <= budget_s)
+
+
+# ---------- cache wrappers (no double fetch) ----------
+
+def get_cached_or_fetch_buy_full(
+    cfg: RunConfig,
+    cache: PriceCache,
+    url: str,
+) -> Tuple[Optional[str], Optional[float], str]:
+    """
+    Returns (title, price_gbp, notes). Title may be None.
+    Uses cache when possible.
+    """
     c = cache.get(url)
     if c is not None:
         if c.ok and c.value is not None:
-            return c.value, f"cache: {c.notes}"
+            # cache doesn't store title (based on your current design),
+            # so we return None for title when using cache.
+            return None, float(c.value), f"cache: {c.notes}"
+        if not c.ok:
+            return None, None, f"cache-fail: {c.notes}"
+
+    title, price, notes = read_title_and_price_gbp(url)
+    if price is None:
+        ttl = int(cfg.cache_fail_ttl_s) if cfg.cache_fail_ttl_s > 0 else int(PRICE_FAIL_TTL_S)
+        cache.set(url, None, "GBP", ttl_s=ttl, ok=False, notes=notes)
+        return title, None, notes
+
+    cache.set(url, float(price), "GBP", ttl_s=int(PRICE_OK_TTL_S), ok=True, notes=notes)
+    return title, float(price), notes
+
+
+def get_cached_or_fetch_buy(
+    cache: PriceCache,
+    url: str,
+) -> Tuple[Optional[float], str]:
+    """
+    Backwards-compatible wrapper: returns (price, notes).
+    NOTE: does NOT use cfg.cache_fail_ttl_s because it doesn't have cfg.
+    Prefer get_cached_or_fetch_buy_full internally.
+    """
+    c = cache.get(url)
+    if c is not None:
+        if c.ok and c.value is not None:
+            return float(c.value), f"cache: {c.notes}"
         if not c.ok:
             return None, f"cache-fail: {c.notes}"
 
     title, price, notes = read_title_and_price_gbp(url)
     if price is None:
-        cache.set(url, None, "GBP", ttl_s=PRICE_FAIL_TTL_S, ok=False, notes=notes)
+        cache.set(url, None, "GBP", ttl_s=int(PRICE_FAIL_TTL_S), ok=False, notes=notes)
         return None, notes
 
-    cache.set(url, float(price), "GBP", ttl_s=PRICE_OK_TTL_S, ok=True, notes=notes)
+    cache.set(url, float(price), "GBP", ttl_s=int(PRICE_OK_TTL_S), ok=True, notes=notes)
     return float(price), notes
 
 
-def get_cached_or_fetch_sell(cache: PriceCache, product_url: str) -> Tuple[Optional[float], str]:
+def get_cached_or_fetch_sell_full(
+    cfg: RunConfig,
+    cache: PriceCache,
+    product_url: str,
+) -> Tuple[Optional[float], str]:
+    """
+    Returns (price_gbp, notes). Uses cfg.cache_fail_ttl_s for fail caching.
+    """
     c = cache.get(product_url)
     if c is not None:
         if c.ok and c.value is not None:
-            return c.value, f"cache: {c.notes}"
+            return float(c.value), f"cache: {c.notes}"
         if not c.ok:
             return None, f"cache-fail: {c.notes}"
 
     price, notes = read_price_gbp(product_url)
     if price is None:
-        cache.set(product_url, None, "GBP", ttl_s=PRICE_FAIL_TTL_S, ok=False, notes=notes)
+        ttl = int(cfg.cache_fail_ttl_s) if cfg.cache_fail_ttl_s > 0 else int(PRICE_FAIL_TTL_S)
+        cache.set(product_url, None, "GBP", ttl_s=ttl, ok=False, notes=notes)
         return None, notes
 
-    cache.set(product_url, float(price), "GBP", ttl_s=PRICE_OK_TTL_S, ok=True, notes=notes)
+    cache.set(product_url, float(price), "GBP", ttl_s=int(PRICE_OK_TTL_S), ok=True, notes=notes)
     return float(price), notes
 
+
+def get_cached_or_fetch_sell(
+    cache: PriceCache,
+    product_url: str,
+) -> Tuple[Optional[float], str]:
+    """
+    Backwards-compatible wrapper.
+    Prefer get_cached_or_fetch_sell_full internally.
+    """
+    c = cache.get(product_url)
+    if c is not None:
+        if c.ok and c.value is not None:
+            return float(c.value), f"cache: {c.notes}"
+        if not c.ok:
+            return None, f"cache-fail: {c.notes}"
+
+    price, notes = read_price_gbp(product_url)
+    if price is None:
+        cache.set(product_url, None, "GBP", ttl_s=int(PRICE_FAIL_TTL_S), ok=False, notes=notes)
+        return None, notes
+
+    cache.set(product_url, float(price), "GBP", ttl_s=int(PRICE_OK_TTL_S), ok=True, notes=notes)
+    return float(price), notes
+
+
+# ---------- build ----------
 
 def build_watchlist(cfg: RunConfig, cache: PriceCache, out_watchlist: Path) -> pd.DataFrame:
     """
     Harvest Fanatical links -> verify buy <= max_buy -> write watchlist.csv.
     IMPORTANT: Always writes headers even if 0 rows.
+
+    Fixes vs your prior version:
+    - No double-fetch for title/price on kept rows (uses *_full)
+    - verify_limit is only spent on items we actually attempt to fetch/verify
+      (recency-skipped items do NOT consume verify_limit)
+    - optional per-item time budget (best-effort; scraper should also timeout internally)
+    - uses cfg.cache_fail_ttl_s for fail cache
     """
     start = time.time()
+
     all_links: List[str] = []
     for _, src_url in FANATICAL_SOURCES.items():
+        if not _remaining_ok(start, cfg.run_budget_s):
+            break
         all_links.extend(harvest_game_links(src_url, pages=cfg.pages_per_source))
 
     all_links = _dedupe(all_links)
@@ -128,36 +227,43 @@ def build_watchlist(cfg: RunConfig, cache: PriceCache, out_watchlist: Path) -> p
     pool = all_links[: cfg.verify_candidates] if cfg.verify_candidates > 0 else all_links
 
     verified_rows: List[Dict[str, str]] = []
-    checked = 0
+    attempted = 0
     kept = 0
 
     hard_cap = cfg.verify_safety_cap if cfg.verify_safety_cap > 0 else 999999
     verify_limit = cfg.verify_limit if cfg.verify_limit > 0 else 999999
-    target = cfg.watchlist_target
+    target = cfg.watchlist_target if cfg.watchlist_target > 0 else 999999
 
     for url in pool:
-        if cfg.run_budget_s > 0 and (time.time() - start) > cfg.run_budget_s:
+        if not _remaining_ok(start, cfg.run_budget_s):
             break
-        if checked >= verify_limit or checked >= hard_cap or kept >= target:
+        if attempted >= verify_limit or attempted >= hard_cap or kept >= target:
             break
 
-        checked += 1
         key = _buy_key(url)
         if cache.is_recent(key, cfg.avoid_recent_days):
+            # do NOT spend verify budget on recency skips
             continue
 
-        buy_price, buy_notes = get_cached_or_fetch_buy(cache, url)
+        attempted += 1
+        t0 = time.time()
+
+        title, buy_price, buy_notes = get_cached_or_fetch_buy_full(cfg, cache, url)
+
+        # best-effort per-item budget (skip if we already blew it)
+        if cfg.item_budget_s > 0 and (time.time() - t0) > cfg.item_budget_s:
+            continue
+
         if buy_price is None:
             continue
         if buy_price > cfg.max_buy_gbp:
             continue
 
-        title, _, _ = read_title_and_price_gbp(url)
-        title = (title or "").strip() or url.rsplit("/", 1)[-1]
+        clean_title = (title or "").strip() or url.rsplit("/", 1)[-1]
 
         verified_rows.append(
             {
-                "title": title,
+                "title": clean_title,
                 "buy_url": url,
                 "buy_price_gbp": f"{buy_price:.2f}",
                 "buy_notes": buy_notes,
@@ -166,11 +272,12 @@ def build_watchlist(cfg: RunConfig, cache: PriceCache, out_watchlist: Path) -> p
         kept += 1
         cache.mark_recent(key)
 
-    # ALWAYS include columns so pandas writes headers even when empty
     df = pd.DataFrame(verified_rows, columns=WATCHLIST_COLS)
     df.to_csv(out_watchlist, index=False)
     return df
 
+
+# ---------- read/ensure files ----------
 
 def _read_watchlist_safe(watchlist_csv: Path) -> pd.DataFrame:
     """
@@ -182,7 +289,6 @@ def _read_watchlist_safe(watchlist_csv: Path) -> pd.DataFrame:
 
     try:
         df = pd.read_csv(watchlist_csv).fillna("")
-        # if file exists but has wrong columns, normalize
         for c in WATCHLIST_COLS:
             if c not in df.columns:
                 df[c] = ""
@@ -200,7 +306,6 @@ def _ensure_scans_files(scans_csv: Path, passes_csv: Path) -> None:
     if not scans_csv.exists():
         empty_scans.to_csv(scans_csv, index=False)
     else:
-        # if scans exists but is invalid/empty without headers, rewrite with headers
         try:
             pd.read_csv(scans_csv)
         except Exception:
@@ -215,6 +320,8 @@ def _ensure_scans_files(scans_csv: Path, passes_csv: Path) -> None:
             empty_scans.to_csv(passes_csv, index=False)
 
 
+# ---------- scan ----------
+
 def scan_watchlist(
     cfg: RunConfig,
     cache: PriceCache,
@@ -225,23 +332,32 @@ def scan_watchlist(
     """
     Read watchlist.csv -> resolve Eneba -> compute edge -> append scans.csv and write passes.csv (latest batch).
     Gracefully handles empty watchlist (no crash).
+
+    Fixes vs your prior version:
+    - Adds stable batch_id (passes.csv truly = this run)
+    - Uses millisecond timestamps
+    - Uses cfg.cache_fail_ttl_s for sell fail caching
+    - Optional per-item budget (best-effort)
+    - Short-circuits if buy_price is missing (won't waste time resolving Eneba)
     """
     w = _read_watchlist_safe(watchlist_csv)
-
-    # make sure output files exist with headers for the UI
     _ensure_scans_files(scans_csv, passes_csv)
 
     if w.empty:
-        # Return empty batch (with headers) and do nothing else
         return pd.DataFrame(columns=SCANS_COLS)
+
+    # Optional: shuffle scan order so “play” feels less repetitive
+    # (comment out if you want stable order)
+    w = w.sample(frac=1.0, random_state=None).reset_index(drop=True)
 
     rows_out: List[Dict[str, object]] = []
     start = time.time()
     scanned = 0
     limit = cfg.scan_limit if cfg.scan_limit > 0 else 999999
+    batch_id = uuid.uuid4().hex[:12]
 
     for _, row in w.iterrows():
-        if cfg.run_budget_s > 0 and (time.time() - start) > cfg.run_budget_s:
+        if not _remaining_ok(start, cfg.run_budget_s):
             break
         if scanned >= limit:
             break
@@ -254,16 +370,67 @@ def scan_watchlist(
         scanned += 1
         t0 = time.time()
 
-        buy_price, buy_notes = get_cached_or_fetch_buy(cache, buy_url)
+        # buy
+        _, buy_price, buy_notes = get_cached_or_fetch_buy_full(cfg, cache, buy_url)
 
-        # resolve eneba product
+        if cfg.item_budget_s > 0 and (time.time() - t0) > cfg.item_budget_s:
+            continue
+
+        # If buy is missing we cannot compute anything useful; skip without hitting Eneba
+        if buy_price is None:
+            rows_out.append(
+                {
+                    "batch_id": batch_id,
+                    "timestamp": _now_iso_ms(),
+                    "title": title,
+                    "buy_price": None,
+                    "market_price": None,
+                    "market_after_fee": None,
+                    "buffer": None,
+                    "edge": None,
+                    "edge_pct": None,
+                    "passes": False,
+                    "buy_url": buy_url,
+                    "market_url": make_store_search_url(title),
+                    "buy_notes": buy_notes,
+                    "market_notes": "skipped: buy price unavailable",
+                    "elapsed_s": round(time.time() - t0, 2),
+                }
+            )
+            continue
+
+        # eneba resolve
         store_url = make_store_search_url(title)
         prod_url, resolve_notes = resolve_product_url_from_store(store_url)
 
-        sell_price = None
+        sell_price: Optional[float] = None
         sell_notes = ""
+
+        if cfg.item_budget_s > 0 and (time.time() - t0) > cfg.item_budget_s:
+            # time’s up for this item; record partial
+            rows_out.append(
+                {
+                    "batch_id": batch_id,
+                    "timestamp": _now_iso_ms(),
+                    "title": title,
+                    "buy_price": buy_price,
+                    "market_price": None,
+                    "market_after_fee": None,
+                    "buffer": None,
+                    "edge": None,
+                    "edge_pct": None,
+                    "passes": False,
+                    "buy_url": buy_url,
+                    "market_url": prod_url or store_url,
+                    "buy_notes": buy_notes,
+                    "market_notes": _join_notes(resolve_notes, "skipped: item budget exceeded"),
+                    "elapsed_s": round(time.time() - t0, 2),
+                }
+            )
+            continue
+
         if prod_url:
-            sell_price, sell_notes = get_cached_or_fetch_sell(cache, prod_url)
+            sell_price, sell_notes = get_cached_or_fetch_sell_full(cfg, cache, prod_url)
         else:
             sell_notes = resolve_notes
 
@@ -278,13 +445,14 @@ def scan_watchlist(
             market_after_fee = sell_price * (1.0 - SELL_FEE_PCT)
             buffer = BUFFER_FIXED_GBP + (BUFFER_PCT_OF_BUY * buy_price)
             profit = market_after_fee - buy_price - buffer
-            roi = (profit / buy_price) if buy_price and buy_price > 0 else None
+            roi = (profit / buy_price) if buy_price > 0 else None
             if profit is not None and roi is not None:
                 passes = (profit >= MIN_PROFIT_GBP) and (roi >= MIN_ROI)
 
         rows_out.append(
             {
-                "timestamp": _now_iso(),
+                "batch_id": batch_id,
+                "timestamp": _now_iso_ms(),
                 "title": title,
                 "buy_price": buy_price,
                 "market_price": sell_price,
@@ -296,14 +464,14 @@ def scan_watchlist(
                 "buy_url": buy_url,
                 "market_url": prod_url or store_url,
                 "buy_notes": buy_notes,
-                "market_notes": f"{resolve_notes}; {sell_notes}".strip("; "),
+                "market_notes": _join_notes(resolve_notes, sell_notes),
                 "elapsed_s": round(time.time() - t0, 2),
             }
         )
 
     batch = pd.DataFrame(rows_out, columns=SCANS_COLS)
 
-    # append batch to scans.csv (but keep scans.csv valid if it was empty/invalid)
+    # append batch to scans.csv safely
     try:
         old = pd.read_csv(scans_csv).fillna("")
         df_all = pd.concat([old, batch], ignore_index=True)
@@ -312,11 +480,9 @@ def scan_watchlist(
 
     df_all.to_csv(scans_csv, index=False)
 
-    # passes.csv = only latest batch passes
+    # passes.csv = only this run's passes (uses batch_id, not timestamp hacks)
     if not batch.empty:
-        latest_ts = batch["timestamp"].iloc[-1]
-        latest = batch[batch["timestamp"] == latest_ts].copy()
-        df_pass = latest[latest["passes"] == True].copy()
+        df_pass = batch[batch["passes"] == True].copy()
     else:
         df_pass = pd.DataFrame(columns=SCANS_COLS)
 
