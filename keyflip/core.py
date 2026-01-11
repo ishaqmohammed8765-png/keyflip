@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import random
 import time
 from dataclasses import dataclass
@@ -40,6 +39,25 @@ class RunConfig:
     item_budget_s: float
     run_budget_s: float
     cache_fail_ttl_s: int
+
+
+WATCHLIST_COLS = ["title", "buy_url", "buy_price_gbp", "buy_notes"]
+SCANS_COLS = [
+    "timestamp",
+    "title",
+    "buy_price",
+    "market_price",
+    "market_after_fee",
+    "buffer",
+    "edge",
+    "edge_pct",
+    "passes",
+    "buy_url",
+    "market_url",
+    "buy_notes",
+    "market_notes",
+    "elapsed_s",
+]
 
 
 def _now_iso() -> str:
@@ -95,36 +113,32 @@ def get_cached_or_fetch_sell(cache: PriceCache, product_url: str) -> Tuple[Optio
 
 
 def build_watchlist(cfg: RunConfig, cache: PriceCache, out_watchlist: Path) -> pd.DataFrame:
+    """
+    Harvest Fanatical links -> verify buy <= max_buy -> write watchlist.csv.
+    IMPORTANT: Always writes headers even if 0 rows.
+    """
     start = time.time()
     all_links: List[str] = []
-    for name, url in FANATICAL_SOURCES.items():
-        links = harvest_game_links(url, pages=cfg.pages_per_source)
-        all_links.extend(links)
+    for _, src_url in FANATICAL_SOURCES.items():
+        all_links.extend(harvest_game_links(src_url, pages=cfg.pages_per_source))
 
     all_links = _dedupe(all_links)
     random.shuffle(all_links)
 
-    # limit candidates (pre-verification pool)
-    pool = all_links[: max(cfg.verify_candidates, 0)] if cfg.verify_candidates > 0 else all_links
+    pool = all_links[: cfg.verify_candidates] if cfg.verify_candidates > 0 else all_links
 
     verified_rows: List[Dict[str, str]] = []
     checked = 0
     kept = 0
 
-    # enforce safety cap even if verify_limit = 0
     hard_cap = cfg.verify_safety_cap if cfg.verify_safety_cap > 0 else 999999
-
-    target = cfg.watchlist_target
     verify_limit = cfg.verify_limit if cfg.verify_limit > 0 else 999999
+    target = cfg.watchlist_target
 
     for url in pool:
         if cfg.run_budget_s > 0 and (time.time() - start) > cfg.run_budget_s:
             break
-        if checked >= verify_limit:
-            break
-        if checked >= hard_cap:
-            break
-        if kept >= target:
+        if checked >= verify_limit or checked >= hard_cap or kept >= target:
             break
 
         checked += 1
@@ -138,9 +152,8 @@ def build_watchlist(cfg: RunConfig, cache: PriceCache, out_watchlist: Path) -> p
         if buy_price > cfg.max_buy_gbp:
             continue
 
-        # fetch title fresh (cheap, already fetched in price read, but ok)
         title, _, _ = read_title_and_price_gbp(url)
-        title = title or url.rsplit("/", 1)[-1]
+        title = (title or "").strip() or url.rsplit("/", 1)[-1]
 
         verified_rows.append(
             {
@@ -153,18 +166,76 @@ def build_watchlist(cfg: RunConfig, cache: PriceCache, out_watchlist: Path) -> p
         kept += 1
         cache.mark_recent(key)
 
-    df = pd.DataFrame(verified_rows)
+    # ALWAYS include columns so pandas writes headers even when empty
+    df = pd.DataFrame(verified_rows, columns=WATCHLIST_COLS)
     df.to_csv(out_watchlist, index=False)
     return df
 
 
-def scan_watchlist(cfg: RunConfig, cache: PriceCache, watchlist_csv: Path, scans_csv: Path, passes_csv: Path) -> pd.DataFrame:
+def _read_watchlist_safe(watchlist_csv: Path) -> pd.DataFrame:
+    """
+    Reads watchlist.csv safely (handles totally empty file).
+    Always returns a DF with expected columns.
+    """
     if not watchlist_csv.exists():
-        raise FileNotFoundError(f"Missing {watchlist_csv}. Run --build first.")
+        return pd.DataFrame(columns=WATCHLIST_COLS)
 
-    w = pd.read_csv(watchlist_csv).fillna("")
+    try:
+        df = pd.read_csv(watchlist_csv).fillna("")
+        # if file exists but has wrong columns, normalize
+        for c in WATCHLIST_COLS:
+            if c not in df.columns:
+                df[c] = ""
+        return df[WATCHLIST_COLS]
+    except Exception:
+        return pd.DataFrame(columns=WATCHLIST_COLS)
+
+
+def _ensure_scans_files(scans_csv: Path, passes_csv: Path) -> None:
+    """
+    Ensure scans.csv and passes.csv exist with headers.
+    """
+    empty_scans = pd.DataFrame(columns=SCANS_COLS)
+
+    if not scans_csv.exists():
+        empty_scans.to_csv(scans_csv, index=False)
+    else:
+        # if scans exists but is invalid/empty without headers, rewrite with headers
+        try:
+            pd.read_csv(scans_csv)
+        except Exception:
+            empty_scans.to_csv(scans_csv, index=False)
+
+    if not passes_csv.exists():
+        empty_scans.to_csv(passes_csv, index=False)
+    else:
+        try:
+            pd.read_csv(passes_csv)
+        except Exception:
+            empty_scans.to_csv(passes_csv, index=False)
+
+
+def scan_watchlist(
+    cfg: RunConfig,
+    cache: PriceCache,
+    watchlist_csv: Path,
+    scans_csv: Path,
+    passes_csv: Path,
+) -> pd.DataFrame:
+    """
+    Read watchlist.csv -> resolve Eneba -> compute edge -> append scans.csv and write passes.csv (latest batch).
+    Gracefully handles empty watchlist (no crash).
+    """
+    w = _read_watchlist_safe(watchlist_csv)
+
+    # make sure output files exist with headers for the UI
+    _ensure_scans_files(scans_csv, passes_csv)
+
+    if w.empty:
+        # Return empty batch (with headers) and do nothing else
+        return pd.DataFrame(columns=SCANS_COLS)
+
     rows_out: List[Dict[str, object]] = []
-
     start = time.time()
     scanned = 0
     limit = cfg.scan_limit if cfg.scan_limit > 0 else 999999
@@ -207,8 +278,7 @@ def scan_watchlist(cfg: RunConfig, cache: PriceCache, watchlist_csv: Path, scans
             market_after_fee = sell_price * (1.0 - SELL_FEE_PCT)
             buffer = BUFFER_FIXED_GBP + (BUFFER_PCT_OF_BUY * buy_price)
             profit = market_after_fee - buy_price - buffer
-            roi = profit / buy_price if buy_price > 0 else None
-
+            roi = (profit / buy_price) if buy_price and buy_price > 0 else None
             if profit is not None and roi is not None:
                 passes = (profit >= MIN_PROFIT_GBP) and (roi >= MIN_ROI)
 
@@ -231,25 +301,24 @@ def scan_watchlist(cfg: RunConfig, cache: PriceCache, watchlist_csv: Path, scans
             }
         )
 
-    df = pd.DataFrame(rows_out)
+    batch = pd.DataFrame(rows_out, columns=SCANS_COLS)
 
-    # append to scans.csv
-    if scans_csv.exists():
+    # append batch to scans.csv (but keep scans.csv valid if it was empty/invalid)
+    try:
         old = pd.read_csv(scans_csv).fillna("")
-        df_all = pd.concat([old, df], ignore_index=True)
-    else:
-        df_all = df
+        df_all = pd.concat([old, batch], ignore_index=True)
+    except Exception:
+        df_all = batch
 
     df_all.to_csv(scans_csv, index=False)
 
-    # write passes.csv (latest batch only)
-    latest_ts = df["timestamp"].iloc[-1] if not df.empty else None
-    if latest_ts:
-        df_latest = df[df["timestamp"] == latest_ts].copy()
+    # passes.csv = only latest batch passes
+    if not batch.empty:
+        latest_ts = batch["timestamp"].iloc[-1]
+        latest = batch[batch["timestamp"] == latest_ts].copy()
+        df_pass = latest[latest["passes"] == True].copy()
     else:
-        df_latest = df.copy()
+        df_pass = pd.DataFrame(columns=SCANS_COLS)
 
-    df_pass = df_latest[df_latest["passes"] == True].copy()
     df_pass.to_csv(passes_csv, index=False)
-    return df
-
+    return batch
