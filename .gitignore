@@ -1,1 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+watchlist.csv
+scans.csv
+passes.csv
+price_cache.sqlite
+
+.env
+.DS_Store
 
