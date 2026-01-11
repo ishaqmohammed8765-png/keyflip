@@ -45,6 +45,11 @@ _BLOCK_PATTERNS = (
 # Accept optional trailing slash.
 _GAME_PATH_RE = re.compile(r"^/en/game/[^/?#]+/?$")
 
+# CheapShark (Fanatical is storeID=15)  :contentReference[oaicite:1]{index=1}
+_CHEAPSHARK_BASE = "https://www.cheapshark.com/api/1.0"
+_CHEAPSHARK_STORE_FANATICAL = "15"
+_CHEAPSHARK_REDIRECT = "https://www.cheapshark.com/redirect?dealID="
+
 
 @dataclass(frozen=True)
 class FanaticalItem:
@@ -70,7 +75,7 @@ def _make_session() -> requests.Session:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
-            "Referer": _BASE + "/",  # mild help sometimes
+            "Referer": _BASE + "/",
             "Connection": "keep-alive",
         }
     )
@@ -99,6 +104,7 @@ def _make_session() -> requests.Session:
     return s
 
 
+# Reuse one session for pooling + retry policy
 _SESS = _make_session()
 
 
@@ -131,98 +137,69 @@ def _canonicalize_game_url(base_url: str, href: str) -> Optional[str]:
     if not _GAME_PATH_RE.match(path):
         return None
 
-    # Canonicalize: drop query/fragment, drop trailing slash
     return f"{p.scheme}://{host}{path}".rstrip("/")
 
 
-# ---------------------------
-# Fallback link extractors
-# ---------------------------
-def _extract_next_data_json(html: str) -> Optional[dict]:
-    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
-    if not m:
-        return None
-    raw = m.group(1).strip()
+# -------------------------------------------------------------------
+# NEW: CheapShark-based harvesting (works when Fanatical listings are JS)
+# -------------------------------------------------------------------
+def _cheapshark_fetch_deals(page_number: int, page_size: int) -> List[dict]:
+    """
+    Fetch CheapShark deals for Fanatical. Returns list of deal dicts.
+    Note: CheapShark prices are USD; we only use dealID -> redirect -> Fanatical URL.
+    """
+    url = f"{_CHEAPSHARK_BASE}/deals"
+    params = {
+        "storeID": _CHEAPSHARK_STORE_FANATICAL,
+        "pageNumber": max(0, int(page_number)),
+        "pageSize": max(1, int(page_size)),
+    }
+    r = _SESS.get(url, params=params, timeout=_timeout())
+    if r.status_code >= 400:
+        log.warning("CheapShark deals non-OK (HTTP %s) url=%s", r.status_code, r.url)
+        return []
     try:
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else None
+        data = r.json()
+        return data if isinstance(data, list) else []
     except Exception:
+        log.warning("CheapShark deals JSON parse failed url=%s", r.url)
+        return []
+
+
+def _resolve_cheapshark_dealid_to_fanatical_url(deal_id: str) -> Optional[str]:
+    """
+    CheapShark gives dealID. Their /redirect?dealID=... 302s to the store product page.
+    We follow redirects and then canonicalize to Fanatical /en/game/<slug>.
+    """
+    deal_id = (deal_id or "").strip()
+    if not deal_id:
         return None
 
+    redir = _CHEAPSHARK_REDIRECT + deal_id
+    try:
+        # follow redirects to final store URL
+        r = _SESS.get(redir, timeout=_timeout(), allow_redirects=True)
+    except requests.RequestException:
+        return None
 
-def _strings_in(obj: Any) -> Iterable[str]:
-    """Yield all strings in a nested dict/list structure."""
-    stack = [obj]
-    while stack:
-        cur = stack.pop()
-        if isinstance(cur, str):
-            yield cur
-        elif isinstance(cur, dict):
-            stack.extend(cur.values())
-        elif isinstance(cur, list):
-            stack.extend(cur)
+    final = r.url or ""
+    # Some redirects may fail or go elsewhere; canonicalize will validate host + /en/game/
+    return _canonicalize_game_url(final, final)
 
 
-def _extract_game_links_from_json_like(html: str, base_url: str) -> List[str]:
-    """
-    Extract /en/game/... strings from:
-    - __NEXT_DATA__
-    - <script type="application/json"> blobs
-    """
-    out: List[str] = []
-    seen: set[str] = set()
-
-    data = _extract_next_data_json(html)
-    if data:
-        for s in _strings_in(data):
-            if "/en/game/" not in s:
-                continue
-            canon = _canonicalize_game_url(base_url, s)
-            if canon and canon not in seen:
-                seen.add(canon)
-                out.append(canon)
-
-    for blob in re.findall(r'<script[^>]+type="application/json"[^>]*>(.*?)</script>', html, re.S):
-        for m in re.finditer(r"/en/game/[^\"\\?#]+", blob):
-            canon = _canonicalize_game_url(base_url, m.group(0))
-            if canon and canon not in seen:
-                seen.add(canon)
-                out.append(canon)
-
-    return out
-
-
-def _extract_game_links_by_regex(html: str, base_url: str) -> List[str]:
-    """Last resort: scan raw HTML for /en/game/<slug> strings."""
-    out: List[str] = []
-    seen: set[str] = set()
-
-    for m in re.finditer(r"/en/game/[^\"\\?#]+", html):
-        canon = _canonicalize_game_url(base_url, m.group(0))
-        if canon and canon not in seen:
-            seen.add(canon)
-            out.append(canon)
-
-    return out
-
-
-# ---------------------------
-# Public API
-# ---------------------------
 def harvest_game_links(
     source_url: str,
     pages: int,
     *,
     max_links: int = 500,
-    sleep_range_s: Tuple[float, float] = (0.2, 0.8),
+    sleep_range_s: Tuple[float, float] = (0.2, 0.6),
 ) -> List[str]:
     """
-    Best-effort harvest:
-    1) Scan anchors for /en/game/<slug>
-    2) If 0 accepted, fallback to __NEXT_DATA__/json blobs
-    3) If still 0, last-resort regex scan
+    Fanatical category pages are JS-rendered in many environments (your logs confirm this),
+    so we harvest links via CheapShark -> redirect -> Fanatical game pages.
 
-    Returns deduped canonical URLs (no querystrings).
+    `source_url` is ignored for harvesting (kept for API compatibility with your core),
+    `pages` maps to CheapShark pageNumber iterations.
     """
     pages = max(1, int(pages))
     max_links = max(1, int(max_links))
@@ -230,113 +207,43 @@ def harvest_game_links(
     out: List[str] = []
     seen: set[str] = set()
 
-    for page in range(1, pages + 1):
-        url = source_url
-        if page > 1:
-            joiner = "&" if "?" in url else "?"
-            url = f"{url}{joiner}page={page}"
+    # CheapShark returns up to 60 deals/page by default; we can keep this modest.
+    page_size = 60
 
-        try:
-            r = _SESS.get(url, timeout=_timeout())
-        except requests.RequestException as e:
-            log.warning("Fanatical harvest HTTP error page=%s url=%s err=%s", page, url, type(e).__name__)
-            continue
+    for page in range(0, pages):
+        deals = _cheapshark_fetch_deals(page_number=page, page_size=page_size)
+        log.info("CheapShark fetched page=%d deals=%d (Fanatical storeID=%s)", page, len(deals), _CHEAPSHARK_STORE_FANATICAL)
 
-        ct = (r.headers.get("Content-Type") or "").lower()
-        log.info(
-            "Fanatical fetch page=%d status=%d bytes=%d ct=%s url=%s",
-            page,
-            r.status_code,
-            len(r.content),
-            ct,
-            url,
-        )
+        # Randomize so each run builds a different pool (helps “fresh watchlist”)
+        random.shuffle(deals)
 
-        if r.status_code in (403, 429):
-            log.warning("Fanatical harvest blocked/rate-limited (HTTP %s) url=%s", r.status_code, url)
-            break
-        if r.status_code >= 400:
-            log.warning("Fanatical harvest non-OK (HTTP %s) url=%s", r.status_code, url)
-            continue
-
-        html = r.text or ""
-        if _looks_blocked(html):
-            title = ""
-            try:
-                soup0 = _bs(html)
-                title = soup0.title.get_text(strip=True) if soup0.title else ""
-            except Exception:
-                pass
-            snippet = html[:250].replace("\n", " ")
-            log.error("Fanatical appears BLOCKED (200 OK). title=%r snippet=%r url=%s", title, snippet, url)
-            break
-
-        # 1) Anchor scan
-        soup = _bs(html)
-        anchors = soup.select("a[href]")
-        accepted = 0
-
-        for a in anchors:
-            canon = _canonicalize_game_url(url, a.get("href") or "")
-            if not canon or canon in seen:
+        for d in deals:
+            deal_id = str(d.get("dealID") or "").strip()
+            if not deal_id:
                 continue
-            seen.add(canon)
-            out.append(canon)
-            accepted += 1
+
+            fan_url = _resolve_cheapshark_dealid_to_fanatical_url(deal_id)
+            if not fan_url or fan_url in seen:
+                continue
+
+            seen.add(fan_url)
+            out.append(fan_url)
+
             if len(out) >= max_links:
-                log.info("Fanatical harvest hit max_links=%d", max_links)
+                log.info("Harvest hit max_links=%d", max_links)
                 return out
-
-        log.info("Fanatical parsed page=%d anchors=%d accepted_game_links=%d", page, len(anchors), accepted)
-
-        # 2) JSON/Next.js fallback (your case: anchors=12 accepted=0)
-        if accepted == 0:
-            from_json = _extract_game_links_from_json_like(html, url)
-            if from_json:
-                log.info("Fanatical fallback (__NEXT_DATA__/json) extracted=%d links on page=%d", len(from_json), page)
-                for canon in from_json:
-                    if canon in seen:
-                        continue
-                    seen.add(canon)
-                    out.append(canon)
-                    if len(out) >= max_links:
-                        log.info("Fanatical harvest hit max_links=%d (fallback)", max_links)
-                        return out
-            else:
-                from_rx = _extract_game_links_by_regex(html, url)
-                if from_rx:
-                    log.info("Fanatical fallback (regex) extracted=%d links on page=%d", len(from_rx), page)
-                    for canon in from_rx:
-                        if canon in seen:
-                            continue
-                        seen.add(canon)
-                        out.append(canon)
-                        if len(out) >= max_links:
-                            log.info("Fanatical harvest hit max_links=%d (regex fallback)", max_links)
-                            return out
-                else:
-                    has_next_data = ('id="__NEXT_DATA__"' in html)
-                    has_game_str = ("/en/game/" in html)
-                    log.warning(
-                        "Fanatical page has no harvestable game links (anchors=0, json=0, regex=0). "
-                        "has_next_data=%s has_/en/game/=%s page=%d url=%s",
-                        has_next_data,
-                        has_game_str,
-                        page,
-                        url,
-                    )
 
         lo, hi = sleep_range_s
         if hi > 0:
             time.sleep(random.uniform(max(0.0, lo), max(0.0, hi)))
 
-    log.info("Fanatical total harvested from %s: %d", source_url, len(out))
+    log.info("Total harvested Fanatical game URLs via CheapShark: %d", len(out))
     return out
 
 
-# ---------------------------
-# Title + price extraction
-# ---------------------------
+# -------------------------------------------------------------------
+# Title + price extraction (your existing logic)
+# -------------------------------------------------------------------
 def _clean_title(raw: str) -> str:
     t = (raw or "").strip()
     t = re.sub(r"\s*\|\s*Fanatical\s*$", "", t).strip()
