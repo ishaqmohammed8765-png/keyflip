@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
 from typing import Optional, Tuple
 from urllib.parse import quote_plus, urljoin
 
@@ -10,95 +10,185 @@ from bs4 import BeautifulSoup
 
 from .config import HTTP_TIMEOUT_S, UA
 
+_BASE = "https://www.eneba.com"
+
+# Reject obvious non-game / not-a-key / wrong product types
+_BAD_SLUG_WORDS = {
+    "gift-card", "wallet", "prepaid", "card",
+    "dlc", "season-pass", "seasonpass", "add-on", "addon",
+    "bundle", "soundtrack", "artbook", "expansion",
+}
 
 def _session() -> requests.Session:
     s = requests.Session()
-    s.headers.update({"User-Agent": UA, "Accept-Language": "en-GB,en;q=0.9"})
+    s.headers.update(
+        {
+            "User-Agent": UA,
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+    )
     return s
+
+# one shared session for connection pooling
+_SESS = _session()
 
 
 def make_store_search_url(title: str) -> str:
-    # matches your old pattern
     q = quote_plus(f"{title} steam key pc")
-    return f"https://www.eneba.com/gb/store?text={q}"
+    return f"{_BASE}/gb/store?text={q}"
 
 
-def resolve_product_url_from_store(store_url: str) -> Tuple[Optional[str], str]:
+def _score_candidate(href: str, title: str) -> int:
     """
-    Eneba store search often links to product pages:
-    https://www.eneba.com/gb/steam-...-pc-steam-key-global
-    We pick the first plausible product URL.
+    Heuristic scoring: higher is better.
     """
-    s = _session()
-    r = s.get(store_url, timeout=HTTP_TIMEOUT_S)
-    r.raise_for_status()
+    h = href.lower()
+    score = 0
+
+    # must be gb product page
+    if not h.startswith("/gb/"):
+        return -10
+
+    # strong positives
+    if "steam-key" in h:
+        score += 10
+    if "-pc-" in h or "pc" in h:
+        score += 6
+    if "steam" in h and "key" in h:
+        score += 3
+
+    # prefer global (optional – keep if you only want global)
+    if "global" in h:
+        score += 2
+
+    # penalize bad types
+    for w in _BAD_SLUG_WORDS:
+        if w in h:
+            score -= 50
+
+    # soft title match: more shared “words” in slug = better
+    # (very rough, but helps pick the exact game vs similarly named items)
+    slug = h.rsplit("/", 1)[-1]
+    title_words = [w for w in re.split(r"[^a-z0-9]+", title.lower()) if len(w) >= 3]
+    overlap = sum(1 for w in title_words if w in slug)
+    score += min(overlap, 6)
+
+    return score
+
+
+def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional[str], str]:
+    """
+    Picks the best matching product URL from Eneba store search results.
+    """
+    try:
+        r = _SESS.get(store_url, timeout=HTTP_TIMEOUT_S)
+        if r.status_code in (403, 429):
+            return None, f"failed (blocked HTTP {r.status_code})"
+        r.raise_for_status()
+    except Exception as e:
+        return None, f"failed (http error: {type(e).__name__})"
+
     soup = BeautifulSoup(r.text, "lxml")
 
-    candidates = []
+    best_url: Optional[str] = None
+    best_score = -10**9
+
     for a in soup.select("a[href]"):
-        href = a.get("href") or ""
-        # prefer steam product pages with /gb/ and "-pc-" and "steam-key"
-        if href.startswith("/gb/") and "steam" in href and "key" in href:
-            full = urljoin("https://www.eneba.com", href)
-            candidates.append(full)
+        href = (a.get("href") or "").strip()
+        if not href.startswith("/gb/"):
+            continue
+        if "steam" not in href or "key" not in href:
+            continue
 
-    if candidates:
-        return candidates[0].split("?")[0], "ok (store->product link)"
+        sc = _score_candidate(href, title)
+        if sc > best_score:
+            best_score = sc
+            best_url = urljoin(_BASE, href)
 
-    # fallback: find full URL in html
-    m = re.search(r"https://www\.eneba\.com/gb/[a-z0-9\-]+", r.text)
-    if m:
-        return m.group(0).split("?")[0], "ok (regex fallback)"
+    if best_url and best_score >= 5:
+        return best_url.split("?")[0], f"ok (store->product scored={best_score})"
 
-    return None, "failed (no product link found)"
+    # fallback: find product-ish urls in html, then score
+    found = re.findall(r'https://www\.eneba\.com/gb/[a-z0-9\-]+', r.text.lower())
+    for full in found:
+        href = full.replace(_BASE, "")
+        sc = _score_candidate(href, title)
+        if sc > best_score:
+            best_score = sc
+            best_url = full
+
+    if best_url and best_score >= 5:
+        return best_url.split("?")[0], f"ok (regex fallback scored={best_score})"
+
+    return None, "failed (no suitable product link found)"
 
 
 def read_price_gbp(url: str) -> Tuple[Optional[float], str]:
     """
-    Best-effort price extraction from product page.
-    Tries:
-    1) meta[itemprop=price]
-    2) JSON-LD offers price
-    3) __NEXT_DATA__ or raw regex '"price":"12.34"'
-    4) visible currency pattern "£12.34"
+    Safer price extraction:
+    1) JSON-LD offers with priceCurrency GBP
+    2) meta[itemprop=price] + meta[itemprop=priceCurrency]==GBP
+    3) Visible '£' pattern (last resort)
     """
-    s = _session()
-    r = s.get(url, timeout=HTTP_TIMEOUT_S)
-    r.raise_for_status()
+    try:
+        r = _SESS.get(url, timeout=HTTP_TIMEOUT_S)
+        if r.status_code in (403, 429):
+            return None, f"failed (blocked HTTP {r.status_code})"
+        r.raise_for_status()
+    except Exception as e:
+        return None, f"failed (http error: {type(e).__name__})"
+
     soup = BeautifulSoup(r.text, "lxml")
 
-    meta_price = soup.select_one('meta[itemprop="price"]')
-    if meta_price and meta_price.get("content"):
-        try:
-            return float(meta_price["content"]), "ok (META itemprop=price)"
-        except Exception:
-            pass
-
+    # (1) JSON-LD
     for script in soup.select('script[type="application/ld+json"]'):
         txt = script.get_text(strip=True) or ""
-        if "offers" in txt and "price" in txt:
-            m = re.search(r'"price"\s*:\s*"?(?P<p>\d+(\.\d+)?)"?', txt)
-            if m:
-                try:
-                    return float(m.group("p")), "ok (JSON-LD offers)"
-                except Exception:
-                    pass
-
-    # NEXT_DATA / general JSON price fields
-    m = re.search(r'"price"\s*:\s*"?(?P<p>\d+(\.\d+)?)"?', r.text)
-    if m:
+        if not txt:
+            continue
+        # Some pages have multiple JSON-LD blobs; parse cautiously
         try:
-            return float(m.group("p")), "ok (regex JSON price)"
+            data = json.loads(txt)
         except Exception:
-            pass
+            continue
 
-    # £ fallback
+        # data can be dict or list
+        blobs = data if isinstance(data, list) else [data]
+        for blob in blobs:
+            if not isinstance(blob, dict):
+                continue
+            offers = blob.get("offers")
+            if not offers:
+                continue
+
+            offer_list = offers if isinstance(offers, list) else [offers]
+            for off in offer_list:
+                if not isinstance(off, dict):
+                    continue
+                cur = str(off.get("priceCurrency") or "").upper()
+                p = off.get("price")
+                if cur == "GBP" and p is not None:
+                    try:
+                        return float(p), "ok (JSON-LD offers GBP)"
+                    except Exception:
+                        pass
+
+    # (2) meta itemprop price + currency
+    meta_price = soup.select_one('meta[itemprop="price"]')
+    meta_cur = soup.select_one('meta[itemprop="priceCurrency"]')
+    if meta_price and meta_price.get("content") and meta_cur and meta_cur.get("content"):
+        if str(meta_cur["content"]).upper() == "GBP":
+            try:
+                return float(meta_price["content"]), "ok (META price+currency GBP)"
+            except Exception:
+                pass
+
+    # (3) last resort: visible £xx.xx
     m = re.search(r"£\s*(\d+(?:\.\d{1,2})?)", r.text)
     if m:
         try:
-            return float(m.group(1)), "ok (REGEX £ price)"
+            return float(m.group(1)), "ok (REGEX £ price fallback)"
         except Exception:
             pass
 
-    return None, "failed (no price found)"
-
+    return None, "failed (no GBP price found)"
