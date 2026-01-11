@@ -128,7 +128,6 @@ def _canonicalize_game_url(base_url: str, href: str) -> Optional[str]:
         return None
 
     path = p.path or ""
-    # Strict game path check
     if not _GAME_PATH_RE.match(path):
         return None
 
@@ -136,6 +135,80 @@ def _canonicalize_game_url(base_url: str, href: str) -> Optional[str]:
     return f"{p.scheme}://{host}{path}".rstrip("/")
 
 
+# ---------------------------
+# Fallback link extractors
+# ---------------------------
+def _extract_next_data_json(html: str) -> Optional[dict]:
+    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _strings_in(obj: Any) -> Iterable[str]:
+    """Yield all strings in a nested dict/list structure."""
+    stack = [obj]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, str):
+            yield cur
+        elif isinstance(cur, dict):
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+
+
+def _extract_game_links_from_json_like(html: str, base_url: str) -> List[str]:
+    """
+    Extract /en/game/... strings from:
+    - __NEXT_DATA__
+    - <script type="application/json"> blobs
+    """
+    out: List[str] = []
+    seen: set[str] = set()
+
+    data = _extract_next_data_json(html)
+    if data:
+        for s in _strings_in(data):
+            if "/en/game/" not in s:
+                continue
+            canon = _canonicalize_game_url(base_url, s)
+            if canon and canon not in seen:
+                seen.add(canon)
+                out.append(canon)
+
+    for blob in re.findall(r'<script[^>]+type="application/json"[^>]*>(.*?)</script>', html, re.S):
+        for m in re.finditer(r"/en/game/[^\"\\?#]+", blob):
+            canon = _canonicalize_game_url(base_url, m.group(0))
+            if canon and canon not in seen:
+                seen.add(canon)
+                out.append(canon)
+
+    return out
+
+
+def _extract_game_links_by_regex(html: str, base_url: str) -> List[str]:
+    """Last resort: scan raw HTML for /en/game/<slug> strings."""
+    out: List[str] = []
+    seen: set[str] = set()
+
+    for m in re.finditer(r"/en/game/[^\"\\?#]+", html):
+        canon = _canonicalize_game_url(base_url, m.group(0))
+        if canon and canon not in seen:
+            seen.add(canon)
+            out.append(canon)
+
+    return out
+
+
+# ---------------------------
+# Public API
+# ---------------------------
 def harvest_game_links(
     source_url: str,
     pages: int,
@@ -145,11 +218,11 @@ def harvest_game_links(
 ) -> List[str]:
     """
     Best-effort harvest:
-    - scans anchors with strict validation
-    - retry/backoff via session adapters
-    - returns deduped canonical URLs (no querystrings)
-    - optional per-page jitter sleep to reduce 429s
-    - logs enough to debug "0 rows"
+    1) Scan anchors for /en/game/<slug>
+    2) If 0 accepted, fallback to __NEXT_DATA__/json blobs
+    3) If still 0, last-resort regex scan
+
+    Returns deduped canonical URLs (no querystrings).
     """
     pages = max(1, int(pages))
     max_links = max(1, int(max_links))
@@ -170,19 +243,24 @@ def harvest_game_links(
             continue
 
         ct = (r.headers.get("Content-Type") or "").lower()
-        log.info("Fanatical fetch page=%d status=%d bytes=%d ct=%s url=%s", page, r.status_code, len(r.content), ct, url)
+        log.info(
+            "Fanatical fetch page=%d status=%d bytes=%d ct=%s url=%s",
+            page,
+            r.status_code,
+            len(r.content),
+            ct,
+            url,
+        )
 
         if r.status_code in (403, 429):
             log.warning("Fanatical harvest blocked/rate-limited (HTTP %s) url=%s", r.status_code, url)
             break
-
         if r.status_code >= 400:
             log.warning("Fanatical harvest non-OK (HTTP %s) url=%s", r.status_code, url)
             continue
 
         html = r.text or ""
         if _looks_blocked(html):
-            # Common issue on hosted runners
             title = ""
             try:
                 soup0 = _bs(html)
@@ -193,10 +271,11 @@ def harvest_game_links(
             log.error("Fanatical appears BLOCKED (200 OK). title=%r snippet=%r url=%s", title, snippet, url)
             break
 
+        # 1) Anchor scan
         soup = _bs(html)
-
         anchors = soup.select("a[href]")
         accepted = 0
+
         for a in anchors:
             canon = _canonicalize_game_url(url, a.get("href") or "")
             if not canon or canon in seen:
@@ -210,6 +289,43 @@ def harvest_game_links(
 
         log.info("Fanatical parsed page=%d anchors=%d accepted_game_links=%d", page, len(anchors), accepted)
 
+        # 2) JSON/Next.js fallback (your case: anchors=12 accepted=0)
+        if accepted == 0:
+            from_json = _extract_game_links_from_json_like(html, url)
+            if from_json:
+                log.info("Fanatical fallback (__NEXT_DATA__/json) extracted=%d links on page=%d", len(from_json), page)
+                for canon in from_json:
+                    if canon in seen:
+                        continue
+                    seen.add(canon)
+                    out.append(canon)
+                    if len(out) >= max_links:
+                        log.info("Fanatical harvest hit max_links=%d (fallback)", max_links)
+                        return out
+            else:
+                from_rx = _extract_game_links_by_regex(html, url)
+                if from_rx:
+                    log.info("Fanatical fallback (regex) extracted=%d links on page=%d", len(from_rx), page)
+                    for canon in from_rx:
+                        if canon in seen:
+                            continue
+                        seen.add(canon)
+                        out.append(canon)
+                        if len(out) >= max_links:
+                            log.info("Fanatical harvest hit max_links=%d (regex fallback)", max_links)
+                            return out
+                else:
+                    has_next_data = ('id="__NEXT_DATA__"' in html)
+                    has_game_str = ("/en/game/" in html)
+                    log.warning(
+                        "Fanatical page has no harvestable game links (anchors=0, json=0, regex=0). "
+                        "has_next_data=%s has_/en/game/=%s page=%d url=%s",
+                        has_next_data,
+                        has_game_str,
+                        page,
+                        url,
+                    )
+
         lo, hi = sleep_range_s
         if hi > 0:
             time.sleep(random.uniform(max(0.0, lo), max(0.0, hi)))
@@ -218,6 +334,9 @@ def harvest_game_links(
     return out
 
 
+# ---------------------------
+# Title + price extraction
+# ---------------------------
 def _clean_title(raw: str) -> str:
     t = (raw or "").strip()
     t = re.sub(r"\s*\|\s*Fanatical\s*$", "", t).strip()
@@ -356,7 +475,6 @@ def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
     else:
         windows.append(html_text)
 
-    # Consider multiple matches; pick the lowest plausible (safer than first match)
     prices: List[float] = []
     for w in windows:
         for m in re.finditer(r"£\s*(\d+(?:\.\d{1,2})?)", w):
