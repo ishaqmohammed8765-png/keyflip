@@ -6,7 +6,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -19,9 +19,11 @@ from .config import UA  # keep this
 # - HTTP_CONNECT_TIMEOUT_S / HTTP_READ_TIMEOUT_S
 try:
     from .config import HTTP_CONNECT_TIMEOUT_S, HTTP_READ_TIMEOUT_S  # type: ignore
+
     _TIMEOUT: object = (HTTP_CONNECT_TIMEOUT_S, HTTP_READ_TIMEOUT_S)
 except Exception:
     from .config import HTTP_TIMEOUT_S  # type: ignore
+
     _TIMEOUT = HTTP_TIMEOUT_S
 
 log = logging.getLogger("keyflip.fanatical")
@@ -41,14 +43,14 @@ _BLOCK_PATTERNS = (
     "incapsula",
 )
 
-# Strictly match "/en/game/<slug>" with no extra segments.
-# Accept optional trailing slash.
-_GAME_PATH_RE = re.compile(r"^/en/game/[^/?#]+/?$")
-
-# CheapShark (Fanatical is storeID=15)  :contentReference[oaicite:1]{index=1}
+# CheapShark
 _CHEAPSHARK_BASE = "https://www.cheapshark.com/api/1.0"
 _CHEAPSHARK_STORE_FANATICAL = "15"
 _CHEAPSHARK_REDIRECT = "https://www.cheapshark.com/redirect?dealID="
+
+# Cache so core calling harvest_game_links multiple times doesn't refetch 4x
+_HARVEST_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+_HARVEST_CACHE_TTL_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -104,7 +106,6 @@ def _make_session() -> requests.Session:
     return s
 
 
-# Reuse one session for pooling + retry policy
 _SESS = _make_session()
 
 
@@ -121,7 +122,26 @@ def _looks_blocked(html: str) -> bool:
     return any(p in h for p in _BLOCK_PATTERNS)
 
 
-def _canonicalize_game_url(base_url: str, href: str) -> Optional[str]:
+def _timeout_sleep(lo_hi: Tuple[float, float]) -> None:
+    lo, hi = lo_hi
+    if hi <= 0:
+        return
+    time.sleep(random.uniform(max(0.0, lo), max(0.0, hi)))
+
+
+# ---------------------------
+# URL canonicalization
+# ---------------------------
+_LOCALE_EN_RE = re.compile(r"^/en(?:-[a-z]{2})?/", re.I)
+_GAME_PATH_RE = re.compile(r"^/en(?:-[a-z]{2})?/game/", re.I)
+
+
+def _canonicalize_fanatical_url(base_url: str, href: str) -> Optional[str]:
+    """
+    Canonicalize Fanatical URL and accept locale variants:
+      /en/..., /en-gb/..., /en-us/...
+    Strips query/fragment and trailing slash.
+    """
     href = (href or "").strip()
     if not href:
         return None
@@ -133,31 +153,42 @@ def _canonicalize_game_url(base_url: str, href: str) -> Optional[str]:
     if host not in _ALLOWED_HOSTS:
         return None
 
-    path = p.path or ""
-    if not _GAME_PATH_RE.match(path):
+    path = (p.path or "").rstrip("/")
+    if not path:
         return None
 
-    return f"{p.scheme}://{host}{path}".rstrip("/")
+    if not _LOCALE_EN_RE.match(path + "/"):
+        return None
+
+    scheme = p.scheme or "https"
+    return f"{scheme}://{host}{path}"
 
 
-# -------------------------------------------------------------------
-# NEW: CheapShark-based harvesting (works when Fanatical listings are JS)
-# -------------------------------------------------------------------
+def _path_is_game(url: str) -> bool:
+    path = urlparse(url).path or ""
+    return bool(_GAME_PATH_RE.match(path + "/"))
+
+
+# ---------------------------
+# CheapShark harvesting
+# ---------------------------
 def _cheapshark_fetch_deals(page_number: int, page_size: int) -> List[dict]:
-    """
-    Fetch CheapShark deals for Fanatical. Returns list of deal dicts.
-    Note: CheapShark prices are USD; we only use dealID -> redirect -> Fanatical URL.
-    """
     url = f"{_CHEAPSHARK_BASE}/deals"
     params = {
         "storeID": _CHEAPSHARK_STORE_FANATICAL,
         "pageNumber": max(0, int(page_number)),
         "pageSize": max(1, int(page_size)),
     }
-    r = _SESS.get(url, params=params, timeout=_timeout())
+    try:
+        r = _SESS.get(url, params=params, timeout=_timeout())
+    except requests.RequestException as e:
+        log.warning("CheapShark deals request failed (%s)", type(e).__name__)
+        return []
+
     if r.status_code >= 400:
         log.warning("CheapShark deals non-OK (HTTP %s) url=%s", r.status_code, r.url)
         return []
+
     try:
         data = r.json()
         return data if isinstance(data, list) else []
@@ -168,8 +199,8 @@ def _cheapshark_fetch_deals(page_number: int, page_size: int) -> List[dict]:
 
 def _resolve_cheapshark_dealid_to_fanatical_url(deal_id: str) -> Optional[str]:
     """
-    CheapShark gives dealID. Their /redirect?dealID=... 302s to the store product page.
-    We follow redirects and then canonicalize to Fanatical /en/game/<slug>.
+    CheapShark redirect endpoint -> final Fanatical URL.
+    We canonicalize the FINAL URL and accept /en-gb/ etc.
     """
     deal_id = (deal_id or "").strip()
     if not deal_id:
@@ -177,14 +208,15 @@ def _resolve_cheapshark_dealid_to_fanatical_url(deal_id: str) -> Optional[str]:
 
     redir = _CHEAPSHARK_REDIRECT + deal_id
     try:
-        # follow redirects to final store URL
         r = _SESS.get(redir, timeout=_timeout(), allow_redirects=True)
     except requests.RequestException:
         return None
 
-    final = r.url or ""
-    # Some redirects may fail or go elsewhere; canonicalize will validate host + /en/game/
-    return _canonicalize_game_url(final, final)
+    final = (r.url or "").strip()
+    if not final:
+        return None
+
+    return _canonicalize_fanatical_url(final, final)
 
 
 def harvest_game_links(
@@ -192,58 +224,111 @@ def harvest_game_links(
     pages: int,
     *,
     max_links: int = 500,
-    sleep_range_s: Tuple[float, float] = (0.2, 0.6),
+    sleep_range_s: Tuple[float, float] = (0.15, 0.45),
+    games_only: bool = True,
 ) -> List[str]:
     """
-    Fanatical category pages are JS-rendered in many environments (your logs confirm this),
-    so we harvest links via CheapShark -> redirect -> Fanatical game pages.
+    Harvest Fanatical links via CheapShark (Fanatical store).
+    Why: Fanatical listing pages are JS-rendered, so HTML scraping often returns no items.
 
-    `source_url` is ignored for harvesting (kept for API compatibility with your core),
-    `pages` maps to CheapShark pageNumber iterations.
+    Key improvements:
+    - Accept /en-gb/ and other locale paths (not just /en/)
+    - Optional games_only filter to keep watchlist from going empty
+    - Reject-reason counters so logs show WHY you got few/zero
+    - Cache key includes pages/max_links/games_only to avoid refetch storms
     """
     pages = max(1, int(pages))
     max_links = max(1, int(max_links))
 
+    # source_url is ignored (kept for interface compatibility with old pipeline)
+    cache_key = f"cheapshark:{pages}:{max_links}:{int(games_only)}"
+    now = time.time()
+    cached = _HARVEST_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _HARVEST_CACHE_TTL_S:
+        log.info(
+            "Harvest cache hit (%ds old) returning %d urls",
+            int(now - cached[0]),
+            len(cached[1]),
+        )
+        return list(cached[1])
+
     out: List[str] = []
     seen: set[str] = set()
 
-    # CheapShark returns up to 60 deals/page by default; we can keep this modest.
     page_size = 60
+
+    # Debug counts
+    cat_counts: Dict[str, int] = {}
+    reasons = {
+        "no_deal_id": 0,
+        "no_fan_url": 0,
+        "deduped": 0,
+        "not_game": 0,
+    }
 
     for page in range(0, pages):
         deals = _cheapshark_fetch_deals(page_number=page, page_size=page_size)
-        log.info("CheapShark fetched page=%d deals=%d (Fanatical storeID=%s)", page, len(deals), _CHEAPSHARK_STORE_FANATICAL)
+        log.info(
+            "CheapShark fetched page=%d deals=%d (Fanatical storeID=%s)",
+            page,
+            len(deals),
+            _CHEAPSHARK_STORE_FANATICAL,
+        )
 
-        # Randomize so each run builds a different pool (helps “fresh watchlist”)
         random.shuffle(deals)
 
         for d in deals:
             deal_id = str(d.get("dealID") or "").strip()
             if not deal_id:
+                reasons["no_deal_id"] += 1
                 continue
 
             fan_url = _resolve_cheapshark_dealid_to_fanatical_url(deal_id)
-            if not fan_url or fan_url in seen:
+            if not fan_url:
+                reasons["no_fan_url"] += 1
+                continue
+
+            if fan_url in seen:
+                reasons["deduped"] += 1
+                continue
+
+            if games_only and not _path_is_game(fan_url):
+                reasons["not_game"] += 1
                 continue
 
             seen.add(fan_url)
             out.append(fan_url)
 
+            # category debug
+            path = urlparse(fan_url).path or ""
+            parts = [p for p in path.split("/") if p]
+            cat = parts[1] if len(parts) >= 2 else "en"
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
             if len(out) >= max_links:
                 log.info("Harvest hit max_links=%d", max_links)
-                return out
+                break
 
-        lo, hi = sleep_range_s
-        if hi > 0:
-            time.sleep(random.uniform(max(0.0, lo), max(0.0, hi)))
+        if len(out) >= max_links:
+            break
 
-    log.info("Total harvested Fanatical game URLs via CheapShark: %d", len(out))
+        _timeout_sleep(sleep_range_s)
+
+    log.info("Total harvested Fanatical URLs via CheapShark: %d", len(out))
+    log.info("Harvest reject reasons: %s", reasons)
+    if cat_counts:
+        log.info(
+            "Harvest categories: %s",
+            dict(sorted(cat_counts.items(), key=lambda kv: kv[1], reverse=True)),
+        )
+
+    _HARVEST_CACHE[cache_key] = (time.time(), list(out))
     return out
 
 
-# -------------------------------------------------------------------
-# Title + price extraction (your existing logic)
-# -------------------------------------------------------------------
+# ---------------------------
+# Title + price extraction (GBP-only)
+# ---------------------------
 def _clean_title(raw: str) -> str:
     t = (raw or "").strip()
     t = re.sub(r"\s*\|\s*Fanatical\s*$", "", t).strip()
@@ -346,7 +431,11 @@ def _walk(obj: Any) -> Iterable[Any]:
 
 
 def _extract_price_from_next_data(html_text: str) -> Optional[float]:
-    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text, re.S)
+    m = re.search(
+        r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        html_text,
+        re.S,
+    )
     if not m:
         return None
     raw = m.group(1).strip()
@@ -358,7 +447,7 @@ def _extract_price_from_next_data(html_text: str) -> Optional[float]:
     for node in _walk(data):
         if not isinstance(node, dict):
             continue
-        cur = (node.get("currency") or node.get("priceCurrency") or node.get("currencyCode"))
+        cur = node.get("currency") or node.get("priceCurrency") or node.get("currencyCode")
         if str(cur).upper() != "GBP":
             continue
         for k in ("amount", "value", "price", "lowPrice", "currentPrice"):
