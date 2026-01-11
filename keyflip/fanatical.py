@@ -6,13 +6,14 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 from .config import UA  # keep this
+
 # Support BOTH config styles:
 # - HTTP_TIMEOUT_S = 20
 # - HTTP_CONNECT_TIMEOUT_S / HTTP_READ_TIMEOUT_S
@@ -26,6 +27,22 @@ except Exception:
 log = logging.getLogger("keyflip.fanatical")
 
 _BASE = "https://www.fanatical.com"
+_ALLOWED_HOSTS = {"www.fanatical.com", "fanatical.com"}
+
+# Block/bot pages often look like this even with HTTP 200
+_BLOCK_PATTERNS = (
+    "attention required",
+    "cloudflare",
+    "access denied",
+    "are you a robot",
+    "verify you are human",
+    "checking your browser",
+    "ddos-guard",
+    "incapsula",
+)
+
+# Strictly match "/en/game/<slug>" with no extra segments.
+# Accept optional trailing slash.
 _GAME_PATH_RE = re.compile(r"^/en/game/[^/?#]+/?$")
 
 
@@ -53,11 +70,11 @@ def _make_session() -> requests.Session:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
+            "Referer": _BASE + "/",  # mild help sometimes
+            "Connection": "keep-alive",
         }
     )
 
-    # Lightweight retries with backoff.
-    # (requests doesn't do this natively; urllib3 Retry is exposed via adapters)
     try:
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
@@ -77,14 +94,25 @@ def _make_session() -> requests.Session:
         s.mount("https://", adapter)
         s.mount("http://", adapter)
     except Exception:
-        # If urllib3 Retry isn't available for some reason, keep the session as-is.
         pass
 
     return s
 
 
-# Reuse one session for connection pooling + retry policy
 _SESS = _make_session()
+
+
+def _bs(html: str) -> BeautifulSoup:
+    """Prefer lxml if available; fall back safely."""
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
+
+
+def _looks_blocked(html: str) -> bool:
+    h = (html or "").lower()
+    return any(p in h for p in _BLOCK_PATTERNS)
 
 
 def _canonicalize_game_url(base_url: str, href: str) -> Optional[str]:
@@ -95,20 +123,17 @@ def _canonicalize_game_url(base_url: str, href: str) -> Optional[str]:
     full = urljoin(base_url, href)
     p = urlparse(full)
 
-    # Require Fanatical host
-    if "fanatical.com" not in (p.netloc or ""):
+    host = (p.netloc or "").lower()
+    if host not in _ALLOWED_HOSTS:
         return None
 
-    # Strong path validation (game pages only)
     path = p.path or ""
-    if not _GAME_PATH_RE.match(path.rstrip("/") + "/"):
-        # Normalize for matching: ensure trailing slash for regex
-        if not _GAME_PATH_RE.match(path.rstrip("/") + "/"):
-            return None
+    # Strict game path check
+    if not _GAME_PATH_RE.match(path):
+        return None
 
     # Canonicalize: drop query/fragment, drop trailing slash
-    canon = f"{p.scheme}://{p.netloc}{p.path}".rstrip("/")
-    return canon
+    return f"{p.scheme}://{host}{path}".rstrip("/")
 
 
 def harvest_game_links(
@@ -120,10 +145,11 @@ def harvest_game_links(
 ) -> List[str]:
     """
     Best-effort harvest:
-    - scans anchors but with strong validation
+    - scans anchors with strict validation
     - retry/backoff via session adapters
     - returns deduped canonical URLs (no querystrings)
     - optional per-page jitter sleep to reduce 429s
+    - logs enough to debug "0 rows"
     """
     pages = max(1, int(pages))
     max_links = max(1, int(max_links))
@@ -143,6 +169,9 @@ def harvest_game_links(
             log.warning("Fanatical harvest HTTP error page=%s url=%s err=%s", page, url, type(e).__name__)
             continue
 
+        ct = (r.headers.get("Content-Type") or "").lower()
+        log.info("Fanatical fetch page=%d status=%d bytes=%d ct=%s url=%s", page, r.status_code, len(r.content), ct, url)
+
         if r.status_code in (403, 429):
             log.warning("Fanatical harvest blocked/rate-limited (HTTP %s) url=%s", r.status_code, url)
             break
@@ -151,25 +180,41 @@ def harvest_game_links(
             log.warning("Fanatical harvest non-OK (HTTP %s) url=%s", r.status_code, url)
             continue
 
-        soup = BeautifulSoup(r.text, "lxml")
+        html = r.text or ""
+        if _looks_blocked(html):
+            # Common issue on hosted runners
+            title = ""
+            try:
+                soup0 = _bs(html)
+                title = soup0.title.get_text(strip=True) if soup0.title else ""
+            except Exception:
+                pass
+            snippet = html[:250].replace("\n", " ")
+            log.error("Fanatical appears BLOCKED (200 OK). title=%r snippet=%r url=%s", title, snippet, url)
+            break
 
-        # Some pages are heavy; scanning all anchors is okay, but keep it bounded.
-        for a in soup.select("a[href]"):
+        soup = _bs(html)
+
+        anchors = soup.select("a[href]")
+        accepted = 0
+        for a in anchors:
             canon = _canonicalize_game_url(url, a.get("href") or "")
-            if not canon:
-                continue
-            if canon in seen:
+            if not canon or canon in seen:
                 continue
             seen.add(canon)
             out.append(canon)
+            accepted += 1
             if len(out) >= max_links:
+                log.info("Fanatical harvest hit max_links=%d", max_links)
                 return out
 
-        # jitter sleep (polite + reduces 429 chance)
+        log.info("Fanatical parsed page=%d anchors=%d accepted_game_links=%d", page, len(anchors), accepted)
+
         lo, hi = sleep_range_s
         if hi > 0:
             time.sleep(random.uniform(max(0.0, lo), max(0.0, hi)))
 
+    log.info("Fanatical total harvested from %s: %d", source_url, len(out))
     return out
 
 
@@ -186,7 +231,6 @@ def _parse_float(x: Any) -> Optional[float]:
     if isinstance(x, (int, float)):
         return float(x)
     s = str(x).strip()
-    # remove commas and currency symbols
     s = s.replace(",", "")
     s = re.sub(r"[^\d.]+", "", s)
     if not s:
@@ -198,22 +242,20 @@ def _parse_float(x: Any) -> Optional[float]:
 
 
 def _find_title(soup: BeautifulSoup) -> Optional[str]:
-    # Prefer on-page h1
     h1 = soup.find("h1")
     if h1:
         t = h1.get_text(strip=True)
         if t:
             return _clean_title(t)
 
-    # OpenGraph / Twitter
     og = soup.select_one('meta[property="og:title"]')
     if og and og.get("content"):
         return _clean_title(str(og["content"]))
+
     tw = soup.select_one('meta[name="twitter:title"]')
     if tw and tw.get("content"):
         return _clean_title(str(tw["content"]))
 
-    # Fallback <title>
     if soup.title:
         t = soup.title.get_text(strip=True)
         if t:
@@ -223,7 +265,6 @@ def _find_title(soup: BeautifulSoup) -> Optional[str]:
 
 
 def _extract_price_from_ldjson(soup: BeautifulSoup) -> Optional[float]:
-    # JSON-LD offers (parse JSON, don't regex random "price")
     for script in soup.select('script[type="application/ld+json"]'):
         txt = script.get_text(strip=True) or ""
         if not txt:
@@ -247,15 +288,12 @@ def _extract_price_from_ldjson(soup: BeautifulSoup) -> Optional[float]:
                 cur = str(off.get("priceCurrency") or "").upper()
                 if cur != "GBP":
                     continue
-
-                # Prefer explicit "price", otherwise consider "lowPrice"
                 p = _parse_float(off.get("price"))
                 if p is not None:
                     return p
                 lp = _parse_float(off.get("lowPrice"))
                 if lp is not None:
                     return lp
-
     return None
 
 
@@ -271,7 +309,6 @@ def _extract_price_from_meta(soup: BeautifulSoup) -> Optional[float]:
 
 
 def _walk(obj: Any) -> Iterable[Any]:
-    """Yield nested values (dict/list)."""
     stack = [obj]
     while stack:
         cur = stack.pop()
@@ -283,11 +320,6 @@ def _walk(obj: Any) -> Iterable[Any]:
 
 
 def _extract_price_from_next_data(html_text: str) -> Optional[float]:
-    """
-    Next.js fallback:
-    Fanatical sometimes embeds product/price data inside <script id="__NEXT_DATA__"> JSON.
-    We parse it and look for GBP-ish price dicts.
-    """
     m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text, re.S)
     if not m:
         return None
@@ -297,31 +329,21 @@ def _extract_price_from_next_data(html_text: str) -> Optional[float]:
     except Exception:
         return None
 
-    # Heuristic: find dicts that look like {"currency":"GBP","amount":...} or {"price":...,"currency":"GBP"}
     for node in _walk(data):
         if not isinstance(node, dict):
             continue
-        # Common key patterns
         cur = (node.get("currency") or node.get("priceCurrency") or node.get("currencyCode"))
         if str(cur).upper() != "GBP":
             continue
-
         for k in ("amount", "value", "price", "lowPrice", "currentPrice"):
             p = _parse_float(node.get(k))
             if p is not None:
                 return p
-
     return None
 
 
 def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
-    """
-    LAST resort: visible '£12.34' pattern.
-    To reduce false hits, prefer '£' values that are near 'Add to basket/cart' keywords.
-    """
-    # Narrow search window around common purchase UI words
-    # (still heuristic, but safer than scanning whole HTML blindly)
-    needles = ("add to basket", "add to cart", "buy", "checkout")
+    needles = ("add to basket", "add to cart", "checkout", "buy now")
     lower = html_text.lower()
 
     idxs = [lower.find(n) for n in needles if lower.find(n) != -1]
@@ -334,22 +356,24 @@ def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
     else:
         windows.append(html_text)
 
+    # Consider multiple matches; pick the lowest plausible (safer than first match)
+    prices: List[float] = []
     for w in windows:
-        m = re.search(r"£\s*(\d+(?:\.\d{1,2})?)", w)
-        if m:
-            return _parse_float(m.group(1))
-    return None
+        for m in re.finditer(r"£\s*(\d+(?:\.\d{1,2})?)", w):
+            p = _parse_float(m.group(1))
+            if p is not None and 0.01 <= p <= 999.0:
+                prices.append(p)
+
+    return min(prices) if prices else None
 
 
 def read_title_and_price_gbp(url: str) -> Tuple[Optional[str], Optional[float], str]:
     """
-    Attempts (GBP), safest first:
-    1) meta[itemprop=price] + meta[itemprop=priceCurrency]==GBP (strong)
-    2) JSON-LD offers with priceCurrency GBP (strong)
-    3) __NEXT_DATA__ JSON (modern Fanatical fallback)
-    4) visible £ fallback in purchase-UI window (last resort)
-
-    Returns: (title, price_gbp, notes)
+    Safest first:
+    1) meta itemprop price+currency
+    2) JSON-LD offers
+    3) __NEXT_DATA__
+    4) visible £ near purchase UI (last resort)
     """
     try:
         r = _SESS.get(url, timeout=_timeout())
@@ -361,26 +385,26 @@ def read_title_and_price_gbp(url: str) -> Tuple[Optional[str], Optional[float], 
     if r.status_code >= 400:
         return None, None, f"failed (http {r.status_code})"
 
-    soup = BeautifulSoup(r.text, "lxml")
+    html = r.text or ""
+    if _looks_blocked(html):
+        return None, None, "failed (blocked page content)"
+
+    soup = _bs(html)
     title = _find_title(soup)
 
-    # 1) Meta
     p = _extract_price_from_meta(soup)
     if p is not None:
         return title, p, "ok (META price+currency GBP)"
 
-    # 2) JSON-LD
     p = _extract_price_from_ldjson(soup)
     if p is not None:
         return title, p, "ok (JSON-LD offers GBP)"
 
-    # 3) __NEXT_DATA__
-    p = _extract_price_from_next_data(r.text)
+    p = _extract_price_from_next_data(html)
     if p is not None:
         return title, p, "ok (__NEXT_DATA__ GBP)"
 
-    # 4) Visible £ (last resort)
-    p = _extract_price_from_visible_gbp(r.text)
+    p = _extract_price_from_visible_gbp(html)
     if p is not None:
         return title, p, "ok (REGEX £ price, UI-window)"
 
