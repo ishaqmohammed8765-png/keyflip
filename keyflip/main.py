@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 from .cache import PriceCache
@@ -32,7 +31,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--allow-eur", action="store_true")
     p.add_argument("--eur-to-gbp", type=float, default=0.86)
 
-    p.add_argument("--headed", action="store_true", help="(ignored, no Playwright)")
     p.add_argument("--debug", action="store_true")
 
     p.add_argument("--item-budget", type=float, default=55.0, help="Best-effort (no Playwright)")
@@ -53,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    # repo root (../.. from keyflip/main.py)
     root = Path(__file__).resolve().parent.parent
     watchlist_csv = root / "watchlist.csv"
     scans_csv = root / "scans.csv"
@@ -65,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
         cache.clear_cache()
         log.info("Cache cleared.")
         return 0
+
     if args.clear_recent:
         cache.clear_recent()
         log.info("Recent cleared.")
@@ -91,14 +91,21 @@ def main(argv: list[str] | None = None) -> int:
     do_build = args.build or do_play
     do_scan = args.scan or do_play
 
+    dfw = None
     if do_build:
         log.info("Building watchlist...")
         dfw = build_watchlist(cfg, cache, watchlist_csv)
         log.info("Wrote %s rows to %s", len(dfw), watchlist_csv.resolve())
 
+    # IMPORTANT: If play/build produced an empty watchlist, skip scan (prevents pandas crash)
+    if do_scan and dfw is not None and dfw.empty:
+        log.warning("Watchlist is empty. Skipping scan.")
+        return 0
+
     if do_scan:
         log.info("Scanning watchlist...")
-        dfs = scan_watchlist(cfg, cache, watchlist_csv, scans_csv, passes_csv)
+        batch = scan_watchlist(cfg, cache, watchlist_csv, scans_csv, passes_csv)
+        log.info("Scan batch rows: %s", len(batch))
         log.info("Wrote scans to %s and passes to %s", scans_csv.resolve(), passes_csv.resolve())
 
     return 0
@@ -106,4 +113,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
