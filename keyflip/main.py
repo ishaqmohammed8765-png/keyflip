@@ -15,9 +15,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Keyflip (no Playwright) — build & scan")
 
     mode = p.add_mutually_exclusive_group(required=False)
-    mode.add_argument("--play", action="store_true", help="Build watchlist then scan (default)")
+    mode.add_argument("--play", action="store_true", help="Build then scan (default)")
     mode.add_argument("--build", action="store_true", help="Build watchlist only")
-    mode.add_argument("--scan", action="store_true", help="Scan existing watchlist only")
+    mode.add_argument("--scan", action="store_true", help="Scan watchlist only")
 
     p.add_argument(
         "--root",
@@ -26,54 +26,70 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Project root directory (defaults to current working directory)",
     )
 
-    # --- Core targets / limits ---
+    # Core knobs
     p.add_argument("--max-buy", type=float, default=10.0, help="Max buy price in GBP")
-    p.add_argument("--watchlist-target", type=int, default=10, help="Target rows to write to watchlist.csv")
-    p.add_argument("--verify-candidates", type=int, default=220, help="How many candidates to consider before verifying")
+    p.add_argument("--watchlist-target", type=int, default=10, help="Target watchlist size")
+    p.add_argument("--verify-candidates", type=int, default=220, help="Candidate pool size before verify")
     p.add_argument("--pages-per-source", type=int, default=2, help="Pages to harvest per source")
 
-    p.add_argument("--verify-limit", type=int, default=10, help="How many candidates to verify (0 = use safety cap)")
-    p.add_argument("--verify-safety-cap", type=int, default=14, help="Hard upper cap on verifies per run")
-    p.add_argument("--scan-limit", type=int, default=10, help="How many watchlist rows to scan (0 = unlimited)")
+    p.add_argument("--verify-limit", type=int, default=10, help="Verifies per run (0 = use safety cap)")
+    p.add_argument("--verify-safety-cap", type=int, default=14, help="Hard upper cap on verifies")
+    p.add_argument("--scan-limit", type=int, default=10, help="Rows scanned per run (0 = unlimited)")
 
-    p.add_argument("--avoid-recent-days", type=int, default=2, help="Avoid re-scanning items seen in the last N days")
+    p.add_argument("--avoid-recent-days", type=int, default=2, help="Avoid items scanned in last N days")
 
-    # --- Currency ---
+    # Currency
     p.add_argument("--allow-eur", action="store_true", help="Allow EUR prices (converted to GBP)")
-    p.add_argument("--eur-to-gbp", type=float, default=0.86, help="EUR→GBP rate (used only with --allow-eur)")
+    p.add_argument("--eur-to-gbp", type=float, default=0.86, help="EUR->GBP rate (only with --allow-eur)")
 
-    # --- Budgets / timeouts ---
+    # Budgets / debug
     p.add_argument("--debug", action="store_true", help="Enable debug logging")
     p.add_argument("--item-budget", type=float, default=55.0, help="Best-effort per-item time budget (seconds)")
-    p.add_argument("--run-budget", type=float, default=0.0, help="Total run budget (seconds); 0 disables")
+    p.add_argument("--run-budget", type=float, default=0.0, help="Total run budget seconds (0 disables)")
 
-    # --- Cache ---
+    # Cache / maintenance
     p.add_argument("--cache-fail-ttl", type=int, default=1200, help="TTL seconds for failed cache entries")
     p.add_argument("--clear-cache", action="store_true", help="Clear price cache and exit")
     p.add_argument("--clear-recent", action="store_true", help="Clear recent-scans tracking and exit")
+
+    # Utility
+    p.add_argument("--dry-run", action="store_true", help="Print paths + basic checks, then exit")
 
     return p
 
 
 def _resolve_root(args_root: Optional[Path]) -> Path:
-    # Most reliable default across local, GitHub, streamlit, etc.
+    # Most reliable default across VS Code, GitHub, streamlit, etc.
     root = args_root if args_root is not None else Path.cwd()
     return root.resolve()
 
 
 def _watchlist_is_usable(path: Path) -> bool:
-    # "Usable" means: file exists, not empty, and has at least a header line.
+    """
+    Guard against the classic failure:
+    - file missing
+    - empty file
+    - file with no header (pandas EmptyDataError)
+    """
     try:
         if not path.exists() or not path.is_file():
             return False
         if path.stat().st_size < 10:
             return False
-        # Lightweight header check (avoid pandas here)
         with path.open("r", encoding="utf-8", errors="replace") as f:
-            first = f.readline().strip()
-        return bool(first) and ("," in first)
+            header = f.readline().strip()
+        # Basic sanity: a CSV header usually contains commas and at least one char
+        return bool(header) and ("," in header)
     except Exception:
         return False
+
+
+def _log_paths(root: Path, watchlist_csv: Path, scans_csv: Path, passes_csv: Path, db_path: Path) -> None:
+    log.info("ROOT: %s", root)
+    log.info("watchlist.csv: %s", watchlist_csv.resolve())
+    log.info("scans.csv: %s", scans_csv.resolve())
+    log.info("passes.csv: %s", passes_csv.resolve())
+    log.info("cache db: %s", db_path.resolve())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,43 +98,54 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.debug else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        force=True,  # make sure our config wins even if something configured logging earlier
+        force=True,  # ensure our config applies even if another module touched logging
     )
 
     root = _resolve_root(args.root)
-
     watchlist_csv = root / "watchlist.csv"
     scans_csv = root / "scans.csv"
     passes_csv = root / "passes.csv"
     db_path = root / "price_cache.sqlite"
 
+    _log_paths(root, watchlist_csv, scans_csv, passes_csv, db_path)
+
     cache = PriceCache(db_path)
 
-    # --- Cache maintenance exits ---
+    # Maintenance
     if args.clear_cache:
-        cache.clear_cache()
-        log.info("Cache cleared: %s", db_path.resolve())
+        try:
+            cache.clear_cache()
+        except Exception:
+            log.exception("Failed to clear cache.")
+            return 2
+        log.info("Cache cleared.")
         return 0
 
     if args.clear_recent:
-        cache.clear_recent()
+        try:
+            cache.clear_recent()
+        except Exception:
+            log.exception("Failed to clear recent.")
+            return 2
         log.info("Recent cleared.")
         return 0
 
-    # --- Normalize verify limits ---
+    if args.dry_run:
+        log.info("dry-run: watchlist usable? %s", _watchlist_is_usable(watchlist_csv))
+        return 0
+
+    # Normalize verify limit behavior: 0 means "use safety cap"
     verify_limit = int(args.verify_limit)
     verify_safety_cap = int(args.verify_safety_cap)
 
-    if verify_limit < 0:
-        log.warning("--verify-limit < 0 is invalid. Using default 10.")
-        verify_limit = 10
-
     if verify_safety_cap <= 0:
-        log.warning("--verify-safety-cap <= 0 is invalid. Using default 14.")
+        log.warning("--verify-safety-cap <= 0 is invalid; using 14")
         verify_safety_cap = 14
 
-    # If user says "0 = unlimited", we still keep safety behavior predictable:
-    # Treat 0 as "use safety cap" to avoid accidental huge runs.
+    if verify_limit < 0:
+        log.warning("--verify-limit < 0 is invalid; using 10")
+        verify_limit = 10
+
     if verify_limit == 0:
         log.info("verify_limit=0 -> using safety cap=%d", verify_safety_cap)
         verify_limit = verify_safety_cap
@@ -149,36 +176,53 @@ def main(argv: list[str] | None = None) -> int:
 
     if do_build:
         log.info("Building watchlist...")
-        dfw = build_watchlist(cfg, cache, watchlist_csv)
+        try:
+            dfw = build_watchlist(cfg, cache, watchlist_csv)
+        except Exception:
+            log.exception("BUILD failed (exception).")
+            return 2
 
-        # dfw might be None if builder chose to return nothing; handle safely
-        built_rows = len(dfw) if dfw is not None else 0
-        log.info("Wrote %s rows to %s", built_rows, watchlist_csv.resolve())
+        if dfw is None:
+            log.error("BUILD returned None (unexpected).")
+            return 2
 
-        # If build produced empty (or None), don't scan in the same run.
-        if do_scan and (dfw is None or getattr(dfw, "empty", True)):
+        try:
+            built_rows = len(dfw)
+        except Exception:
+            built_rows = 0
+
+        log.info("Built watchlist rows: %d", built_rows)
+        log.info("Wrote watchlist to: %s", watchlist_csv.resolve())
+
+        # If we built this run and it is empty, don't scan.
+        if do_scan and getattr(dfw, "empty", True):
             log.warning("Watchlist is empty (this run). Skipping scan.")
             return 0
 
     if do_scan:
-        # Guard scan-only runs too
+        # Guard scan-only runs as well
         if not _watchlist_is_usable(watchlist_csv):
             log.warning(
-                "watchlist.csv missing/empty/unusable at %s. Run with --build (or --play) first.",
+                "watchlist.csv missing/empty/unusable at %s. Run --build (or --play) first.",
                 watchlist_csv.resolve(),
             )
             return 0
 
         log.info("Scanning watchlist...")
-        batch = scan_watchlist(cfg, cache, watchlist_csv, scans_csv, passes_csv)
+        try:
+            batch = scan_watchlist(cfg, cache, watchlist_csv, scans_csv, passes_csv)
+        except Exception:
+            log.exception("SCAN failed (exception).")
+            return 2
 
         try:
             batch_rows = len(batch)
         except Exception:
             batch_rows = 0
 
-        log.info("Scan batch rows: %s", batch_rows)
-        log.info("Wrote scans to %s and passes to %s", scans_csv.resolve(), passes_csv.resolve())
+        log.info("Scan batch rows: %d", batch_rows)
+        log.info("Wrote scans to: %s", scans_csv.resolve())
+        log.info("Wrote passes to: %s", passes_csv.resolve())
 
     return 0
 
