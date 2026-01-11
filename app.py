@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import io
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -19,6 +21,8 @@ SCANS = ROOT / "scans.csv"
 PASSES = ROOT / "passes.csv"
 DB = ROOT / "price_cache.sqlite"
 
+DEFAULT_CACHE_FAIL_TTL = 1200
+
 
 # =========================
 # Streamlit setup
@@ -26,7 +30,10 @@ DB = ROOT / "price_cache.sqlite"
 st.set_page_config(page_title="Keyflip Scanner", layout="wide")
 
 st.title("Keyflip — Fanatical → Eneba Scanner (No Playwright)")
-st.caption("Builds a fresh watchlist (<= max buy) then scans for edge. HTTP-only (requests + bs4).")
+st.caption(
+    "Builds a fresh watchlist (<= max buy) then scans for edge. "
+    "HTTP-only (requests + bs4)."
+)
 
 # =========================
 # Session state
@@ -37,6 +44,10 @@ if "last_output" not in st.session_state:
     st.session_state.last_output = ""
 if "last_exit_code" not in st.session_state:
     st.session_state.last_exit_code = None
+if "last_label" not in st.session_state:
+    st.session_state.last_label = ""
+if "last_elapsed_s" not in st.session_state:
+    st.session_state.last_elapsed_s = None
 
 
 # =========================
@@ -61,13 +72,31 @@ def run_keyflip(argv: list[str]) -> tuple[int, str]:
     return code, buf.getvalue()
 
 
-def safe_read_csv(path: Path) -> pd.DataFrame | None:
+def safe_read_csv(path: Path) -> Optional[pd.DataFrame]:
+    """
+    Safe CSV loader that avoids EmptyDataError and doesn't blindly coerce all NaNs to "".
+    """
     try:
         if not path.exists() or path.stat().st_size == 0:
             return None
-        return pd.read_csv(path).fillna("")
+        df = pd.read_csv(path)
+
+        # Only fill NaNs in object columns (keeps numeric cols numeric)
+        obj_cols = df.select_dtypes(include=["object"]).columns
+        if len(obj_cols) > 0:
+            df[obj_cols] = df[obj_cols].fillna("")
+        return df
     except Exception as e:
         st.error(f"Failed to read {path.name}: {type(e).__name__}: {e}")
+        return None
+
+
+def safe_read_bytes(path: Path) -> Optional[bytes]:
+    try:
+        if not path.exists() or path.stat().st_size == 0:
+            return None
+        return path.read_bytes()
+    except Exception:
         return None
 
 
@@ -78,6 +107,38 @@ def file_status_line(p: Path) -> str:
         return f"- {p.name}: ✅  ({p.resolve()})  • {p.stat().st_size:,} bytes"
     except Exception:
         return f"- {p.name}: ✅  ({p})"
+
+
+def rows_count(path: Path) -> Optional[int]:
+    """
+    Cheap-ish row count for small CSVs.
+    If file is missing/empty, returns None.
+    """
+    df = safe_read_csv(path)
+    if df is None:
+        return None
+    return int(len(df))
+
+
+def latest_timestamp_from_scans(df: pd.DataFrame) -> Tuple[Optional[pd.Timestamp], pd.DataFrame]:
+    """
+    Returns (latest_ts, filtered_df_for_latest_ts).
+    If timestamp column missing or can't parse, returns (None, df.tail(50)).
+    """
+    if df.empty:
+        return None, df
+
+    if "timestamp" not in df.columns:
+        return None, df.tail(50)
+
+    ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=False)
+    if ts.isna().all():
+        return None, df.tail(50)
+
+    latest = ts.max()
+    # Filter rows matching the latest parsed timestamp
+    mask = ts == latest
+    return latest, df.loc[mask]
 
 
 @dataclass(frozen=True)
@@ -123,7 +184,7 @@ def build_args_common(s: Settings) -> list[str]:
         "--run-budget",
         str(float(s.run_budget)),
         "--cache-fail-ttl",
-        "1200",
+        str(int(DEFAULT_CACHE_FAIL_TTL)),
     ]
     if s.allow_eur:
         args += ["--allow-eur", "--eur-to-gbp", str(float(s.eur_to_gbp))]
@@ -134,27 +195,117 @@ def build_args_common(s: Settings) -> list[str]:
 
 def run_action(label: str, argv: list[str]) -> None:
     st.session_state.running = True
+    st.session_state.last_label = label
+    st.session_state.last_output = ""
+    st.session_state.last_exit_code = None
+    st.session_state.last_elapsed_s = None
+
+    t0 = time.perf_counter()
     try:
         with st.spinner(f"Running {label}…"):
             code, out = run_keyflip(argv)
+        elapsed = time.perf_counter() - t0
+        st.session_state.last_elapsed_s = elapsed
         st.session_state.last_exit_code = code
         st.session_state.last_output = out
     finally:
         st.session_state.running = False
 
 
+def show_run_summary_banner() -> None:
+    """
+    Small high-value summary: file sizes + row counts + latest scan timestamp.
+    """
+    wl_n = rows_count(WATCHLIST)
+    sc_n = rows_count(SCANS)
+    pa_n = rows_count(PASSES)
+
+    cols = st.columns(4)
+    cols[0].metric("watchlist.csv rows", "—" if wl_n is None else f"{wl_n:,}")
+    cols[1].metric("scans.csv rows", "—" if sc_n is None else f"{sc_n:,}")
+    cols[2].metric("passes.csv rows", "—" if pa_n is None else f"{pa_n:,}")
+
+    latest_str = "—"
+    df_sc = safe_read_csv(SCANS)
+    if df_sc is not None and not df_sc.empty and "timestamp" in df_sc.columns:
+        latest_ts, _ = latest_timestamp_from_scans(df_sc)
+        if latest_ts is not None:
+            # show as local-ish string
+            latest_str = str(latest_ts)
+
+    cols[3].metric("latest scan timestamp", latest_str)
+
+
 def show_last_run() -> None:
     if st.session_state.last_exit_code is None:
         return
 
-    st.subheader("Run output")
-    st.code(st.session_state.last_output or "(no output)")
+    st.subheader("Last run")
+
+    meta_cols = st.columns(3)
+    meta_cols[0].write(f"**Action:** {st.session_state.last_label or '—'}")
+
+    elapsed = st.session_state.last_elapsed_s
+    meta_cols[1].write(f"**Elapsed:** {('—' if elapsed is None else f'{elapsed:.2f} s')}")
 
     code = st.session_state.last_exit_code
+    meta_cols[2].write(f"**Exit code:** {code}")
+
     if code != 0:
-        st.error(f"Exited with code {code}")
+        st.error("Run failed. Check output below.")
     else:
         st.success("Done")
+
+    # Show useful summary immediately after running
+    show_run_summary_banner()
+
+    with st.expander("Run output (stdout/stderr)", expanded=(code != 0)):
+        st.code(st.session_state.last_output or "(no output)")
+
+
+def show_downloads_row() -> None:
+    """
+    Download buttons so user can grab CSVs without hunting the filesystem.
+    """
+    c1, c2, c3, c4 = st.columns(4)
+
+    wl = safe_read_bytes(WATCHLIST)
+    sc = safe_read_bytes(SCANS)
+    pa = safe_read_bytes(PASSES)
+    db = safe_read_bytes(DB)
+
+    c1.download_button(
+        "⬇️ Download watchlist.csv",
+        data=wl if wl is not None else b"",
+        file_name="watchlist.csv",
+        mime="text/csv",
+        disabled=(wl is None),
+        use_container_width=True,
+    )
+    c2.download_button(
+        "⬇️ Download scans.csv",
+        data=sc if sc is not None else b"",
+        file_name="scans.csv",
+        mime="text/csv",
+        disabled=(sc is None),
+        use_container_width=True,
+    )
+    c3.download_button(
+        "⬇️ Download passes.csv",
+        data=pa if pa is not None else b"",
+        file_name="passes.csv",
+        mime="text/csv",
+        disabled=(pa is None),
+        use_container_width=True,
+    )
+    c4.download_button(
+        "⬇️ Download price_cache.sqlite",
+        data=db if db is not None else b"",
+        file_name="price_cache.sqlite",
+        mime="application/octet-stream",
+        disabled=(db is None),
+        use_container_width=True,
+    )
 
 
 # =========================
@@ -207,13 +358,13 @@ with st.sidebar:
 # Handle maintenance
 if clear_cache:
     argv = build_args_common(settings) + ["--clear-cache"]
-    run_action("clear-cache", argv)
+    run_action("CLEAR-CACHE", argv)
     show_last_run()
     st.stop()
 
 if clear_recent:
     argv = build_args_common(settings) + ["--clear-recent"]
-    run_action("clear-recent", argv)
+    run_action("CLEAR-RECENT", argv)
     show_last_run()
     st.stop()
 
@@ -251,31 +402,34 @@ show_last_run()
 st.divider()
 st.subheader("Results")
 
+# Top-of-results download row (big UX win)
+show_downloads_row()
+
 tabs = st.tabs(["passes.csv", "latest scan", "watchlist.csv", "files"])
 
 with tabs[0]:
     df = safe_read_csv(PASSES)
-    if df is None:
+    if df is None or df.empty:
         st.info("No passes.csv yet (or it’s empty).")
     else:
         st.dataframe(df, use_container_width=True)
 
 with tabs[1]:
     df = safe_read_csv(SCANS)
-    if df is None:
+    if df is None or df.empty:
         st.info("No scans.csv yet (or it’s empty).")
     else:
-        if "timestamp" in df.columns and not df.empty:
-            ts = df["timestamp"].astype(str)
-            last_ts = ts.max()
-            st.caption(f"Latest timestamp: {last_ts}")
-            st.dataframe(df[ts == last_ts], use_container_width=True)
+        latest_ts, latest_df = latest_timestamp_from_scans(df)
+        if latest_ts is not None:
+            st.caption(f"Latest timestamp: {latest_ts}")
+            st.dataframe(latest_df, use_container_width=True)
         else:
+            st.caption("Showing last 50 rows (no usable timestamp column).")
             st.dataframe(df.tail(50), use_container_width=True)
 
 with tabs[2]:
     df = safe_read_csv(WATCHLIST)
-    if df is None:
+    if df is None or df.empty:
         st.info("No watchlist.csv yet (or it’s empty). Run Build or Play.")
     else:
         st.dataframe(df, use_container_width=True)
