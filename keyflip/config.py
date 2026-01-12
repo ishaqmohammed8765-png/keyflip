@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Dict, Tuple
 
 # ============================================================
 # Pricing / profitability assumptions
@@ -22,6 +23,9 @@ MIN_ROI = 0.20
 
 @dataclass(frozen=True)
 class ProfitConfig:
+    """
+    Central profit assumptions. Keep these conservative.
+    """
     sell_fee_pct: float = SELL_FEE_PCT
     buffer_fixed_gbp: float = BUFFER_FIXED_GBP
     buffer_pct_of_buy: float = BUFFER_PCT_OF_BUY
@@ -29,27 +33,61 @@ class ProfitConfig:
     min_roi: float = MIN_ROI
 
 
+def _clamp(x: float, lo: float, hi: float) -> float:
+    try:
+        v = float(x)
+    except Exception:
+        return lo
+    return max(lo, min(hi, v))
+
+
+def _safe_cfg(cfg: ProfitConfig | None) -> ProfitConfig:
+    """
+    Normalize config and clamp unsafe values to sane ranges.
+    """
+    c = cfg or ProfitConfig()
+    return ProfitConfig(
+        sell_fee_pct=_clamp(c.sell_fee_pct, 0.0, 0.95),
+        buffer_fixed_gbp=_clamp(c.buffer_fixed_gbp, 0.0, 50.0),
+        buffer_pct_of_buy=_clamp(c.buffer_pct_of_buy, 0.0, 0.50),
+        min_profit_gbp=float(c.min_profit_gbp),
+        min_roi=float(c.min_roi),
+    )
+
+
 def compute_profit(
     buy_gbp: float,
     sell_gbp: float,
     *,
-    cfg: ProfitConfig = ProfitConfig(),
+    cfg: ProfitConfig | None = None,
 ) -> tuple[float, float]:
     """
     Compute profitability.
 
     Returns:
       (profit_gbp, roi)
+
+    Notes:
+      - Invalid inputs return (-1.0, -1.0) to keep downstream logic simple.
+      - Config values are clamped to sane ranges to avoid accidental "negative buffers"
+        or impossible fee values.
     """
-    if buy_gbp <= 0 or sell_gbp <= 0:
+    try:
+        buy = float(buy_gbp)
+        sell = float(sell_gbp)
+    except Exception:
         return -1.0, -1.0
 
-    fee = min(max(cfg.sell_fee_pct, 0.0), 0.95)
-    net_sell = sell_gbp * (1.0 - fee)
-    buffer = cfg.buffer_fixed_gbp + (buy_gbp * cfg.buffer_pct_of_buy)
+    if buy <= 0 or sell <= 0:
+        return -1.0, -1.0
 
-    profit = net_sell - buy_gbp - buffer
-    roi = profit / buy_gbp
+    c = _safe_cfg(cfg)
+
+    net_sell = sell * (1.0 - c.sell_fee_pct)
+    buffer = c.buffer_fixed_gbp + (buy * c.buffer_pct_of_buy)
+
+    profit = net_sell - buy - buffer
+    roi = profit / buy if buy > 0 else -1.0
     return profit, roi
 
 
@@ -57,13 +95,14 @@ def is_pass(
     buy_gbp: float,
     sell_gbp: float,
     *,
-    cfg: ProfitConfig = ProfitConfig(),
+    cfg: ProfitConfig | None = None,
 ) -> bool:
     """
-    Returns True if profit >= MIN_PROFIT_GBP and roi >= MIN_ROI
+    Returns True if profit >= min_profit_gbp and roi >= min_roi.
     """
-    profit, roi = compute_profit(buy_gbp, sell_gbp, cfg=cfg)
-    return profit >= cfg.min_profit_gbp and roi >= cfg.min_roi
+    c = _safe_cfg(cfg)
+    profit, roi = compute_profit(buy_gbp, sell_gbp, cfg=c)
+    return profit >= c.min_profit_gbp and roi >= c.min_roi
 
 
 # ============================================================
@@ -75,7 +114,7 @@ HTTP_CONNECT_TIMEOUT_S = 6
 HTTP_READ_TIMEOUT_S = 20
 
 # Preferred for requests.get(..., timeout=REQUESTS_TIMEOUT)
-REQUESTS_TIMEOUT = (HTTP_CONNECT_TIMEOUT_S, HTTP_READ_TIMEOUT_S)
+REQUESTS_TIMEOUT: Tuple[int, int] = (HTTP_CONNECT_TIMEOUT_S, HTTP_READ_TIMEOUT_S)
 
 # Legacy single-timeout constant
 HTTP_TIMEOUT_S = HTTP_READ_TIMEOUT_S
@@ -87,7 +126,7 @@ UA = (
     "Chrome/122.0.0.0 Safari/537.36"
 )
 
-DEFAULT_HEADERS = {
+DEFAULT_HEADERS: Dict[str, str] = {
     "User-Agent": UA,
     "Accept-Language": "en-GB,en;q=0.9",
 }
@@ -98,10 +137,10 @@ DEFAULT_HEADERS = {
 # ============================================================
 
 # Successful prices cached longer
-PRICE_OK_TTL_S = 60 * 30          # 30 minutes
+PRICE_OK_TTL_S = 60 * 30  # 30 minutes
 
 # Failed price lookups cached shorter (temporary issues)
-PRICE_FAIL_TTL_S = 60 * 20        # 20 minutes
+PRICE_FAIL_TTL_S = 60 * 20  # 20 minutes
 
 
 # ============================================================
@@ -110,12 +149,11 @@ PRICE_FAIL_TTL_S = 60 * 20        # 20 minutes
 
 # These are JS-rendered listing pages that Playwright can scrape reliably.
 # Only /en-*/game/... URLs will be kept by the harvester.
-FANATICAL_SOURCES: dict[str, str] = {
+FANATICAL_SOURCES: Dict[str, str] = {
     "sale": "https://www.fanatical.com/en/on-sale",
     "new": "https://www.fanatical.com/en/new",
     "top": "https://www.fanatical.com/en/top-sellers",
     "trending": "https://www.fanatical.com/en/trending",
-
     # Optional filters for more low-price inventory
     "under5": "https://www.fanatical.com/en/search?price_to=5",
     "under10": "https://www.fanatical.com/en/search?price_to=10",
