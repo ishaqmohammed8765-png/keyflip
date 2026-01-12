@@ -1,8 +1,4 @@
 
-FANATICAL_MODULE_VERSION = "fanatical.py vNEXT (2026-01-12 redirect-fix)"
-log = logging.getLogger("keyflip.fanatical")
-log.warning("LOADED %s from %s", FANATICAL_MODULE_VERSION, __file__)
-
 from __future__ import annotations
 
 import json
