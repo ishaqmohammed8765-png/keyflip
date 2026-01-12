@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
-set -euxo pipefail
+set -eux
 
-echo "=== postBuild START ==="
-pwd
-ls -la
-
-python -V
-python -m playwright --version
-
-echo "Installing Playwright Chromium..."
+# Install browsers into the Python package directory (shared), not ~/.cache for a specific user
+export PLAYWRIGHT_BROWSERS_PATH=0
 python -m playwright install chromium
-
-echo "Listing Playwright cache..."
-ls -la ~/.cache/ms-playwright || true
-
-echo "=== postBuild DONE ==="
