@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+# MUST be set before importing anything that may import playwright
+import os
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+
 import io
 import time
 from contextlib import redirect_stderr, redirect_stdout
@@ -11,6 +15,7 @@ import pandas as pd
 import streamlit as st
 
 from keyflip.main import main as keyflip_main
+
 
 # =========================
 # Paths / constants
@@ -29,11 +34,12 @@ DEFAULT_CACHE_FAIL_TTL = 1200
 # =========================
 st.set_page_config(page_title="Keyflip Scanner", layout="wide")
 
-st.title("Keyflip — Fanatical → Eneba Scanner (No Playwright)")
+st.title("Keyflip — Fanatical → Eneba Scanner (Playwright Fanatical)")
 st.caption(
-    "Builds a fresh watchlist (<= max buy) then scans for edge. "
-    "HTTP-only (requests + bs4)."
+    "Builds a fresh watchlist (<= max buy) then scans Eneba for edge. "
+    "Fanatical is fetched via Playwright; Eneba is fetched via requests."
 )
+
 
 # =========================
 # Session state
@@ -110,10 +116,6 @@ def file_status_line(p: Path) -> str:
 
 
 def rows_count(path: Path) -> Optional[int]:
-    """
-    Cheap-ish row count for small CSVs.
-    If file is missing/empty, returns None.
-    """
     df = safe_read_csv(path)
     if df is None:
         return None
@@ -136,7 +138,6 @@ def latest_timestamp_from_scans(df: pd.DataFrame) -> Tuple[Optional[pd.Timestamp
         return None, df.tail(50)
 
     latest = ts.max()
-    # Filter rows matching the latest parsed timestamp
     mask = ts == latest
     return latest, df.loc[mask]
 
@@ -213,9 +214,6 @@ def run_action(label: str, argv: list[str]) -> None:
 
 
 def show_run_summary_banner() -> None:
-    """
-    Small high-value summary: file sizes + row counts + latest scan timestamp.
-    """
     wl_n = rows_count(WATCHLIST)
     sc_n = rows_count(SCANS)
     pa_n = rows_count(PASSES)
@@ -230,7 +228,6 @@ def show_run_summary_banner() -> None:
     if df_sc is not None and not df_sc.empty and "timestamp" in df_sc.columns:
         latest_ts, _ = latest_timestamp_from_scans(df_sc)
         if latest_ts is not None:
-            # show as local-ish string
             latest_str = str(latest_ts)
 
     cols[3].metric("latest scan timestamp", latest_str)
@@ -256,7 +253,6 @@ def show_last_run() -> None:
     else:
         st.success("Done")
 
-    # Show useful summary immediately after running
     show_run_summary_banner()
 
     with st.expander("Run output (stdout/stderr)", expanded=(code != 0)):
@@ -264,9 +260,6 @@ def show_last_run() -> None:
 
 
 def show_downloads_row() -> None:
-    """
-    Download buttons so user can grab CSVs without hunting the filesystem.
-    """
     c1, c2, c3, c4 = st.columns(4)
 
     wl = safe_read_bytes(WATCHLIST)
@@ -319,7 +312,8 @@ with st.sidebar:
     verify_candidates = st.number_input("Verify candidates", min_value=20, max_value=2000, value=220, step=20)
     pages_per_source = st.number_input("Pages per source", min_value=1, max_value=10, value=2, step=1)
 
-    verify_limit = st.number_input("Verify limit (0 = unlimited)", min_value=0, max_value=200, value=10, step=1)
+    # Important: your CLI currently treats 0 as "use safety cap"
+    verify_limit = st.number_input("Verify limit (0 = use safety cap)", min_value=0, max_value=200, value=10, step=1)
     safety_cap = st.number_input("Verify safety cap", min_value=1, max_value=200, value=14, step=1)
     scan_limit = st.number_input("Scan limit (0 = unlimited)", min_value=0, max_value=200, value=10, step=1)
 
@@ -402,7 +396,6 @@ show_last_run()
 st.divider()
 st.subheader("Results")
 
-# Top-of-results download row (big UX win)
 show_downloads_row()
 
 tabs = st.tabs(["passes.csv", "latest scan", "watchlist.csv", "files"])
@@ -438,3 +431,5 @@ with tabs[3]:
     st.write("Working directory files:")
     for p in [WATCHLIST, PASSES, SCANS, DB]:
         st.write(file_status_line(p))
+
+   
