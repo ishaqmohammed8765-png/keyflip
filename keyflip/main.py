@@ -26,42 +26,40 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--build", action="store_true", help="Build watchlist only")
     mode.add_argument("--scan", action="store_true", help="Scan watchlist only")
 
-    p.add_argument("--root", type=Path, default=None, help="Project root (default: current working directory)")
+    p.add_argument("--root", type=Path, default=None, help="Project root (default: cwd)")
 
-    # Build settings
-    p.add_argument("--max-buy", type=float, default=10.0, help="Max buy price in GBP")
-    p.add_argument("--watchlist-target", type=int, default=10, help="Target watchlist size")
-    p.add_argument("--verify-candidates", type=int, default=220, help="Candidate pool size before verify")
-    p.add_argument("--pages-per-source", type=int, default=2, help="Pages to harvest per source")
+    # Build
+    p.add_argument("--max-buy", type=float, default=10.0)
+    p.add_argument("--watchlist-target", type=int, default=10)
+    p.add_argument("--verify-candidates", type=int, default=220)
+    p.add_argument("--pages-per-source", type=int, default=2)
 
-    p.add_argument("--verify-limit", type=int, default=10, help="Verifies per run (0 = use safety cap)")
-    p.add_argument("--verify-safety-cap", type=int, default=14, help="Hard upper cap on verifies")
+    p.add_argument("--verify-limit", type=int, default=10, help="0 = use safety cap")
+    p.add_argument("--verify-safety-cap", type=int, default=14)
 
-    # Scan settings
-    p.add_argument("--scan-limit", type=int, default=10, help="Rows scanned per run (0 = unlimited)")
-    p.add_argument("--avoid-recent-days", type=int, default=2, help="Avoid items scanned in last N days")
+    # Scan
+    p.add_argument("--scan-limit", type=int, default=10)
+    p.add_argument("--avoid-recent-days", type=int, default=2)
 
     # Currency
     p.add_argument("--allow-eur", action="store_true")
     p.add_argument("--eur-to-gbp", type=float, default=0.86)
 
-    # Budgets / timeouts
-    p.add_argument("--item-budget", type=float, default=55.0, help="Per-item time budget (seconds)")
-    p.add_argument("--run-budget", type=float, default=0.0, help="Total run budget seconds (0 disables)")
+    # Budgets
+    p.add_argument("--item-budget", type=float, default=55.0)
+    p.add_argument("--run-budget", type=float, default=0.0)
 
     # Cache
-    p.add_argument("--cache-fail-ttl", type=int, default=1200, help="TTL for failed cache entries (seconds)")
-    p.add_argument("--clear-cache", action="store_true", help="Clear price cache and exit")
-    p.add_argument("--clear-recent", action="store_true", help="Clear recent-items tracking and exit")
+    p.add_argument("--cache-fail-ttl", type=int, default=1200)
+    p.add_argument("--clear-cache", action="store_true")
+    p.add_argument("--clear-recent", action="store_true")
 
-    # Debug
-    p.add_argument("--debug", action="store_true", help="Enable debug logging")
-
-    # Diagnostics
-    p.add_argument("--diag-harvest", action="store_true", help="Print harvested link counts per source and exit")
-    p.add_argument("--diag-price", type=int, default=0, help="Test price reader on N sampled URLs and exit")
-    p.add_argument("--diag-seed", type=int, default=1337, help="Seed for diagnostic sampling")
-    p.add_argument("--diag-shuffle", action="store_true", help="Shuffle diagnostic URL pool")
+    # Debug / diag
+    p.add_argument("--debug", action="store_true")
+    p.add_argument("--diag-harvest", action="store_true")
+    p.add_argument("--diag-price", type=int, default=0)
+    p.add_argument("--diag-seed", type=int, default=1337)
+    p.add_argument("--diag-shuffle", action="store_true")
 
     return p
 
@@ -69,26 +67,24 @@ def _build_parser() -> argparse.ArgumentParser:
 # =========================
 # Helpers
 # =========================
-def _resolve_root(args_root: Optional[Path]) -> Path:
-    return (args_root if args_root else Path.cwd()).resolve()
+def _resolve_root(p: Optional[Path]) -> Path:
+    return (p if p else Path.cwd()).resolve()
 
 
 def _log_paths(root: Path) -> None:
     log.info("ROOT: %s", root)
-    log.info("watchlist.csv: %s", (root / "watchlist.csv").resolve())
-    log.info("scans.csv: %s", (root / "scans.csv").resolve())
-    log.info("passes.csv: %s", (root / "passes.csv").resolve())
-    log.info("cache db: %s", (root / "price_cache.sqlite").resolve())
+    log.info("watchlist.csv: %s", root / "watchlist.csv")
+    log.info("scans.csv: %s", root / "scans.csv")
+    log.info("passes.csv: %s", root / "passes.csv")
+    log.info("cache db: %s", root / "price_cache.sqlite")
 
 
-def _watchlist_is_usable(path: Path) -> bool:
+def _watchlist_ok(path: Path) -> bool:
     try:
         if not path.exists() or path.stat().st_size < 20:
             return False
         with path.open("r", encoding="utf-8", errors="replace") as f:
-            header = f.readline().strip()
-            row1 = f.readline().strip()
-        return bool(header and "," in header and row1)
+            return bool(f.readline().strip() and f.readline().strip())
     except Exception:
         return False
 
@@ -96,22 +92,18 @@ def _watchlist_is_usable(path: Path) -> bool:
 # =========================
 # Diagnostics
 # =========================
-def _run_diag_harvest(pages_per_source: int) -> int:
-    log.info("DIAG: Harvesting Fanatical sources")
-    for name, src_url in FANATICAL_SOURCES.items():
-        links = harvest_game_links(src_url, pages=pages_per_source)
+def _run_diag_harvest(pages: int) -> int:
+    for name, src in FANATICAL_SOURCES.items():
+        links = harvest_game_links(src, pages=pages)
         uniq = list(dict.fromkeys(links))
         log.info("source=%s raw=%d unique=%d sample=%s", name, len(links), len(uniq), uniq[:5])
     return 0
 
 
-def _run_diag_price(pages_per_source: int, n: int, *, seed: int, shuffle: bool) -> int:
-    if n <= 0:
-        return 0
-
+def _run_diag_price(pages: int, n: int, *, seed: int, shuffle: bool) -> int:
     pool: list[str] = []
     for src in FANATICAL_SOURCES.values():
-        pool.extend(harvest_game_links(src, pages=pages_per_source))
+        pool.extend(harvest_game_links(src, pages=pages))
 
     uniq = list(dict.fromkeys(pool))
     if shuffle:
@@ -125,21 +117,19 @@ def _run_diag_price(pages_per_source: int, n: int, *, seed: int, shuffle: bool) 
 
 
 # =========================
-# Verify limit normalization
+# Verify normalization
 # =========================
 @dataclass(frozen=True)
-class NormalizedLimits:
+class Normalized:
     verify_limit: int
-    verify_safety_cap: int
+    safety_cap: int
 
 
-def _normalize_verify_limits(v: int, cap: int) -> NormalizedLimits:
+def _normalize_verify(v: int, cap: int) -> Normalized:
     cap = cap if cap > 0 else 14
-    if v < 0:
-        v = 10
-    if v == 0:
+    if v <= 0:
         v = cap
-    return NormalizedLimits(v, cap)
+    return Normalized(v, cap)
 
 
 # =========================
@@ -173,10 +163,14 @@ def main(argv: list[str] | None = None) -> int:
         return _run_diag_harvest(args.pages_per_source)
 
     if args.diag_price > 0:
-        return _run_diag_price(args.pages_per_source, args.diag_price,
-                               seed=args.diag_seed, shuffle=args.diag_shuffle)
+        return _run_diag_price(
+            args.pages_per_source,
+            args.diag_price,
+            seed=args.diag_seed,
+            shuffle=args.diag_shuffle,
+        )
 
-    limits = _normalize_verify_limits(args.verify_limit, args.verify_safety_cap)
+    v = _normalize_verify(args.verify_limit, args.verify_safety_cap)
 
     cfg = RunConfig(
         root=root,
@@ -184,8 +178,8 @@ def main(argv: list[str] | None = None) -> int:
         watchlist_target=args.watchlist_target,
         verify_candidates=args.verify_candidates,
         pages_per_source=args.pages_per_source,
-        verify_limit=limits.verify_limit,
-        verify_safety_cap=limits.verify_safety_cap,
+        verify_limit=v.verify_limit,
+        verify_safety_cap=v.safety_cap,
         scan_limit=args.scan_limit,
         avoid_recent_days=args.avoid_recent_days,
         allow_eur=args.allow_eur,
@@ -203,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         build_watchlist(cfg, cache, watchlist_csv)
 
     if do_scan:
-        if not _watchlist_is_usable(watchlist_csv):
+        if not _watchlist_ok(watchlist_csv):
             log.warning("watchlist.csv missing or empty — run --build first")
             return 0
         scan_watchlist(cfg, cache, watchlist_csv, scans_csv, passes_csv)
@@ -213,3 +207,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
