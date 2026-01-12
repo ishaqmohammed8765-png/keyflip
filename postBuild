@@ -1,2 +1,17 @@
 #!/usr/bin/env bash
+set -euxo pipefail
+
+echo "=== postBuild START ==="
+pwd
+ls -la
+
+python -V
+python -m playwright --version
+
+echo "Installing Playwright Chromium..."
 python -m playwright install chromium
+
+echo "Listing Playwright cache..."
+ls -la ~/.cache/ms-playwright || true
+
+echo "=== postBuild DONE ==="
