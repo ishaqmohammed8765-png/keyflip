@@ -48,9 +48,19 @@ _CHEAPSHARK_BASE = "https://www.cheapshark.com/api/1.0"
 _CHEAPSHARK_STORE_FANATICAL = "15"
 _CHEAPSHARK_REDIRECT = "https://www.cheapshark.com/redirect?dealID="
 
-# Cache so core calling harvest_game_links multiple times doesn't refetch 4x
+# Cache so core calling harvest_game_links multiple times doesn't refetch repeatedly
 _HARVEST_CACHE: Dict[str, Tuple[float, List[str]]] = {}
 _HARVEST_CACHE_TTL_S = 60.0
+
+# Locale handling:
+# Accept /en/... and /en-gb/... etc.
+_LOCALE_EN_RE = re.compile(r"^/en(?:-[a-z]{2})?/", re.I)
+
+# Some redirects land on /game/... without /en/ prefix (rare but real)
+_GAME_OR_EN_RE = re.compile(r"^/(?:en(?:-[a-z]{2})?/)?game/", re.I)
+
+# Filter to games (recommended default)
+_GAME_PATH_RE = re.compile(r"^/en(?:-[a-z]{2})?/game/", re.I)
 
 
 @dataclass(frozen=True)
@@ -132,22 +142,24 @@ def _timeout_sleep(lo_hi: Tuple[float, float]) -> None:
 # ---------------------------
 # URL canonicalization
 # ---------------------------
-_LOCALE_EN_RE = re.compile(r"^/en(?:-[a-z]{2})?/", re.I)
-_GAME_PATH_RE = re.compile(r"^/en(?:-[a-z]{2})?/game/", re.I)
+def _is_fanatical_host(url: str) -> bool:
+    try:
+        return (urlparse(url).netloc or "").lower() in _ALLOWED_HOSTS
+    except Exception:
+        return False
 
 
-def _canonicalize_fanatical_url(base_url: str, href: str) -> Optional[str]:
+def _canonicalize_any_fanatical(url: str) -> Optional[str]:
     """
-    Canonicalize Fanatical URL and accept locale variants:
-      /en/..., /en-gb/..., /en-us/...
+    Canonicalize Fanatical URL and accept:
+      - /en/... or /en-gb/... etc
+      - OR /game/... (some redirects land here)
     Strips query/fragment and trailing slash.
     """
-    href = (href or "").strip()
-    if not href:
+    try:
+        p = urlparse(url)
+    except Exception:
         return None
-
-    full = urljoin(base_url, href)
-    p = urlparse(full)
 
     host = (p.netloc or "").lower()
     if host not in _ALLOWED_HOSTS:
@@ -157,7 +169,8 @@ def _canonicalize_fanatical_url(base_url: str, href: str) -> Optional[str]:
     if not path:
         return None
 
-    if not _LOCALE_EN_RE.match(path + "/"):
+    ok = bool(_LOCALE_EN_RE.match(path + "/") or _GAME_OR_EN_RE.match(path + "/"))
+    if not ok:
         return None
 
     scheme = p.scheme or "https"
@@ -179,6 +192,7 @@ def _cheapshark_fetch_deals(page_number: int, page_size: int) -> List[dict]:
         "pageNumber": max(0, int(page_number)),
         "pageSize": max(1, int(page_size)),
     }
+
     try:
         r = _SESS.get(url, params=params, timeout=_timeout())
     except requests.RequestException as e:
@@ -199,24 +213,101 @@ def _cheapshark_fetch_deals(page_number: int, page_size: int) -> List[dict]:
 
 def _resolve_cheapshark_dealid_to_fanatical_url(deal_id: str) -> Optional[str]:
     """
-    CheapShark redirect endpoint -> final Fanatical URL.
-    We canonicalize the FINAL URL and accept /en-gb/ etc.
+    Robust CheapShark redirect resolution.
+
+    Your log: no_fan_url=120 means *every* redirect resolution returned None.
+    This function:
+      - tries HEAD (fast)
+      - then manually walks redirects (allow_redirects=False) so we can see failures
+      - logs useful reasons on failure
+      - canonicalizes Fanatical locale paths (/en-gb/ etc)
     """
     deal_id = (deal_id or "").strip()
     if not deal_id:
         return None
 
     redir = _CHEAPSHARK_REDIRECT + deal_id
+
+    # 1) Try HEAD + follow redirects
     try:
-        r = _SESS.get(redir, timeout=_timeout(), allow_redirects=True)
+        r = _SESS.head(redir, timeout=_timeout(), allow_redirects=True)
+        final = (r.url or "").strip()
+        if final and _is_fanatical_host(final):
+            canon = _canonicalize_any_fanatical(final)
+            if canon:
+                return canon
     except requests.RequestException:
+        pass
+
+    # 2) Manual redirect walk
+    url = redir
+    for hop in range(8):
+        try:
+            r = _SESS.get(url, timeout=_timeout(), allow_redirects=False)
+        except requests.RequestException as e:
+            log.warning(
+                "CheapShark redirect GET failed deal_id=%s hop=%d err=%s",
+                deal_id,
+                hop,
+                type(e).__name__,
+            )
+            return None
+
+        status = int(r.status_code)
+
+        # If we landed (2xx)
+        if 200 <= status < 300:
+            final = (r.url or "").strip()
+
+            # Fanatical page reached
+            if final and _is_fanatical_host(final):
+                canon = _canonicalize_any_fanatical(final)
+                if canon:
+                    return canon
+
+                log.warning(
+                    "Fanatical URL reached but rejected by canonicalizer deal_id=%s final=%s",
+                    deal_id,
+                    final,
+                )
+                return None
+
+            # Still on cheapshark (no redirect happened)
+            host = (urlparse(final).netloc or "").lower()
+            if "cheapshark.com" in host:
+                log.warning(
+                    "CheapShark redirect did not redirect deal_id=%s (HTTP %s) final=%s",
+                    deal_id,
+                    status,
+                    final,
+                )
+                return None
+
+            # Ended on some other domain
+            log.warning("Redirect ended non-fanatical deal_id=%s final=%s", deal_id, final)
+            return None
+
+        # 3xx: follow Location
+        if 300 <= status < 400:
+            loc = r.headers.get("Location") or r.headers.get("location")
+            if not loc:
+                log.warning("Redirect missing Location deal_id=%s hop=%d url=%s", deal_id, hop, url)
+                return None
+            url = urljoin(url, loc)
+            continue
+
+        # 4xx/5xx: fail with info
+        log.warning(
+            "CheapShark redirect bad status deal_id=%s hop=%d HTTP=%s url=%s",
+            deal_id,
+            hop,
+            status,
+            url,
+        )
         return None
 
-    final = (r.url or "").strip()
-    if not final:
-        return None
-
-    return _canonicalize_fanatical_url(final, final)
+    log.warning("Redirect exceeded hops deal_id=%s", deal_id)
+    return None
 
 
 def harvest_game_links(
@@ -228,14 +319,14 @@ def harvest_game_links(
     games_only: bool = True,
 ) -> List[str]:
     """
-    Harvest Fanatical links via CheapShark (Fanatical store).
-    Why: Fanatical listing pages are JS-rendered, so HTML scraping often returns no items.
+    Harvest Fanatical links via CheapShark.
 
-    Key improvements:
-    - Accept /en-gb/ and other locale paths (not just /en/)
-    - Optional games_only filter to keep watchlist from going empty
-    - Reject-reason counters so logs show WHY you got few/zero
-    - Cache key includes pages/max_links/games_only to avoid refetch storms
+    Key behaviors:
+    - Fanatical listing pages can be JS-rendered -> CheapShark is more reliable.
+    - Accept /en-gb/ and other locale paths.
+    - games_only=True keeps your pipeline from dying on bundles/DLC pages.
+    - Adds reject-reason counters so you can debug empty watchlists fast.
+    - IMPORTANT: does NOT cache empty results (so failures don't stick for 60s).
     """
     pages = max(1, int(pages))
     max_links = max(1, int(max_links))
@@ -257,7 +348,7 @@ def harvest_game_links(
 
     page_size = 60
 
-    # Debug counts
+    # Debug counters
     cat_counts: Dict[str, int] = {}
     reasons = {
         "no_deal_id": 0,
@@ -322,7 +413,10 @@ def harvest_game_links(
             dict(sorted(cat_counts.items(), key=lambda kv: kv[1], reverse=True)),
         )
 
-    _HARVEST_CACHE[cache_key] = (time.time(), list(out))
+    # IMPORTANT: don't cache empties (helps debugging; avoids 0-url cache hits)
+    if out:
+        _HARVEST_CACHE[cache_key] = (time.time(), list(out))
+
     return out
 
 
