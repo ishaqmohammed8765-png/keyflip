@@ -182,58 +182,42 @@ class FanaticalPWClient:
         self.ctx: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
 
-    # =========================
-    # ONLY MODIFIED SECTION
-    # =========================
     def __enter__(self) -> "FanaticalPWClient":
+        # Start Playwright and launch a headless Chromium browser
         try:
             self._pw = sync_playwright().start()
             self.browser = self._pw.chromium.launch(headless=self.headless)
         except Exception as e:
-            msg = str(e)
-            if "Executable doesn't exist" not in msg and "executable doesn't exist" not in msg:
-                raise
-
-            log.error(
-                "Browser binaries not found. Attempting to install via "
-                "`python -m playwright install chromium`."
-            )
-
+            # If the browser cannot launch (e.g., missing browser binaries), instruct user to restart
+            if "executable doesn't exist" in str(e).lower():
+                # Clean up Playwright instance if it was started, then raise a clear error
+                if self._pw:
+                    try:
+                        self._pw.stop()
+                    except Exception:
+                        pass
+                    self._pw = None
+                raise RuntimeError(
+                    "Playwright browser binaries not found. Please restart the application to install them."
+                ) from e
+            # For any other error during setup, clean up and re-raise the exception
             if self._pw:
                 try:
                     self._pw.stop()
                 except Exception:
                     pass
                 self._pw = None
+            raise
 
-            try:
-                import subprocess, sys
-                subprocess.run(
-                    [sys.executable, "-m", "playwright", "install", "chromium"],
-                    check=True,
-                )
-            except Exception as install_err:
-                raise RuntimeError(
-                    "Missing Playwright browser binaries. "
-                    "Please run `python -m playwright install chromium`."
-                ) from install_err
-
-            self._pw = sync_playwright().start()
-            self.browser = self._pw.chromium.launch(headless=self.headless)
-
-        self.ctx = self.browser.new_context(
-            user_agent=UA,
-            locale=self.locale,
-            viewport=self.viewport,
-        )
+        # Browser launched successfully: create a new context and page with default settings
+        self.ctx = self.browser.new_context(user_agent=UA, locale=self.locale, viewport=self.viewport)
         self.page = self.ctx.new_page()
+        # Set default timeout for page interactions (in milliseconds)
         self.page.set_default_timeout(self.default_timeout_ms)
         return self
-    # =========================
-    # END MODIFIED SECTION
-    # =========================
 
     def __exit__(self, exc_type, exc, tb) -> None:
+        # Ensure all browser contexts and pages are closed on exit
         try:
             if self.page is not None:
                 self.page.close()
@@ -260,6 +244,7 @@ class FanaticalPWClient:
     # ---------------------------
 
     def _goto(self, url: str, *, wait: str = "domcontentloaded") -> bool:
+        # Navigate to the URL (wait for DOM content loaded) and return False on timeout or error
         assert self.page is not None
         try:
             self.page.goto(url, wait_until=wait)
@@ -270,6 +255,7 @@ class FanaticalPWClient:
             return False
 
     def _try_accept_cookies(self) -> None:
+        # Attempt to accept cookies by clicking common consent buttons (short timeouts to avoid delay)
         assert self.page is not None
         for sel in (
             "button:has-text('Accept all')",
@@ -286,6 +272,7 @@ class FanaticalPWClient:
                 continue
 
     def _collect_anchors(self) -> List[str]:
+        # Collect all href links present on the current page
         assert self.page is not None
         try:
             return self.page.eval_on_selector_all(
@@ -302,6 +289,8 @@ class FanaticalPWClient:
         sleep_range_s: Tuple[float, float] = (0.25, 0.60),
         stable_rounds: int = 2,
     ) -> List[str]:
+        # Scroll the page in multiple rounds, collecting new game page links as they appear
+        # Stop when no new links are found for `stable_rounds` consecutive scrolls or after `max_rounds` attempts
         assert self.page is not None
 
         seen: set[str] = set()
@@ -341,6 +330,7 @@ class FanaticalPWClient:
         max_links: int = 500,
         sleep_range_s: Tuple[float, float] = (0.25, 0.75),
     ) -> List[str]:
+        # Iterate through listing pages and gather unique game page URLs (up to max_links)
         assert self.page is not None
 
         pages = max(1, int(pages))
@@ -389,6 +379,7 @@ class FanaticalPWClient:
     # ---------------------------
 
     def read_title_and_price_gbp(self, url: str) -> Tuple[Optional[str], Optional[float], str]:
+        # Load a game page and extract its title and first GBP price (if available)
         assert self.page is not None
 
         url = _canonicalize_game_url(url) or url
@@ -424,8 +415,6 @@ def harvest_game_links(source_url: str, pages: int) -> List[str]:
         return c.harvest_game_links(source_url, pages)
 
 
-def read_title_and_price_gbp(
-    url: str,
-) -> Tuple[Optional[str], Optional[float], str]:
+def read_title_and_price_gbp(url: str) -> Tuple[Optional[str], Optional[float], str]:
     with FanaticalPWClient() as c:
         return c.read_title_and_price_gbp(url)
