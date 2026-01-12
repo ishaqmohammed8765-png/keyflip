@@ -1,151 +1,92 @@
 from __future__ import annotations
 
-"""
-Global configuration constants and default parameters for Keyflip, including
-profitability thresholds, network timeouts, and user agent settings.
-"""
-
 from dataclasses import dataclass
-from typing import Dict, Tuple
 
-# ============================================================
-# Pricing / profitability assumptions
-# ============================================================
 
-# Marketplace selling fee (fraction of price taken as fee). e.g., 0.12 = 12%
-SELL_FEE_PCT = 0.12
+@dataclass
+class RunConfig:
+    max_buy: float
+    target: int = 15
+    verify_candidates: int = 200
+    pages_per_source: int = 5
+    verify_limit: int = 0          # 0 = unlimited (but safety_cap still applies)
+    safety_cap: int = 20
+    avoid_recent_days: int = 0
+    allow_eur: bool = False
+    eur_to_gbp: float = 0.86
+    scan_limit: int = 0            # 0 = unlimited
+    item_budget: float = 45.0      # seconds
+    run_budget: float = 0.0        # 0 = unlimited
 
-# Profit safety buffers:
-# - BUFFER_FIXED_GBP covers fixed costs (e.g., FX spread, payment fees, rounding)
-# - BUFFER_PCT_OF_BUY covers price drift risk proportional to the buy price
-BUFFER_FIXED_GBP = 0.30
-BUFFER_PCT_OF_BUY = 0.05
+    def __post_init__(self) -> None:
+        # Fail-fast validation (prevents silent weird behaviour later)
+        if self.max_buy <= 0:
+            raise ValueError("max_buy must be > 0")
 
-# Minimum profit and ROI required for a deal to be considered "passing"
-MIN_PROFIT_GBP = 0.50
-MIN_ROI = 0.20
+        if self.target <= 0:
+            raise ValueError("target must be > 0")
 
-@dataclass(frozen=True)
-class ProfitConfig:
+        if self.verify_candidates <= 0:
+            raise ValueError("verify_candidates must be > 0")
+
+        if self.pages_per_source <= 0:
+            raise ValueError("pages_per_source must be > 0")
+
+        if self.verify_limit < 0:
+            raise ValueError("verify_limit must be >= 0 (0 means unlimited)")
+
+        if self.safety_cap <= 0:
+            raise ValueError("safety_cap must be > 0")
+
+        if self.avoid_recent_days < 0:
+            raise ValueError("avoid_recent_days must be >= 0")
+
+        if self.scan_limit < 0:
+            raise ValueError("scan_limit must be >= 0 (0 means unlimited)")
+
+        if self.item_budget <= 0:
+            raise ValueError("item_budget must be > 0 seconds")
+
+        if self.run_budget < 0:
+            raise ValueError("run_budget must be >= 0 seconds (0 means unlimited)")
+
+        if self.allow_eur and self.eur_to_gbp <= 0:
+            raise ValueError("eur_to_gbp must be > 0 when allow_eur=True")
+
+    # Helpers: safe to add; other files don't need to use them
+    def effective_verify_limit(self) -> int:
+        """Apply safety cap even if verify_limit is unlimited (0)."""
+        if self.verify_limit == 0:
+            return self.safety_cap
+        return min(self.verify_limit, self.safety_cap)
+
+    def is_unlimited_scan(self) -> bool:
+        return self.scan_limit == 0
+
+
+def build_watchlist(config: RunConfig, output_path) -> int:
     """
-    Profit threshold configuration.
-    All values default to conservative assumptions defined above.
+    Build a watchlist using Fanatical scraping logic (placeholder).
+    Return: number of items written.
     """
-    sell_fee_pct: float = SELL_FEE_PCT
-    buffer_fixed_gbp: float = BUFFER_FIXED_GBP
-    buffer_pct_of_buy: float = BUFFER_PCT_OF_BUY
-    min_profit_gbp: float = MIN_PROFIT_GBP
-    min_roi: float = MIN_ROI
+    # Keep prints for now (since you said don't change other files).
+    # In your real implementation, you'd use:
+    # - config.max_buy
+    # - config.pages_per_source
+    # - config.verify_candidates
+    # - config.effective_verify_limit()
+    # - config.target
+    print("Building watchlist with:", config)
+    return 0
 
-def _clamp(x: float, lo: float, hi: float) -> float:
-    """Clamp numeric value x to the [lo, hi] range (inclusive)."""
-    try:
-        v = float(x)
-    except Exception:
-        return lo
-    return max(lo, min(hi, v))
 
-def _safe_cfg(cfg: ProfitConfig | None) -> ProfitConfig:
-    """Return a ProfitConfig instance with values clamped to safe ranges."""
-    c = cfg or ProfitConfig()
-    return ProfitConfig(
-        sell_fee_pct=_clamp(c.sell_fee_pct, 0.0, 0.95),
-        buffer_fixed_gbp=_clamp(c.buffer_fixed_gbp, 0.0, 50.0),
-        buffer_pct_of_buy=_clamp(c.buffer_pct_of_buy, 0.0, 0.50),
-        min_profit_gbp=float(c.min_profit_gbp),
-        min_roi=float(c.min_roi),
-    )
-
-def compute_profit(
-    buy_gbp: float,
-    sell_gbp: float,
-    *,
-    cfg: ProfitConfig | None = None,
-) -> Tuple[float, float]:
+def scan_watchlist(config: RunConfig, watchlist_path, scans_path, passes_path, db_path, fail_ttl):
     """
-    Compute the profit (GBP) and return-on-investment (ROI) from a given buy price and sell price.
-    
-    Returns:
-        (profit_gbp, roi) as a tuple of floats.
-    
-    Notes:
-        - If inputs are invalid or non-positive, returns (-1.0, -1.0).
-        - The ProfitConfig (cfg) values are clamped to safe ranges to avoid negative buffers or extreme fees.
+    Scan watchlist using Eneba logic (placeholder).
     """
-    try:
-        buy = float(buy_gbp)
-        sell = float(sell_gbp)
-    except Exception:
-        return -1.0, -1.0
-
-    if buy <= 0 or sell <= 0:
-        return -1.0, -1.0
-
-    c = _safe_cfg(cfg)
-    net_sell = sell * (1.0 - c.sell_fee_pct)
-    buffer = c.buffer_fixed_gbp + (buy * c.buffer_pct_of_buy)
-    profit = net_sell - buy - buffer
-    roi = profit / buy if buy > 0 else -1.0
-    return profit, roi
-
-def is_pass(
-    buy_gbp: float,
-    sell_gbp: float,
-    *,
-    cfg: ProfitConfig | None = None,
-) -> bool:
-    """
-    Determine if a flip meets the minimum profitability criteria.
-    
-    Returns True if and only if profit >= min_profit_gbp and ROI >= min_roi for the given (or default) ProfitConfig.
-    """
-    c = _safe_cfg(cfg)
-    profit, roi = compute_profit(buy_gbp, sell_gbp, cfg=c)
-    return profit >= c.min_profit_gbp and roi >= c.min_roi
-
-# ============================================================
-# Networking defaults
-# ============================================================
-
-# Timeout for HTTP requests: (connect_timeout, read_timeout) in seconds
-HTTP_CONNECT_TIMEOUT_S = 6
-HTTP_READ_TIMEOUT_S = 20
-REQUESTS_TIMEOUT: Tuple[int, int] = (HTTP_CONNECT_TIMEOUT_S, HTTP_READ_TIMEOUT_S)
-# Single-value timeout (legacy usage, equal to read timeout)
-HTTP_TIMEOUT_S = HTTP_READ_TIMEOUT_S
-
-# Default User-Agent string for web requests and Playwright
-UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/122.0.0.0 Safari/537.36"
-)
-# Common headers for HTTP requests
-DEFAULT_HEADERS: Dict[str, str] = {
-    "User-Agent": UA,
-    "Accept-Language": "en-GB,en;q=0.9",
-}
-
-# ============================================================
-# Cache TTLs (seconds)
-# ============================================================
-
-# Cache duration for successful price lookups (longer, since the price is known)
-PRICE_OK_TTL_S = 60 * 30   # 30 minutes
-# Cache duration for failed price lookups (shorter, to retry sooner in case of transient issues)
-PRICE_FAIL_TTL_S = 60 * 20  # 20 minutes
-
-# ============================================================
-# Fanatical sources (URLs for Playwright scraping)
-# ============================================================
-
-# Key pages on Fanatical to scrape for game deals. Only game pages under /en-*/game/... are considered.
-FANATICAL_SOURCES: Dict[str, str] = {
-    "sale": "https://www.fanatical.com/en/on-sale",
-    "new": "https://www.fanatical.com/en/new",
-    "top": "https://www.fanatical.com/en/top-sellers",
-    "trending": "https://www.fanatical.com/en/trending",
-    # Additional search filters for low-price items
-    "under5": "https://www.fanatical.com/en/search?price_to=5",
-    "under10": "https://www.fanatical.com/en/search?price_to=10",
-}
+    # In your real implementation, you'd use:
+    # - config.scan_limit (0 = unlimited)
+    # - config.item_budget / config.run_budget for time limits
+    # - config.allow_eur / eur_to_gbp for currency handling
+    print("Scanning watchlist using:", config)
+    return
