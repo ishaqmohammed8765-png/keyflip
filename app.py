@@ -4,9 +4,10 @@ import os
 import subprocess
 import sys
 import streamlit as st
+from pathlib import Path
 
-# Set browser path environment variable early
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+# Set browser path environment variable to a writable local folder
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(Path(".playwright").resolve())
 
 # --- Ensure Playwright Chromium is installed before anything else ---
 if not st.session_state.get('playwright_installed', False):
@@ -43,7 +44,6 @@ import io
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional, Tuple
 
 import pandas as pd
