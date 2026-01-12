@@ -89,5 +89,82 @@ with st.sidebar:
     clear_cache = st.button("Clear price cache", use_container_width=True)
     clear_recent = st.button("Clear recent flags", use_container_width=True)
 
-# [The rest of app.py continues below unchanged...]
-# Your existing scan logic, buttons, tabs, and file displays remain intact.
+# Action buttons
+col1, col2, col3 = st.columns([1, 1, 1])
+build_clicked = col1.button("🔨 Build Watchlist", use_container_width=True)
+scan_clicked = col2.button("🔍 Scan Watchlist", use_container_width=True)
+play_clicked = col3.button("▶️ Play All (Build + Scan)", use_container_width=True)
+
+# Execution logic
+if clear_cache:
+    PriceCache(DB_PATH).clear_all()
+    st.success("Cache cleared.")
+
+if clear_recent:
+    if WATCHLIST_CSV.exists():
+        WATCHLIST_CSV.unlink()
+    st.success("Recent watchlist entries cleared.")
+
+if build_clicked or play_clicked:
+    config = RunConfig(
+        max_buy=max_buy,
+        target=watchlist_target,
+        verify_candidates=verify_candidates,
+        pages_per_source=pages_per_source,
+        verify_limit=verify_limit,
+        safety_cap=safety_cap,
+        avoid_recent_days=avoid_recent_days,
+    )
+    with st.spinner("Building watchlist from Fanatical..."):
+        added = build_watchlist(config, WATCHLIST_CSV)
+        st.success(f"Watchlist built with {added} new items." if added else "Watchlist built, but no items were added (no matches found).")
+
+if scan_clicked or play_clicked:
+    config = RunConfig(
+        max_buy=max_buy,
+        target=watchlist_target,
+        verify_candidates=verify_candidates,
+        pages_per_source=pages_per_source,
+        verify_limit=verify_limit,
+        safety_cap=safety_cap,
+        avoid_recent_days=avoid_recent_days,
+        allow_eur=allow_eur,
+        eur_to_gbp=eur_to_gbp,
+        scan_limit=scan_limit,
+        item_budget=item_budget,
+        run_budget=run_budget,
+    )
+    with st.spinner("Scanning watchlist on Eneba..."):
+        scan_watchlist(config, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, DEFAULT_CACHE_FAIL_TTL)
+        st.success("Scan complete. Results saved.")
+
+# Display outputs
+watch_df = safe_read_csv(WATCHLIST_CSV)
+scans_df = safe_read_csv(SCANS_CSV)
+passes_df = safe_read_csv(PASSES_CSV)
+
+st.divider()
+tabs = st.tabs(["📋 Watchlist", "✅ Good Deals", "❌ Passed"])
+
+with tabs[0]:
+    if watch_df is not None:
+        st.dataframe(watch_df, use_container_width=True)
+    else:
+        st.info("No watchlist available yet.")
+
+with tabs[1]:
+    if scans_df is not None:
+        ts, recent = latest_timestamp_from_scans(scans_df)
+        if ts:
+            st.caption(f"Most recent scan at {ts}")
+        st.dataframe(recent, use_container_width=True)
+        st.download_button("Download Scans CSV", data=SCANS_CSV.read_bytes(), file_name="scans.csv")
+    else:
+        st.info("No scan results found.")
+
+with tabs[2]:
+    if passes_df is not None:
+        st.dataframe(passes_df, use_container_width=True)
+        st.download_button("Download Passes CSV", data=PASSES_CSV.read_bytes(), file_name="passes.csv")
+    else:
+        st.info("No passed listings found.")
