@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import re
-import time
 from typing import Any, Iterable, Optional, Tuple
-from urllib.parse import quote_plus, urljoin, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -17,20 +15,32 @@ log = logging.getLogger("keyflip.eneba")
 
 _BASE = "https://www.eneba.com"
 
-# Reject obvious non-game / not-a-key / wrong product types
+# Reject obvious non-key / wrong product types
 _BAD_SLUG_WORDS = {
-    "gift-card", "wallet", "prepaid", "card",
-    "dlc", "season-pass", "seasonpass", "add-on", "addon",
-    "bundle", "soundtrack", "artbook", "expansion",
+    "gift-card",
+    "wallet",
+    "prepaid",
+    "card",
+    "dlc",
+    "season-pass",
+    "seasonpass",
+    "add-on",
+    "addon",
+    "bundle",
+    "soundtrack",
+    "artbook",
+    "expansion",
 }
 
-# Must look like an actual product page path on /gb/
-# Eneba product URLs commonly look like:
-#   /gb/steam-xxx-pc-key-global
+# Eneba product pages under /gb/ are usually a single slug segment:
 #   /gb/game-title-pc-steam-key-global
-_PRODUCT_SLUG_RE = re.compile(r"^/gb/[a-z0-9-]{8,}$")
+# Use case-insensitive match and allow longer slugs.
+_PRODUCT_SLUG_RE = re.compile(r"^/gb/[a-z0-9-]{8,}$", re.I)
 
 
+# -----------------------------------------------------------------------------
+# Session
+# -----------------------------------------------------------------------------
 def _make_session() -> requests.Session:
     s = requests.Session()
     s.headers.update(
@@ -71,39 +81,66 @@ def _make_session() -> requests.Session:
 _SESS = _make_session()
 
 
+# -----------------------------------------------------------------------------
+# Public helpers
+# -----------------------------------------------------------------------------
 def make_store_search_url(title: str) -> str:
     q = quote_plus(f"{title} steam key pc")
     return f"{_BASE}/gb/store?text={q}"
 
 
+# -----------------------------------------------------------------------------
+# Internal helpers
+# -----------------------------------------------------------------------------
 def _parse_float(x: Any) -> Optional[float]:
     if x is None:
         return None
     if isinstance(x, (int, float)):
-        return float(x)
+        v = float(x)
+        return v if v > 0 else None
     s = str(x).strip().replace(",", "")
     s = re.sub(r"[^\d.]+", "", s)
     if not s:
         return None
     try:
-        return float(s)
+        v = float(s)
+        return v if v > 0 else None
     except Exception:
         return None
 
 
 def _canonicalize(href: str) -> Optional[str]:
+    """
+    Canonicalize to https://www.eneba.com/gb/<slug> with no query/fragment,
+    and only accept paths that look like a product slug.
+    """
     href = (href or "").strip()
     if not href:
         return None
-    # Keep only /gb/<slug> without query/fragment
-    p = urlparse(urljoin(_BASE, href))
-    if "eneba.com" not in (p.netloc or ""):
+
+    full = urljoin(_BASE, href)
+    try:
+        p = urlparse(full)
+    except Exception:
         return None
-    if not p.path.startswith("/gb/"):
+
+    host = (p.netloc or "").lower()
+    if "eneba.com" not in host:
         return None
-    if not _PRODUCT_SLUG_RE.match(p.path):
+
+    path = (p.path or "").strip()
+    if not path.startswith("/gb/"):
         return None
-    return f"{p.scheme}://{p.netloc}{p.path}".split("?")[0]
+
+    # normalize path for matching/scoring (Eneba slugs are effectively case-insensitive)
+    path_norm = path.lower()
+
+    # Strict-ish: only /gb/<single-slug> forms
+    if not _PRODUCT_SLUG_RE.match(path_norm):
+        return None
+
+    # Always canonicalize host to www + https, strip query/fragment
+    return urlunparse(("https", "www.eneba.com", path_norm, "", "", ""))
 
 
 def _score_candidate(canon_url: str, title: str) -> int:
@@ -112,21 +149,19 @@ def _score_candidate(canon_url: str, title: str) -> int:
     Uses URL slug only (fast + stable).
     """
     p = urlparse(canon_url)
-    h = p.path.lower()
+    h = (p.path or "").lower()
 
-    # must be /gb/ product slug-like
     if not _PRODUCT_SLUG_RE.match(h):
         return -10
 
     slug = h.rsplit("/", 1)[-1]
     score = 0
 
-    # hard rejects
     for w in _BAD_SLUG_WORDS:
         if w in slug:
             return -50
 
-    # strong positives
+    # positives
     if "steam" in slug:
         score += 8
     if "key" in slug:
@@ -134,46 +169,51 @@ def _score_candidate(canon_url: str, title: str) -> int:
     if "pc" in slug:
         score += 6
 
-    # prefer explicit "steam-key" patterns
     if "steam-key" in slug or ("steam" in slug and "key" in slug):
         score += 6
 
-    # prefer global (small bonus)
     if "global" in slug:
         score += 2
 
-    # title overlap (rough)
-    title_words = [w for w in re.split(r"[^a-z0-9]+", title.lower()) if len(w) >= 3]
+    title_words = [w for w in re.split(r"[^a-z0-9]+", (title or "").lower()) if len(w) >= 3]
     overlap = sum(1 for w in title_words if w in slug)
     score += min(overlap, 8)
 
-    # penalize “too generic” slugs
     if overlap <= 1:
         score -= 2
 
     return score
 
 
-def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional[str], str]:
-    """
-    Picks the best matching product URL from Eneba store search results.
-    """
+def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
     try:
-        r = _SESS.get(store_url, timeout=HTTP_TIMEOUT_S)
+        r = _SESS.get(url, timeout=HTTP_TIMEOUT_S)
+        return r, None
     except requests.RequestException as e:
         return None, f"failed (http error: {type(e).__name__})"
+
+
+def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional[str], str]:
+    """
+    Pick the best matching product URL from Eneba store search results.
+    """
+    r, err = _http_get(store_url)
+    if err:
+        return None, err
+    assert r is not None
 
     if r.status_code in (403, 429):
         return None, f"failed (blocked HTTP {r.status_code})"
     if r.status_code >= 400:
         return None, f"failed (http {r.status_code})"
 
-    soup = BeautifulSoup(r.text, "lxml")
+    html = r.text or ""
+    soup = BeautifulSoup(html, "lxml")
 
     best_url: Optional[str] = None
     best_score = -10**9
 
-    # (A) normal anchor scan
+    # (A) anchor scan
     for a in soup.select("a[href]"):
         canon = _canonicalize(a.get("href") or "")
         if not canon:
@@ -182,11 +222,13 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
         if sc > best_score:
             best_score, best_url = sc, canon
 
-    # (B) regex fallback for hard-to-find anchors
+    # (B) regex fallback (wider net: www + non-www)
     if not best_url or best_score < 6:
-        found = re.findall(r'https://www\.eneba\.com/gb/[a-z0-9\-]{8,}', r.text.lower())
+        found = re.findall(r"https?://(?:www\.)?eneba\.com/gb/[a-z0-9\-]{8,}", html, flags=re.I)
         for full in found:
-            canon = full.split("?")[0]
+            canon = _canonicalize(full)
+            if not canon:
+                continue
             sc = _score_candidate(canon, title)
             if sc > best_score:
                 best_score, best_url = sc, canon
@@ -217,26 +259,28 @@ def _extract_price_from_ldjson(soup: BeautifulSoup) -> Optional[float]:
             data = json.loads(txt)
         except Exception:
             continue
+
         blobs = data if isinstance(data, list) else [data]
         for blob in blobs:
             if not isinstance(blob, dict):
                 continue
+
             offers = blob.get("offers")
             if not offers:
                 continue
             offer_list = offers if isinstance(offers, list) else [offers]
+
             for off in offer_list:
                 if not isinstance(off, dict):
                     continue
                 cur = str(off.get("priceCurrency") or "").upper()
                 if cur != "GBP":
                     continue
-                p = _parse_float(off.get("price"))
-                if p is not None:
-                    return p
-                lp = _parse_float(off.get("lowPrice"))
-                if lp is not None:
-                    return lp
+
+                for k in ("price", "lowPrice", "highPrice"):
+                    p = _parse_float(off.get(k))
+                    if p is not None:
+                        return p
     return None
 
 
@@ -252,20 +296,19 @@ def _extract_price_from_meta(soup: BeautifulSoup) -> Optional[float]:
 
 def _extract_price_from_next_data(html_text: str) -> Optional[float]:
     """
-    Eneba is often Next.js; pricing is frequently embedded in __NEXT_DATA__ JSON.
-    We look for dicts that contain GBP + a plausible numeric price.
+    Eneba (Next.js) often embeds prices in __NEXT_DATA__.
+    Look for nodes that indicate GBP and contain a plausible numeric value.
     """
-    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text, re.S)
+    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text or "", re.S | re.I)
     if not m:
         return None
 
-    raw = m.group(1).strip()
+    raw = (m.group(1) or "").strip()
     try:
         data = json.loads(raw)
     except Exception:
         return None
 
-    # Heuristic: find nodes with currency GBP and a numeric value, or price nodes tagged as GBP
     for node in _walk(data):
         if not isinstance(node, dict):
             continue
@@ -287,6 +330,7 @@ def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
     Last resort regex, but try to avoid grabbing random '£' values.
     Search near purchase UI terms first.
     """
+    html_text = html_text or ""
     lower = html_text.lower()
     needles = ("buy now", "add to cart", "add to basket", "checkout", "purchase")
     idxs = [lower.find(n) for n in needles if lower.find(n) != -1]
@@ -307,23 +351,24 @@ def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
 
 def read_price_gbp(url: str) -> Tuple[Optional[float], str]:
     """
-    Safer price extraction order:
-    1) JSON-LD offers with priceCurrency GBP
-    2) meta[itemprop=price] + meta[itemprop=priceCurrency]==GBP
-    3) __NEXT_DATA__ (Next.js JSON) GBP (big reliability win)
-    4) visible '£' near purchase UI (last resort)
+    Price extraction order:
+      1) JSON-LD offers with GBP
+      2) META itemprop price + currency GBP
+      3) __NEXT_DATA__ (Next.js JSON) GBP
+      4) visible '£' near purchase UI terms
     """
-    try:
-        r = _SESS.get(url, timeout=HTTP_TIMEOUT_S)
-    except requests.RequestException as e:
-        return None, f"failed (http error: {type(e).__name__})"
+    r, err = _http_get(url)
+    if err:
+        return None, err
+    assert r is not None
 
     if r.status_code in (403, 429):
         return None, f"failed (blocked HTTP {r.status_code})"
     if r.status_code >= 400:
         return None, f"failed (http {r.status_code})"
 
-    soup = BeautifulSoup(r.text, "lxml")
+    html = r.text or ""
+    soup = BeautifulSoup(html, "lxml")
 
     p = _extract_price_from_ldjson(soup)
     if p is not None:
@@ -333,11 +378,11 @@ def read_price_gbp(url: str) -> Tuple[Optional[float], str]:
     if p is not None:
         return p, "ok (META price+currency GBP)"
 
-    p = _extract_price_from_next_data(r.text)
+    p = _extract_price_from_next_data(html)
     if p is not None:
         return p, "ok (__NEXT_DATA__ GBP)"
 
-    p = _extract_price_from_visible_gbp(r.text)
+    p = _extract_price_from_visible_gbp(html)
     if p is not None:
         return p, "ok (REGEX £ price, UI-window)"
 
