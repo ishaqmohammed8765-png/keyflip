@@ -81,7 +81,6 @@ def _ttl_fail(cfg: RunConfig, fail_ttl_override: Optional[int] = None) -> int:
         except Exception:
             pass
 
-    # compat: cfg might have cache_fail_ttl or cache_fail_ttl_s
     for name in ("cache_fail_ttl", "cache_fail_ttl_s"):
         if hasattr(cfg, name):
             try:
@@ -99,7 +98,6 @@ def _join_notes(*xs: str) -> str:
 
 
 def _effective_verify_cap(cfg: RunConfig) -> int:
-    # Prefer helper if present
     if hasattr(cfg, "effective_verify_limit"):
         try:
             return int(cfg.effective_verify_limit())
@@ -122,9 +120,7 @@ def _recent_key(namespace: str, key: str) -> str:
 
 def _read_csv_safe(path: Path) -> pd.DataFrame:
     try:
-        if not path.exists():
-            return pd.DataFrame()
-        if path.stat().st_size == 0:
+        if not path.exists() or path.stat().st_size == 0:
             return pd.DataFrame()
         return pd.read_csv(path)
     except Exception:
@@ -149,7 +145,6 @@ def _append_csv(path: Path, batch: pd.DataFrame, cols: List[str]) -> None:
 
 
 def _get_run_limits(cfg: RunConfig) -> tuple[float, float]:
-    # compat: cfg can be run_budget or run_budget_s, item_budget or item_budget_s
     run_budget = float(getattr(cfg, "run_budget", getattr(cfg, "run_budget_s", 0.0)) or 0.0)
     item_budget = float(getattr(cfg, "item_budget", getattr(cfg, "item_budget_s", 0.0)) or 0.0)
     return run_budget, item_budget
@@ -170,29 +165,24 @@ def _open_cache(db_path: Optional[Path]) -> PriceCache:
         db_path = Path("price_cache.sqlite")
     db_path = Path(db_path)
 
-    # Try common constructor signatures
     try:
-        return PriceCache(db_path)  # PriceCache(Path)
+        return PriceCache(db_path)
     except TypeError:
         pass
-
     try:
-        return PriceCache(path=db_path)  # PriceCache(path=Path)
+        return PriceCache(path=db_path)
     except TypeError:
         pass
-
     try:
-        return PriceCache(str(db_path))  # PriceCache(str)
+        return PriceCache(str(db_path))
     except TypeError:
         pass
-
     try:
-        return PriceCache(path=str(db_path))  # PriceCache(path=str)
+        return PriceCache(path=str(db_path))
     except TypeError:
         pass
-
     try:
-        return PriceCache(db_path=str(db_path))  # PriceCache(db_path=str)
+        return PriceCache(db_path=str(db_path))
     except TypeError:
         pass
 
@@ -201,24 +191,30 @@ def _open_cache(db_path: Optional[Path]) -> PriceCache:
     )
 
 
-def _best_db_path(cfg: RunConfig, out_csv: Optional[Path] = None) -> Path:
+def _best_db_path(cfg: RunConfig, out_csv: Optional[Path] = None, db_path: Optional[Path] = None) -> Path:
     """
-    Choose a stable cache DB location:
-    - Prefer cfg.root/price_cache.sqlite if cfg.root exists
-    - Else, prefer out_csv.parent/price_cache.sqlite if out_csv provided
-    - Else, working dir
+    Prefer:
+    - explicit db_path argument
+    - cfg.root/price_cache.sqlite
+    - out_csv.parent/price_cache.sqlite
+    - ./price_cache.sqlite
     """
+    if db_path is not None:
+        return Path(db_path)
+
     root = getattr(cfg, "root", None)
     if root:
         try:
             return Path(root) / "price_cache.sqlite"
         except Exception:
             pass
+
     if out_csv is not None:
         try:
             return Path(out_csv).parent / "price_cache.sqlite"
         except Exception:
             pass
+
     return Path("price_cache.sqlite")
 
 
@@ -295,7 +291,6 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
     avoid_days = int(getattr(cfg, "avoid_recent_days", 0) or 0)
     verify_cap = _effective_verify_cap(cfg)  # 0 => unlimited
 
-    # Stable cache location
     db_path = _best_db_path(cfg, out_csv=out_csv)
     cache = _open_cache(db_path)
 
@@ -304,8 +299,14 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
     kept = 0
     attempted = 0
 
-    # Harvest links (reused Playwright client)
+    # diagnostics
+    rejected_no_price = 0
+    rejected_too_expensive = 0
+    rejected_budget = 0
+    skipped_recent = 0
+
     with FanaticalPWClient(headless=True) as fan:
+        # Harvest
         for name, src_url in FANATICAL_SOURCES.items():
             if not _budget_ok(start, run_budget):
                 break
@@ -322,24 +323,26 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
                 log.warning("Harvest failed for %s: %s", name, e)
 
         links = _dedupe(links)
+
+        # Always write headers so downstream never crashes
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+
         if not links:
-            # Always write a CSV with headers so downstream doesn't error
             pd.DataFrame([], columns=WATCHLIST_COLS).to_csv(out_csv, index=False)
             log.warning("Built watchlist: harvested=0 (no links). out=%s", out_csv)
             return 0
 
-        # Candidate pool
         random.shuffle(links)
         pool = links[:verify_candidates] if verify_candidates > 0 else links
 
-        # Optimisation: if cache already knows some buy prices, try cheapest first.
-        # This massively improves success when verify_cap is small (e.g., 20).
+        # Prefer cached OK prices first (cheapest first) to improve success when verify_cap is small.
         cached_ok: List[Tuple[float, str]] = []
         unknown: List[str] = []
 
         for u in pool:
             key = _buy_key(u)
             if avoid_days > 0 and cache.is_recent(_recent_key("build", key), avoid_days):
+                skipped_recent += 1
                 continue
 
             c = cache.get(key)
@@ -351,10 +354,9 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
             else:
                 unknown.append(u)
 
-        cached_ok.sort(key=lambda t: t[0])  # cheapest first
+        cached_ok.sort(key=lambda t: t[0])
         ordered_pool = [u for _, u in cached_ok] + unknown
 
-        # Verify loop
         for url in ordered_pool:
             if kept >= target:
                 break
@@ -364,9 +366,8 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
                 break
 
             key = _buy_key(url)
-            # avoid_days check already applied above when we built ordered_pool,
-            # but keep it here too (safe for future changes)
             if avoid_days > 0 and cache.is_recent(_recent_key("build", key), avoid_days):
+                skipped_recent += 1
                 continue
 
             attempted += 1
@@ -374,14 +375,17 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
 
             title, buy_price, notes = get_buy(cfg, cache, url, fan=fan)
 
-            # Per-item budget
-            if item_budget > 0 and (time.time() - t0) > item_budget:
+            elapsed = time.time() - t0
+            if item_budget > 0 and elapsed > item_budget:
+                rejected_budget += 1
                 continue
 
-            # Filter
             if buy_price is None:
+                rejected_no_price += 1
                 continue
+
             if buy_price > max_buy:
+                rejected_too_expensive += 1
                 continue
 
             rows.append(
@@ -396,21 +400,25 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
             cache.mark_recent(_recent_key("build", key))
 
     df = pd.DataFrame(rows, columns=WATCHLIST_COLS)
-    out_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    # Always write headers even if empty
     df.to_csv(out_csv, index=False)
 
     log.info(
-        "Built watchlist: harvested=%d attempted=%d kept=%d target=%d verify_cap=%d max_buy=%.2f out=%s",
+        "Built watchlist: harvested=%d pool=%d attempted=%d kept=%d target=%d max_buy=%.2f verify_cap=%d "
+        "rejected_no_price=%d rejected_too_expensive=%d rejected_budget=%d skipped_recent=%d out=%s",
         len(links),
+        len(pool),
         attempted,
         kept,
         target,
-        verify_cap,
         max_buy,
+        verify_cap,
+        rejected_no_price,
+        rejected_too_expensive,
+        rejected_budget,
+        skipped_recent,
         out_csv,
     )
+
     return int(len(df))
 
 
@@ -425,7 +433,7 @@ def scan_watchlist(
     """
     Matches app.py: scan_watchlist(config, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, fail_ttl)
     """
-    cache = _open_cache(db_path)
+    cache = _open_cache(_best_db_path(cfg, db_path=db_path))
 
     run_budget, item_budget = _get_run_limits(cfg)
     avoid_days = int(getattr(cfg, "avoid_recent_days", 0) or 0)
@@ -453,11 +461,9 @@ def scan_watchlist(
             return False
         return cache.is_recent(_recent_key("scan", _buy_key(buy_url)), avoid_days)
 
-    # Prefer not-recently-scanned items first
     watch = watch.copy()
     watch["__recent_scan"] = watch["buy_url"].astype(str).apply(was_scanned_recently)
 
-    # Shuffle within groups
     fresh = watch[watch["__recent_scan"] == False].sample(frac=1.0, random_state=None)
     stale = watch[watch["__recent_scan"] == True].sample(frac=1.0, random_state=None)
     watch = pd.concat([fresh, stale], ignore_index=True).drop(columns=["__recent_scan"])
@@ -482,7 +488,6 @@ def scan_watchlist(
                 cfg, cache, buy_url, fan=fan, fail_ttl_override=fail_ttl
             )
 
-            # Resolve on market side
             store_url = make_store_search_url(title)
             prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
 
@@ -508,8 +513,8 @@ def scan_watchlist(
                     and roi >= MIN_ROI
                 )
 
-            # Enforce per-item budget (skip recording if it took too long)
-            if item_budget > 0 and (time.time() - t0) > item_budget:
+            elapsed = time.time() - t0
+            if item_budget > 0 and elapsed > item_budget:
                 continue
 
             rows.append(
@@ -528,7 +533,7 @@ def scan_watchlist(
                     "market_url": prod_url or store_url,
                     "buy_notes": buy_notes,
                     "market_notes": _join_notes(resolve_notes, sell_notes),
-                    "elapsed_s": round(time.time() - t0, 2),
+                    "elapsed_s": round(elapsed, 2),
                 }
             )
 
@@ -546,9 +551,7 @@ def scan_watchlist(
     passes_count = int(batch["passes"].sum()) if not batch.empty and "passes" in batch.columns else 0
     log.info(
         "Scan complete: scanned=%d passes=%d scans=%s passes=%s",
-        len(batch),
-        passes_count,
-        scans_path,
-        passes_path,
+        len(batch), passes_count, scans_path, passes_path
     )
     return batch
+
