@@ -1,6 +1,70 @@
+# keyflip/config.py
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+# ============================================================
+# Networking
+# ============================================================
+
+HTTP_CONNECT_TIMEOUT_S = 6
+HTTP_READ_TIMEOUT_S = 20
+
+# Some modules expect a single timeout variable:
+HTTP_TIMEOUT_S = HTTP_READ_TIMEOUT_S
+
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
+
+# ============================================================
+# Pricing / profitability assumptions (tune these)
+# ============================================================
+
+SELL_FEE_PCT = 0.12
+BUFFER_FIXED_GBP = 0.30
+BUFFER_PCT_OF_BUY = 0.05
+
+MIN_PROFIT_GBP = 0.50
+MIN_ROI = 0.20
+
+
+def compute_profit(buy_gbp: float, sell_gbp: float) -> tuple[float, float]:
+    """Returns (profit_gbp, roi)."""
+    net_sell = sell_gbp * (1.0 - SELL_FEE_PCT)
+    buffer = BUFFER_FIXED_GBP + (buy_gbp * BUFFER_PCT_OF_BUY)
+    profit = net_sell - buy_gbp - buffer
+    roi = profit / buy_gbp if buy_gbp > 0 else -1.0
+    return profit, roi
+
+
+# ============================================================
+# Cache TTL defaults
+# ============================================================
+
+PRICE_OK_TTL_S = 60 * 30        # 30 minutes
+PRICE_FAIL_TTL_S = 60 * 20      # 20 minutes
+
+# Some code names this slightly differently; define both to be safe.
+PRICE_OK_TTL = PRICE_OK_TTL_S
+PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
+
+# ============================================================
+# Fanatical sources (used by builder)
+# ============================================================
+
+FANATICAL_SOURCES = {
+    "sale": "https://www.fanatical.com/en/on-sale",
+    "latest": "https://www.fanatical.com/en/new-releases",
+    "top": "https://www.fanatical.com/en/top-sellers",
+    "trending": "https://www.fanatical.com/en/trending",
+}
+
+# ============================================================
+# Run configuration (your existing config object)
+# ============================================================
 
 
 @dataclass
@@ -64,18 +128,15 @@ class RunConfig:
         return self.scan_limit == 0
 
 
+# ============================================================
+# Placeholders (kept so imports don't break)
+# ============================================================
+
 def build_watchlist(config: RunConfig, output_path) -> int:
     """
     Build a watchlist using Fanatical scraping logic (placeholder).
     Return: number of items written.
     """
-    # Keep prints for now (since you said don't change other files).
-    # In your real implementation, you'd use:
-    # - config.max_buy
-    # - config.pages_per_source
-    # - config.verify_candidates
-    # - config.effective_verify_limit()
-    # - config.target
     print("Building watchlist with:", config)
     return 0
 
@@ -84,9 +145,5 @@ def scan_watchlist(config: RunConfig, watchlist_path, scans_path, passes_path, d
     """
     Scan watchlist using Eneba logic (placeholder).
     """
-    # In your real implementation, you'd use:
-    # - config.scan_limit (0 = unlimited)
-    # - config.item_budget / config.run_budget for time limits
-    # - config.allow_eur / eur_to_gbp for currency handling
     print("Scanning watchlist using:", config)
     return
