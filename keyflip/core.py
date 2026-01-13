@@ -11,7 +11,7 @@ import pandas as pd
 
 from .cache import PriceCache
 from .config import (
-    RunConfig,  # MUST be the compat one from config.py
+    RunConfig,  # must be the compat RunConfig from config.py
     BUFFER_FIXED_GBP,
     BUFFER_PCT_OF_BUY,
     FANATICAL_SOURCES,
@@ -130,6 +130,9 @@ def _read_csv_safe(path: Path) -> pd.DataFrame:
 
 
 def _append_csv(path: Path, batch: pd.DataFrame, cols: List[str]) -> None:
+    """
+    Append batch to CSV. If existing CSV has different columns, write union.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     prev = _read_csv_safe(path)
 
@@ -157,14 +160,43 @@ def _get_thresholds(cfg: RunConfig) -> tuple[float, int]:
 
 
 def _open_cache(db_path: Optional[Path]) -> PriceCache:
-    # PriceCache signature varies in projects; handle common forms.
+    """
+    Your PriceCache REQUIRES arguments, so we NEVER call PriceCache() with no args.
+    This wrapper tries common signatures with both Path and str.
+    """
     if db_path is None:
-        return PriceCache()  # type: ignore
+        db_path = Path("price_cache.sqlite")
+    db_path = Path(db_path)
+
+    # Try common constructor signatures
     try:
-        return PriceCache(db_path)  # type: ignore
+        return PriceCache(db_path)  # PriceCache(Path)
     except TypeError:
-        # some versions use keyword
-        return PriceCache(path=db_path)  # type: ignore
+        pass
+
+    try:
+        return PriceCache(path=db_path)  # PriceCache(path=Path)
+    except TypeError:
+        pass
+
+    try:
+        return PriceCache(str(db_path))  # PriceCache(str)
+    except TypeError:
+        pass
+
+    try:
+        return PriceCache(path=str(db_path))  # PriceCache(path=str)
+    except TypeError:
+        pass
+
+    try:
+        return PriceCache(db_path=str(db_path))  # PriceCache(db_path=str)
+    except TypeError:
+        pass
+
+    raise TypeError(
+        "Unsupported PriceCache constructor. Tried: PriceCache(path/str), PriceCache(path=...), PriceCache(db_path=...)."
+    )
 
 
 # ============================================================
@@ -229,7 +261,7 @@ def get_sell(
 
 def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
     """
-    Match app.py: build_watchlist(config, WATCHLIST_CSV) -> returns number of rows added.
+    Matches app.py: build_watchlist(config, WATCHLIST_CSV) -> returns number of rows written.
     """
     start = time.time()
     run_budget, item_budget = _get_run_limits(cfg)
@@ -240,10 +272,14 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
     avoid_days = int(getattr(cfg, "avoid_recent_days", 0) or 0)
     verify_cap = _effective_verify_cap(cfg)  # 0 => unlimited
 
-    # open cache using cfg.root if present (best effort)
+    # Use cfg.root if present; otherwise default to working dir
     db_path = None
     if getattr(cfg, "root", None):
-        db_path = Path(getattr(cfg, "root")) / "price_cache.sqlite"
+        try:
+            db_path = Path(getattr(cfg, "root")) / "price_cache.sqlite"
+        except Exception:
+            db_path = Path("price_cache.sqlite")
+
     cache = _open_cache(db_path)
 
     links: List[str] = []
@@ -320,8 +356,7 @@ def scan_watchlist(
     fail_ttl: int,
 ) -> pd.DataFrame:
     """
-    Match app.py/core expectations:
-      scan_watchlist(config, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, fail_ttl)
+    Matches app.py: scan_watchlist(config, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, fail_ttl)
     """
     cache = _open_cache(db_path)
 
@@ -373,16 +408,19 @@ def scan_watchlist(
 
             t0 = time.time()
 
-            _, buy_price, buy_notes = get_buy(cfg, cache, buy_url, fan=fan, fail_ttl_override=fail_ttl)
+            _, buy_price, buy_notes = get_buy(
+                cfg, cache, buy_url, fan=fan, fail_ttl_override=fail_ttl
+            )
 
-            # resolve on eneba
             store_url = make_store_search_url(title)
             prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
 
             sell_price: Optional[float] = None
             sell_notes = ""
             if prod_url:
-                sell_price, sell_notes = get_sell(cfg, cache, prod_url, fail_ttl_override=fail_ttl)
+                sell_price, sell_notes = get_sell(
+                    cfg, cache, prod_url, fail_ttl_override=fail_ttl
+                )
 
             market_after_fee = buffer = profit = roi = None
             passes = False
@@ -399,6 +437,7 @@ def scan_watchlist(
                     and roi >= MIN_ROI
                 )
 
+            # Enforce per-item budget (skip recording if it took too long)
             if item_budget > 0 and (time.time() - t0) > item_budget:
                 continue
 
