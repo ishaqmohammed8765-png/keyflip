@@ -24,15 +24,12 @@ log = logging.getLogger("keyflip.fanatical_pw")
 _BASE = "https://www.fanatical.com"
 _ALLOWED_HOSTS = {"www.fanatical.com", "fanatical.com"}
 
-# Accept /game/... as well as /en/... and /en-gb/... etc (ONLY game pages).
+# Accept /game/... and /en/... /en-gb/... etc (ONLY game pages).
 _GAME_PATH_RE = re.compile(r"^/(?:en(?:-[a-z]{2})/)?game/", re.I)
 
-# Strip site suffixes
 _TITLE_CLEAN_RE = re.compile(r"\s*(\|\s*Fanatical|-+\s*Fanatical)\s*$", re.I)
 
-# Price parsing (GBP)
 _PRICE_GBP_RE = re.compile(r"£\s*(\d+(?:\.\d{1,2})?)")
-_NUM_RE = re.compile(r"(\d+(?:\.\d{1,2})?)")
 
 
 @dataclass(frozen=True)
@@ -52,9 +49,6 @@ def _sleep(lo: float, hi: float) -> None:
 
 
 def _canonicalize_game_url(href_or_url: str) -> Optional[str]:
-    """
-    Turn relative/absolute into a canonical https://{host}/.../game/... URL without query/fragment.
-    """
     if not href_or_url:
         return None
 
@@ -95,27 +89,7 @@ def _parse_float(s: object) -> Optional[float]:
     return None
 
 
-def _first_gbp_price_in_text(text: str) -> Optional[float]:
-    """
-    Conservative: returns the smallest plausible £ price in the *given text*.
-    Use only when the text is already scoped to a buybox-ish region.
-    """
-    if not text:
-        return None
-
-    vals: List[float] = []
-    for m in _PRICE_GBP_RE.findall(text):
-        v = _parse_float(m)
-        if v is not None:
-            vals.append(v)
-
-    return min(vals) if vals else None
-
-
 def _looks_like_noise_price_context(s: str) -> bool:
-    """
-    Simple heuristics to avoid 'Save £x', 'Was £x', etc when scanning a block/line.
-    """
     s = (s or "").lower()
     noise_tokens = (
         "save",
@@ -132,15 +106,22 @@ def _looks_like_noise_price_context(s: str) -> bool:
     return any(t in s for t in noise_tokens)
 
 
+def _first_gbp_price_in_text(text: str) -> Optional[float]:
+    if not text:
+        return None
+    vals: List[float] = []
+    for m in _PRICE_GBP_RE.findall(text):
+        v = _parse_float(m)
+        if v is not None:
+            vals.append(v)
+    return min(vals) if vals else None
+
+
 def _extract_jsonld_prices(html: str) -> List[float]:
-    """
-    Parse JSON-LD <script type="application/ld+json"> blocks and return GBP prices found in Offer(s).
-    """
     if not html:
         return []
 
     prices: List[float] = []
-
     scripts = re.findall(
         r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
         html,
@@ -185,10 +166,6 @@ def _extract_jsonld_prices(html: str) -> List[float]:
 
 
 def _extract_gbp_from_lines(text: str) -> Optional[float]:
-    """
-    Scan line-by-line and ignore lines that look like noise (Save/Was/RRP/etc).
-    Take the smallest remaining GBP value.
-    """
     if not text:
         return None
 
@@ -207,7 +184,7 @@ def _extract_gbp_from_lines(text: str) -> Optional[float]:
 
 
 # -----------------------------------------------------------------------------
-# Playwright client (reusable browser/context/page)
+# Playwright client
 # -----------------------------------------------------------------------------
 
 class FanaticalPWClient:
@@ -230,28 +207,8 @@ class FanaticalPWClient:
         self.page: Optional[Page] = None
 
     def __enter__(self) -> "FanaticalPWClient":
-        try:
-            self._pw = sync_playwright().start()
-            self.browser = self._pw.chromium.launch(headless=self.headless)
-        except Exception as e:
-            msg = str(e).lower()
-            if "executable doesn't exist" in msg or ("browser" in msg and "not found" in msg):
-                if self._pw:
-                    try:
-                        self._pw.stop()
-                    except Exception:
-                        pass
-                    self._pw = None
-                raise RuntimeError(
-                    "Playwright browser binaries not found. Please restart the application to install them."
-                ) from e
-            if self._pw:
-                try:
-                    self._pw.stop()
-                except Exception:
-                    pass
-                self._pw = None
-            raise
+        self._pw = sync_playwright().start()
+        self.browser = self._pw.chromium.launch(headless=self.headless)
 
         self.ctx = self.browser.new_context(
             user_agent=UA,
@@ -285,10 +242,10 @@ class FanaticalPWClient:
             pass
 
     # ---------------------------
-    # Harvester
+    # Navigation helpers
     # ---------------------------
 
-    def _goto(self, url: str, *, wait: str = "domcontentloaded") -> bool:
+    def _goto(self, url: str, *, wait: str = "networkidle") -> bool:
         assert self.page is not None
         try:
             self.page.goto(url, wait_until=wait)
@@ -310,17 +267,43 @@ class FanaticalPWClient:
         ):
             try:
                 loc = self.page.locator(sel).first
-                if loc.is_visible(timeout=600):
-                    loc.click(timeout=800)
+                if loc.is_visible(timeout=800):
+                    loc.click(timeout=1200)
                     return
             except Exception:
                 continue
 
-    def _collect_anchors(self) -> List[str]:
+    def _page_looks_blocked(self) -> Optional[str]:
         """
-        Robust: collect ALL hrefs; _canonicalize_game_url does strict filtering.
-        This avoids missing links when the site doesn't expose '/game/' in href filters
-        early or uses dynamic routing/lazy-loaded cards.
+        Detect obvious 'blocked' / bot-check pages.
+        Returns a reason string if blocked-ish, else None.
+        """
+        assert self.page is not None
+        try:
+            title = (self.page.title() or "").lower()
+            html = (self.page.content() or "").lower()
+        except Exception:
+            return None
+
+        tokens = (
+            "access denied",
+            "request blocked",
+            "captcha",
+            "cloudflare",
+            "verify you are human",
+            "unusual traffic",
+        )
+        if any(t in title for t in tokens) or any(t in html for t in tokens):
+            return "blocked/captcha detected"
+        return None
+
+    # ---------------------------
+    # Link extraction (robust)
+    # ---------------------------
+
+    def _collect_hrefs(self) -> List[str]:
+        """
+        Collect hrefs from anchors. No filtering here; canonicalizer filters later.
         """
         assert self.page is not None
         try:
@@ -331,37 +314,93 @@ class FanaticalPWClient:
         except Exception:
             return []
 
-    def _scroll_until_stable(
+    def _collect_hrefs_fallback(self) -> List[str]:
+        """
+        Fallback: grab any element with an href attribute (rare but helps).
+        """
+        assert self.page is not None
+        try:
+            return self.page.evaluate(
+                """() => Array.from(document.querySelectorAll('[href]'))
+                    .map(e => e.getAttribute('href'))
+                    .filter(Boolean)"""
+            )
+        except Exception:
+            return []
+
+    def _wait_for_listing_content(self) -> None:
+        """
+        Wait for something meaningful to appear on Fanatical listing pages.
+        We don't rely on exact selectors (they change).
+        """
+        assert self.page is not None
+        # Try common patterns that indicate cards/links have rendered.
+        for sel in (
+            "a[href*='/game/']",
+            "a[href*='/en/game/']",
+            "a[href]",
+        ):
+            try:
+                self.page.wait_for_selector(sel, timeout=6000)
+                return
+            except Exception:
+                continue
+
+    def _scroll_to_load_more(
         self,
         *,
-        max_rounds: int = 12,
-        sleep_range_s: Tuple[float, float] = (0.25, 0.60),
-        stable_rounds: int = 2,
+        max_rounds: int = 16,
+        stable_rounds: int = 3,
+        sleep_range_s: Tuple[float, float] = (0.25, 0.6),
     ) -> List[str]:
+        """
+        Scroll using window.scrollTo and detect page height changes (more reliable in headless).
+        """
         assert self.page is not None
 
         seen: set[str] = set()
         out: List[str] = []
         stable = 0
+        last_height = 0
 
         for _ in range(max(1, int(max_rounds))):
-            before = len(seen)
-
-            for href in self._collect_anchors():
+            # collect
+            for href in (self._collect_hrefs() or []):
                 canon = _canonicalize_game_url(href)
                 if canon and canon not in seen:
                     seen.add(canon)
                     out.append(canon)
 
-            stable = stable + 1 if len(seen) == before else 0
+            # height / stability
+            try:
+                height = int(self.page.evaluate("() => document.body.scrollHeight || 0"))
+            except Exception:
+                height = last_height
+
+            if height <= last_height:
+                stable += 1
+            else:
+                stable = 0
+            last_height = height
+
             if stable >= max(1, int(stable_rounds)):
                 break
 
+            # scroll to bottom
             try:
-                self.page.mouse.wheel(0, 1600)
+                self.page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
             except Exception:
                 pass
+
             _sleep(*sleep_range_s)
+
+        # final fallback collect
+        if not out:
+            for href in (self._collect_hrefs_fallback() or []):
+                canon = _canonicalize_game_url(href)
+                if canon and canon not in seen:
+                    seen.add(canon)
+                    out.append(canon)
 
         return out
 
@@ -391,16 +430,24 @@ class FanaticalPWClient:
             url = page_url(source_url, n)
             log.info("PW harvest: goto %s", url)
 
-            if not self._goto(url):
+            if not self._goto(url, wait="networkidle"):
                 continue
 
-            _sleep(*sleep_range_s)
             self._try_accept_cookies()
 
-            links = self._scroll_until_stable(
-                max_rounds=12,
+            blocked = self._page_looks_blocked()
+            if blocked:
+                log.warning("Fanatical listing appears blocked: %s (url=%s)", blocked, url)
+                continue
+
+            # Wait for dynamic content
+            self._wait_for_listing_content()
+            _sleep(*sleep_range_s)
+
+            links = self._scroll_to_load_more(
+                max_rounds=16,
+                stable_rounds=3,
                 sleep_range_s=sleep_range_s,
-                stable_rounds=2,
             )
             random.shuffle(links)
 
@@ -425,11 +472,15 @@ class FanaticalPWClient:
 
         url = _canonicalize_game_url(url) or url
 
-        if not self._goto(url):
+        if not self._goto(url, wait="networkidle"):
             return None, None, "failed (PW timeout)"
 
         _sleep(0.25, 0.70)
         self._try_accept_cookies()
+
+        blocked = self._page_looks_blocked()
+        if blocked:
+            return None, None, f"failed ({blocked})"
 
         title: Optional[str] = None
         try:
@@ -437,7 +488,7 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # 1) JSON-LD prices (preferred)
+        # JSON-LD first
         try:
             html = self.page.content()
             prices = _extract_jsonld_prices(html)
@@ -446,7 +497,7 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # 2) DOM fallback (scoped selectors first)
+        # DOM fallback
         dom_selectors = (
             "[data-testid*='price' i]",
             "[class*='price' i]",
@@ -454,28 +505,25 @@ class FanaticalPWClient:
             "div:has-text('£')",
             "span:has-text('£')",
         )
-
         try:
             for sel in dom_selectors:
                 loc = self.page.locator(sel).first
                 try:
-                    txt = loc.inner_text(timeout=1200)
+                    txt = loc.inner_text(timeout=1500)
                 except Exception:
                     continue
-
                 txt = (txt or "").strip()
                 if not txt:
                     continue
                 if _looks_like_noise_price_context(txt):
                     continue
-
                 p = _extract_gbp_from_lines(txt) or _first_gbp_price_in_text(txt)
                 if p is not None:
                     return title, p, "ok (PW DOM GBP fallback)"
         except Exception:
             pass
 
-        # 3) Last resort: body scan (line-by-line filtering)
+        # Body last resort
         try:
             body = self.page.inner_text("body")
             p = _extract_gbp_from_lines(body)
