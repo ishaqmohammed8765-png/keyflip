@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
+import time
 from typing import Any, Iterable, Optional, Tuple, List
 from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 
@@ -32,8 +34,18 @@ _BAD_SLUG_TOKENS = {
     # intentionally NOT including plain "card" (false negatives)
 }
 
-_PRODUCT_SLUG_RE = re.compile(r"^/gb/[a-z0-9-]{8,}$", re.I)
-_PRODUCT_URL_RE = re.compile(r"https?://(?:www\.)?eneba\.com/gb/[a-z0-9\-]{8,}", re.I)
+# Eneba URL shapes vary. Accept:
+#   /gb/<slug>
+#   /gb/<category>/<slug>
+# (one optional extra segment)
+_PRODUCT_PATH_RE = re.compile(r"^/gb/(?:[a-z0-9-]+/)?[a-z0-9-]{8,}$", re.I)
+
+# Regex scan for candidates in raw HTML (same shape as above)
+_PRODUCT_URL_RE = re.compile(
+    r"https?://(?:www\.)?eneba\.com/gb/(?:[a-z0-9-]+/)?[a-z0-9\-]{8,}",
+    re.I,
+)
+
 _GBP_RE = re.compile(r"£\s*(\d+(?:\.\d{1,2})?)")
 
 
@@ -64,7 +76,7 @@ def _make_session() -> requests.Session:
         }
     )
 
-    # Retry/backoff if available
+    # Retry/backoff if available (helps, but we also do our own throttling)
     try:
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
@@ -84,7 +96,6 @@ def _make_session() -> requests.Session:
         s.mount("https://", adapter)
         s.mount("http://", adapter)
     except Exception:
-        # If urllib3 Retry API changes / not available, just run without retry.
         pass
 
     return s
@@ -139,8 +150,8 @@ def _is_eneba_host(netloc: str) -> bool:
 
 def _canonicalize(href: str) -> Optional[str]:
     """
-    Convert an href into a canonical /gb/<slug> product URL on www.eneba.com.
-    Rejects non-eneba domains, non-/gb/ paths, and paths that don't look like product slugs.
+    Convert an href into a canonical /gb/... product URL on www.eneba.com.
+    Rejects non-eneba domains and paths that don't look like product pages.
     """
     href = (href or "").strip()
     if not href:
@@ -160,14 +171,16 @@ def _canonicalize(href: str) -> Optional[str]:
         return None
 
     path_norm = path.lower()
-    if not _PRODUCT_SLUG_RE.match(path_norm):
+    if not _PRODUCT_PATH_RE.match(path_norm):
         return None
 
+    # Normalize to https://www.eneba.com/gb/...
     return urlunparse(("https", "www.eneba.com", path_norm, "", "", ""))
 
 
 def _slug_tokens(canon_url: str) -> List[str]:
     p = urlparse(canon_url)
+    # last segment is the slug (even if /gb/<cat>/<slug>)
     slug = (p.path or "").lower().rsplit("/", 1)[-1]
     return [t for t in slug.split("-") if t]
 
@@ -179,7 +192,7 @@ def _score_candidate(canon_url: str, title: str) -> int:
     p = urlparse(canon_url)
     path = (p.path or "").lower()
 
-    if not _PRODUCT_SLUG_RE.match(path):
+    if not _PRODUCT_PATH_RE.match(path):
         return -10
 
     slug = path.rsplit("/", 1)[-1]
@@ -214,12 +227,79 @@ def _score_candidate(canon_url: str, title: str) -> int:
     return score
 
 
+# -----------------------------------------------------------------------------
+# Throttling + 429 backoff + block-page detection
+# -----------------------------------------------------------------------------
+_THROTTLE_NEXT_OK: float = 0.0
+_BACKOFF_S: float = 2.0
+
+
+def _looks_like_block_page(html: str) -> bool:
+    t = (html or "").lower()
+    # conservative signals (not exhaustive)
+    signals = (
+        "captcha",
+        "access denied",
+        "verify you are",
+        "cloudflare",
+        "rate limit",
+        "too many requests",
+        "unusual traffic",
+        "blocked",
+    )
+    return any(s in t for s in signals)
+
+
 def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
+    """
+    Host-friendly GET:
+      - steady pacing to prevent bursts
+      - explicit 429 handling (Retry-After + exponential backoff)
+      - detect challenge/block HTML and label accordingly
+    """
+    global _THROTTLE_NEXT_OK, _BACKOFF_S
+
+    # Steady pacing (prevents burst 429s)
+    now = time.time()
+    if now < _THROTTLE_NEXT_OK:
+        time.sleep(_THROTTLE_NEXT_OK - now)
+
+    # Next slot with jitter (tuneable)
+    _THROTTLE_NEXT_OK = time.time() + (2.2 + random.random() * 1.6)  # ~2.2–3.8s
+
     try:
         r = _SESS.get(url, timeout=_timeout_value())
-        return r, None
     except requests.RequestException as e:
         return None, f"failed (http error: {type(e).__name__})"
+
+    # Explicit rate-limit handling
+    if r.status_code == 429:
+        ra = r.headers.get("Retry-After")
+        if ra:
+            try:
+                sleep_s = float(ra)
+            except Exception:
+                sleep_s = _BACKOFF_S
+        else:
+            sleep_s = _BACKOFF_S
+
+        # jitter
+        sleep_s = sleep_s + random.random() * 1.0
+        time.sleep(sleep_s)
+
+        _BACKOFF_S = min(_BACKOFF_S * 1.8, 30.0)
+        return r, "failed (blocked HTTP 429)"
+
+    # Reset backoff after success-ish responses
+    if r.status_code < 400:
+        _BACKOFF_S = 2.0
+
+    # Challenge/block HTML (often causes "no link found" downstream)
+    ct = (r.headers.get("Content-Type") or "").lower()
+    if "text/html" in ct and _looks_like_block_page(r.text or ""):
+        return r, "failed (blocked challenge page)"
+
+    return r, None
 
 
 # -----------------------------------------------------------------------------
@@ -227,7 +307,7 @@ def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
 # -----------------------------------------------------------------------------
 def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional[str], str]:
     """
-    Given a store search URL, try to find the best matching /gb/<slug> product URL.
+    Given a store search URL, try to find the best matching /gb/... product URL.
     """
     r, err = _http_get(store_url)
     if err:
@@ -264,6 +344,7 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
             if sc > best_score:
                 best_score, best_url = sc, canon
 
+    # NOTE: if you still see false negatives, drop threshold from 6 -> 3
     if best_url and best_score >= 6:
         return best_url, f"ok (store->product scored={best_score})"
 
