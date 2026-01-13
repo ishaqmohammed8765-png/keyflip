@@ -4,8 +4,9 @@ import logging
 import random
 import time
 import uuid
+from dataclasses import asdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 
@@ -17,8 +18,6 @@ from .config import (
     FANATICAL_SOURCES,
     MIN_PROFIT_GBP,
     MIN_ROI,
-    PRICE_FAIL_TTL_S,
-    PRICE_OK_TTL_S,
     SELL_FEE_PCT,
 )
 from .eneba import make_store_search_url, read_price_gbp, resolve_product_url_from_store
@@ -45,12 +44,26 @@ SCANS_COLS = [
     "elapsed_s",
 ]
 
+
 # ============================================================
 # Helpers
 # ============================================================
 
+
 def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+
+def _to_float(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        s = str(x).strip()
+        if not s:
+            return None
+        return float(s)
+    except Exception:
+        return None
 
 
 def _dedupe(items: List[str]) -> List[str]:
@@ -61,18 +74,6 @@ def _dedupe(items: List[str]) -> List[str]:
             seen.add(x)
             out.append(x)
     return out
-
-
-def _buy_key(url: str) -> str:
-    return (url.split("?")[0].rstrip("/").lower()) if url else ""
-
-
-def _budget_ok(start: float, limit_s: float) -> bool:
-    return limit_s <= 0 or (time.time() - start) <= limit_s
-
-
-def _recent_key(namespace: str, key: str) -> str:
-    return f"{namespace}:{key}"
 
 
 def _read_csv_safe(path: Path) -> pd.DataFrame:
@@ -86,12 +87,13 @@ def _read_csv_safe(path: Path) -> pd.DataFrame:
 
 def _append_csv(path: Path, batch: pd.DataFrame, cols: List[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    prev = _read_csv_safe(path)
 
+    prev = _read_csv_safe(path)
     if prev.empty:
         batch.reindex(columns=cols).to_csv(path, index=False)
         return
 
+    # Keep existing columns, but ensure new expected columns exist too.
     union_cols = list(dict.fromkeys(list(prev.columns) + cols))
     prev2 = prev.reindex(columns=union_cols)
     batch2 = batch.reindex(columns=union_cols)
@@ -100,55 +102,118 @@ def _append_csv(path: Path, batch: pd.DataFrame, cols: List[str]) -> None:
 
 
 def _open_cache(db_path: Path) -> PriceCache:
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     return PriceCache(db_path)
+
+
+def _compute_profit(buy_gbp: float, sell_gbp: float) -> Tuple[float, float, float, float]:
+    """
+    Returns (market_after_fee, buffer, profit, roi)
+    """
+    market_after_fee = sell_gbp * (1.0 - SELL_FEE_PCT)
+    buffer = BUFFER_FIXED_GBP + (BUFFER_PCT_OF_BUY * buy_gbp)
+    profit = market_after_fee - buy_gbp - buffer
+    roi = profit / buy_gbp if buy_gbp > 0 else -1.0
+    return market_after_fee, buffer, profit, roi
+
+
+def _cfg_int(cfg: RunConfig, name: str, default: int) -> int:
+    try:
+        v = getattr(cfg, name, default)
+        return int(v)
+    except Exception:
+        return int(default)
+
+
+def _cfg_float(cfg: RunConfig, name: str, default: float) -> float:
+    try:
+        v = getattr(cfg, name, default)
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _cfg_bool(cfg: RunConfig, name: str, default: bool) -> bool:
+    try:
+        v = getattr(cfg, name, default)
+        return bool(v)
+    except Exception:
+        return bool(default)
 
 
 # ============================================================
 # Watchlist builder
 # ============================================================
 
+
 def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
+    """
+    Build a watchlist from Fanatical sources using Playwright.
+    Writes: title, buy_url, buy_price_gbp, buy_notes
+    """
     out_csv = Path(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    cache = _open_cache(out_csv.parent / "price_cache.sqlite")
+    target = _cfg_int(cfg, "watchlist_target", 10)
+    pages = _cfg_int(cfg, "pages_per_source", 2)
+    max_links = _cfg_int(cfg, "max_links_per_source", 200)  # optional config knob
+
+    if target <= 0:
+        log.warning("watchlist_target <= 0, nothing to build.")
+        pd.DataFrame([], columns=WATCHLIST_COLS).to_csv(out_csv, index=False)
+        return 0
+
+    links: List[str] = []
     rows: List[Dict[str, object]] = []
 
+    log.info("Building watchlist: target=%d pages_per_source=%d", target, pages)
+
     with FanaticalPWClient(headless=True) as fan:
-        links: List[str] = []
-        for src in FANATICAL_SOURCES.values():
+        for name, src in FANATICAL_SOURCES.items():
             try:
-                links.extend(fan.harvest_game_links(src, pages=2, max_links=200))
+                harvested = fan.harvest_game_links(src, pages=pages, max_links=max_links)
+                log.info("Harvested %d links from %s", len(harvested), name)
+                links.extend(harvested)
             except Exception as e:
-                log.warning("Harvest failed: %s", e)
+                log.warning("Harvest failed (%s): %s", name, e)
 
         links = _dedupe(links)
         random.shuffle(links)
 
         for url in links:
-            title, price, notes = fan.read_title_and_price_gbp(url)
-            if price is None:
+            if len(rows) >= target:
+                break
+
+            try:
+                title, price, notes = fan.read_title_and_price_gbp(url)
+            except Exception:
+                log.exception("Fanatical read failed: %s", url)
+                continue
+
+            if not title or price is None:
                 continue
 
             rows.append(
                 {
-                    "title": title,
-                    "buy_url": url,
-                    "buy_price_gbp": price,
-                    "buy_notes": notes,
+                    "title": str(title).strip(),
+                    "buy_url": str(url).strip(),
+                    "buy_price_gbp": float(price),
+                    "buy_notes": str(notes or "").strip(),
                 }
             )
 
-            if len(rows) >= getattr(cfg, "watchlist_target", 10):
-                break
+    df = pd.DataFrame(rows, columns=WATCHLIST_COLS)
+    df.to_csv(out_csv, index=False)
 
-    pd.DataFrame(rows, columns=WATCHLIST_COLS).to_csv(out_csv, index=False)
-    return len(rows)
+    log.info("Wrote %d rows to %s", len(df), str(out_csv))
+    return int(len(df))
 
 
 # ============================================================
-# Scan watchlist (FIXED: scans ALL items)
+# Scan watchlist (Playwright kept, but resilient)
 # ============================================================
+
 
 def scan_watchlist(
     cfg: RunConfig,
@@ -158,73 +223,168 @@ def scan_watchlist(
     db_path: Path,
     fail_ttl: int,
 ) -> pd.DataFrame:
-    cache = _open_cache(db_path)
+    """
+    Scans ALL items in the watchlist (unless cfg.scan_limit > 0).
+
+    Key changes to ensure you don't "scan only one":
+    - We DO NOT depend on Playwright per-row to proceed.
+    - We use watchlist CSV values for buy_price/buy_notes by default.
+    - Playwright is kept, and can optionally refresh buy price; if it fails it won't stop the scan.
+    - We always append a scan row (even if market lookup fails) so you can see what happened.
+    """
+    cache = _open_cache(db_path)  # kept (and future-proof), even if not used heavily here
+    _ = cache
+    watchlist_path = Path(watchlist_path)
+    scans_path = Path(scans_path)
+    passes_path = Path(passes_path)
 
     watch = _read_csv_safe(watchlist_path)
     if watch.empty:
-        log.warning("Watchlist empty.")
+        log.warning("Watchlist empty: %s", str(watchlist_path))
         return pd.DataFrame(columns=SCANS_COLS)
 
-    rows: List[Dict[str, object]] = []
-    attempted = 0
-    scan_limit = int(getattr(cfg, "scan_limit", 0) or 0)
+    # Ensure expected columns exist (older watchlists won't crash scan)
+    for c in WATCHLIST_COLS:
+        if c not in watch.columns:
+            watch[c] = None
+
+    scan_limit = _cfg_int(cfg, "scan_limit", 0)  # 0 = unlimited
+    refresh_buy_price = _cfg_bool(cfg, "refresh_buy_price", False)  # optional knob
+    per_item_sleep_s = _cfg_float(cfg, "scan_sleep_s", 0.0)  # optional knob
+
+    batch_id = uuid.uuid4().hex[:12]
     start = time.time()
 
-    with FanaticalPWClient(headless=True) as fan:
+    attempted = 0
+    rows: List[Dict[str, object]] = []
+
+    log.info(
+        "Scanning watchlist: size=%d scan_limit=%d refresh_buy_price=%s",
+        int(len(watch)),
+        int(scan_limit),
+        bool(refresh_buy_price),
+    )
+
+    # Start Playwright once, but allow fallback if it dies.
+    fan: Optional[FanaticalPWClient] = None
+
+    def _fan_start() -> Optional[FanaticalPWClient]:
+        try:
+            f = FanaticalPWClient(headless=True)
+            f.__enter__()
+            return f
+        except Exception:
+            log.exception("Playwright failed to start; continuing without buy refresh.")
+            return None
+
+    def _fan_stop(f: Optional[FanaticalPWClient]) -> None:
+        if f is None:
+            return
+        try:
+            f.__exit__(None, None, None)
+        except Exception:
+            pass
+
+    if refresh_buy_price:
+        fan = _fan_start()
+
+    try:
         for _, r in watch.iterrows():
             if scan_limit > 0 and attempted >= scan_limit:
                 break
-
             attempted += 1
-            title = str(r.get("title", "")).strip()
-            buy_url = str(r.get("buy_url", "")).strip()
+
+            title = str(r.get("title", "") or "").strip()
+            buy_url = str(r.get("buy_url", "") or "").strip()
+
+            # Default: use what the builder already captured (MOST reliable)
+            buy_price = _to_float(r.get("buy_price_gbp", None))
+            buy_notes = str(r.get("buy_notes", "") or "").strip()
+
+            # Optional refresh buy price via Playwright (kept, but non-fatal)
+            if refresh_buy_price and fan is not None and buy_url:
+                try:
+                    _t, p, n = fan.read_title_and_price_gbp(buy_url)
+                    if p is not None:
+                        buy_price = float(p)
+                    if n:
+                        buy_notes = str(n).strip()
+                except Exception as e:
+                    buy_notes = (buy_notes + " | " if buy_notes else "") + f"buy_refresh_failed:{type(e).__name__}"
+                    # If Playwright is unstable, try restarting once and keep going
+                    _fan_stop(fan)
+                    fan = _fan_start()
+
+            store_url = make_store_search_url(title)
+            prod_url: Optional[str] = None
+            resolve_notes = ""
+            sell_price: Optional[float] = None
+            sell_notes = ""
 
             try:
-                _, buy_price, buy_notes = fan.read_title_and_price_gbp(buy_url)
-                store_url = make_store_search_url(title)
                 prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
+            except Exception as e:
+                resolve_notes = f"resolve_failed:{type(e).__name__}"
 
-                sell_price = None
-                sell_notes = ""
-                if prod_url:
+            if prod_url:
+                try:
                     sell_price, sell_notes = read_price_gbp(prod_url)
+                except Exception as e:
+                    sell_notes = f"price_failed:{type(e).__name__}"
+                    sell_price = None
 
-                profit = roi = None
-                passes = False
-                if buy_price and sell_price:
-                    after_fee = sell_price * (1 - SELL_FEE_PCT)
-                    buffer = BUFFER_FIXED_GBP + BUFFER_PCT_OF_BUY * buy_price
-                    profit = after_fee - buy_price - buffer
-                    roi = profit / buy_price if buy_price else None
-                    passes = profit >= MIN_PROFIT_GBP and roi >= MIN_ROI
+            market_after_fee = None
+            buffer = None
+            profit = None
+            roi = None
+            passes = False
 
-                rows.append(
-                    {
-                        "batch_id": uuid.uuid4().hex[:12],
-                        "timestamp": _now(),
-                        "title": title,
-                        "buy_price": buy_price,
-                        "market_price": sell_price,
-                        "market_after_fee": None,
-                        "buffer": None,
-                        "edge": profit,
-                        "edge_pct": roi,
-                        "passes": passes,
-                        "buy_url": buy_url,
-                        "market_url": prod_url or store_url,
-                        "buy_notes": buy_notes,
-                        "market_notes": resolve_notes or sell_notes,
-                        "elapsed_s": round(time.time() - start, 2),
-                    }
-                )
-            except Exception:
-                log.exception("Scan failed for %s", buy_url)
-                continue
+            if buy_price is not None and sell_price is not None:
+                market_after_fee, buffer, profit, roi = _compute_profit(buy_price, sell_price)
+                passes = bool(profit >= MIN_PROFIT_GBP and roi >= MIN_ROI)
+
+            rows.append(
+                {
+                    "batch_id": batch_id,
+                    "timestamp": _now(),
+                    "title": title,
+                    "buy_price": buy_price,
+                    "market_price": sell_price,
+                    "market_after_fee": market_after_fee,
+                    "buffer": buffer,
+                    "edge": profit,
+                    "edge_pct": roi,
+                    "passes": bool(passes),
+                    "buy_url": buy_url,
+                    "market_url": prod_url or store_url,
+                    "buy_notes": buy_notes,
+                    "market_notes": (resolve_notes or "") + ((" | " + sell_notes) if sell_notes else ""),
+                    "elapsed_s": round(time.time() - start, 2),
+                }
+            )
+
+            if per_item_sleep_s > 0:
+                time.sleep(per_item_sleep_s)
+
+    finally:
+        _fan_stop(fan)
 
     batch = pd.DataFrame(rows, columns=SCANS_COLS)
+
+    # Write scans.csv (append)
     _append_csv(scans_path, batch, SCANS_COLS)
 
+    # Write passes.csv (overwrite each run with this run's passes)
     passes_path.parent.mkdir(parents=True, exist_ok=True)
     batch[batch["passes"] == True].to_csv(passes_path, index=False)
+
+    log.info(
+        "Scan complete: attempted=%d wrote=%d passes=%d scans_csv=%s passes_csv=%s",
+        int(attempted),
+        int(len(batch)),
+        int((batch["passes"] == True).sum()) if not batch.empty and "passes" in batch.columns else 0,
+        str(scans_path),
+        str(passes_path),
+    )
 
     return batch
