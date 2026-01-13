@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
+import requests
+
 from playwright.sync_api import (
     Browser,
     BrowserContext,
@@ -17,18 +19,20 @@ from playwright.sync_api import (
     sync_playwright,
 )
 
-from .config import UA
+from .config import UA, HTTP_TIMEOUT_S
 
 log = logging.getLogger("keyflip.fanatical_pw")
 
 _BASE = "https://www.fanatical.com"
 _ALLOWED_HOSTS = {"www.fanatical.com", "fanatical.com"}
 
-# Accept /game/... and /en/... /en-gb/... etc (ONLY game pages).
+# Accept /game/... as well as /en/... and /en-gb/... etc (ONLY game pages).
 _GAME_PATH_RE = re.compile(r"^/(?:en(?:-[a-z]{2})/)?game/", re.I)
 
+# Strip site suffixes
 _TITLE_CLEAN_RE = re.compile(r"\s*(\|\s*Fanatical|-+\s*Fanatical)\s*$", re.I)
 
+# Price parsing (GBP)
 _PRICE_GBP_RE = re.compile(r"£\s*(\d+(?:\.\d{1,2})?)")
 
 
@@ -109,11 +113,13 @@ def _looks_like_noise_price_context(s: str) -> bool:
 def _first_gbp_price_in_text(text: str) -> Optional[float]:
     if not text:
         return None
+
     vals: List[float] = []
     for m in _PRICE_GBP_RE.findall(text):
         v = _parse_float(m)
         if v is not None:
             vals.append(v)
+
     return min(vals) if vals else None
 
 
@@ -183,8 +189,52 @@ def _extract_gbp_from_lines(text: str) -> Optional[float]:
     return min(vals) if vals else None
 
 
+def _session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update(
+        {
+            "User-Agent": UA,
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+    )
+    return s
+
+
+def _fetch_html(url: str) -> Optional[str]:
+    try:
+        s = _session()
+        r = s.get(url, timeout=HTTP_TIMEOUT_S)
+        if r.status_code != 200:
+            return None
+        return r.text or ""
+    except Exception:
+        return None
+
+
+def _harvest_links_from_html(html: str) -> List[str]:
+    """
+    Harvest game links from HTML using regex. We canonicalize + dedupe afterwards.
+    """
+    if not html:
+        return []
+
+    # Grab common patterns like href="/en/game/slug" or href="/game/slug"
+    hrefs = re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.I)
+    out: List[str] = []
+    seen: set[str] = set()
+
+    for h in hrefs:
+        canon = _canonicalize_game_url(h)
+        if canon and canon not in seen:
+            seen.add(canon)
+            out.append(canon)
+
+    return out
+
+
 # -----------------------------------------------------------------------------
-# Playwright client
+# Playwright client (used for per-game title/price only)
 # -----------------------------------------------------------------------------
 
 class FanaticalPWClient:
@@ -209,12 +259,7 @@ class FanaticalPWClient:
     def __enter__(self) -> "FanaticalPWClient":
         self._pw = sync_playwright().start()
         self.browser = self._pw.chromium.launch(headless=self.headless)
-
-        self.ctx = self.browser.new_context(
-            user_agent=UA,
-            locale=self.locale,
-            viewport=self.viewport,
-        )
+        self.ctx = self.browser.new_context(user_agent=UA, locale=self.locale, viewport=self.viewport)
         self.page = self.ctx.new_page()
         self.page.set_default_timeout(self.default_timeout_ms)
         return self
@@ -242,7 +287,58 @@ class FanaticalPWClient:
             pass
 
     # ---------------------------
-    # Navigation helpers
+    # Harvester (requests-based)
+    # ---------------------------
+
+    def harvest_game_links(
+        self,
+        source_url: str,
+        pages: int,
+        *,
+        max_links: int = 500,
+        sleep_range_s: Tuple[float, float] = (0.15, 0.35),
+    ) -> List[str]:
+        """
+        Requests-based harvester: more reliable than Playwright on Streamlit Cloud.
+        """
+        pages = max(1, int(pages))
+        max_links = max(1, int(max_links))
+
+        def page_url(base: str, n: int) -> str:
+            if n <= 1:
+                return base
+            joiner = "&" if "?" in base else "?"
+            return f"{base}{joiner}page={n}"
+
+        out: List[str] = []
+        seen: set[str] = set()
+
+        for n in range(1, pages + 1):
+            url = page_url(source_url, n)
+            log.info("REQ harvest: GET %s", url)
+            html = _fetch_html(url)
+            if not html:
+                continue
+
+            links = _harvest_links_from_html(html)
+            random.shuffle(links)
+
+            for u in links:
+                if u not in seen:
+                    seen.add(u)
+                    out.append(u)
+                    if len(out) >= max_links:
+                        break
+
+            if len(out) >= max_links:
+                break
+
+            _sleep(*sleep_range_s)
+
+        return out
+
+    # ---------------------------
+    # Title + price extraction (Playwright, GBP)
     # ---------------------------
 
     def _goto(self, url: str, *, wait: str = "networkidle") -> bool:
@@ -267,205 +363,11 @@ class FanaticalPWClient:
         ):
             try:
                 loc = self.page.locator(sel).first
-                if loc.is_visible(timeout=800):
-                    loc.click(timeout=1200)
+                if loc.is_visible(timeout=700):
+                    loc.click(timeout=1000)
                     return
             except Exception:
                 continue
-
-    def _page_looks_blocked(self) -> Optional[str]:
-        """
-        Detect obvious 'blocked' / bot-check pages.
-        Returns a reason string if blocked-ish, else None.
-        """
-        assert self.page is not None
-        try:
-            title = (self.page.title() or "").lower()
-            html = (self.page.content() or "").lower()
-        except Exception:
-            return None
-
-        tokens = (
-            "access denied",
-            "request blocked",
-            "captcha",
-            "cloudflare",
-            "verify you are human",
-            "unusual traffic",
-        )
-        if any(t in title for t in tokens) or any(t in html for t in tokens):
-            return "blocked/captcha detected"
-        return None
-
-    # ---------------------------
-    # Link extraction (robust)
-    # ---------------------------
-
-    def _collect_hrefs(self) -> List[str]:
-        """
-        Collect hrefs from anchors. No filtering here; canonicalizer filters later.
-        """
-        assert self.page is not None
-        try:
-            return self.page.eval_on_selector_all(
-                "a[href]",
-                "els => els.map(e => e.getAttribute('href')).filter(Boolean)",
-            )
-        except Exception:
-            return []
-
-    def _collect_hrefs_fallback(self) -> List[str]:
-        """
-        Fallback: grab any element with an href attribute (rare but helps).
-        """
-        assert self.page is not None
-        try:
-            return self.page.evaluate(
-                """() => Array.from(document.querySelectorAll('[href]'))
-                    .map(e => e.getAttribute('href'))
-                    .filter(Boolean)"""
-            )
-        except Exception:
-            return []
-
-    def _wait_for_listing_content(self) -> None:
-        """
-        Wait for something meaningful to appear on Fanatical listing pages.
-        We don't rely on exact selectors (they change).
-        """
-        assert self.page is not None
-        # Try common patterns that indicate cards/links have rendered.
-        for sel in (
-            "a[href*='/game/']",
-            "a[href*='/en/game/']",
-            "a[href]",
-        ):
-            try:
-                self.page.wait_for_selector(sel, timeout=6000)
-                return
-            except Exception:
-                continue
-
-    def _scroll_to_load_more(
-        self,
-        *,
-        max_rounds: int = 16,
-        stable_rounds: int = 3,
-        sleep_range_s: Tuple[float, float] = (0.25, 0.6),
-    ) -> List[str]:
-        """
-        Scroll using window.scrollTo and detect page height changes (more reliable in headless).
-        """
-        assert self.page is not None
-
-        seen: set[str] = set()
-        out: List[str] = []
-        stable = 0
-        last_height = 0
-
-        for _ in range(max(1, int(max_rounds))):
-            # collect
-            for href in (self._collect_hrefs() or []):
-                canon = _canonicalize_game_url(href)
-                if canon and canon not in seen:
-                    seen.add(canon)
-                    out.append(canon)
-
-            # height / stability
-            try:
-                height = int(self.page.evaluate("() => document.body.scrollHeight || 0"))
-            except Exception:
-                height = last_height
-
-            if height <= last_height:
-                stable += 1
-            else:
-                stable = 0
-            last_height = height
-
-            if stable >= max(1, int(stable_rounds)):
-                break
-
-            # scroll to bottom
-            try:
-                self.page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
-            except Exception:
-                pass
-
-            _sleep(*sleep_range_s)
-
-        # final fallback collect
-        if not out:
-            for href in (self._collect_hrefs_fallback() or []):
-                canon = _canonicalize_game_url(href)
-                if canon and canon not in seen:
-                    seen.add(canon)
-                    out.append(canon)
-
-        return out
-
-    def harvest_game_links(
-        self,
-        source_url: str,
-        pages: int,
-        *,
-        max_links: int = 500,
-        sleep_range_s: Tuple[float, float] = (0.25, 0.75),
-    ) -> List[str]:
-        assert self.page is not None
-
-        pages = max(1, int(pages))
-        max_links = max(1, int(max_links))
-
-        def page_url(base: str, n: int) -> str:
-            if n <= 1:
-                return base
-            joiner = "&" if "?" in base else "?"
-            return f"{base}{joiner}page={n}"
-
-        out: List[str] = []
-        seen: set[str] = set()
-
-        for n in range(1, pages + 1):
-            url = page_url(source_url, n)
-            log.info("PW harvest: goto %s", url)
-
-            if not self._goto(url, wait="networkidle"):
-                continue
-
-            self._try_accept_cookies()
-
-            blocked = self._page_looks_blocked()
-            if blocked:
-                log.warning("Fanatical listing appears blocked: %s (url=%s)", blocked, url)
-                continue
-
-            # Wait for dynamic content
-            self._wait_for_listing_content()
-            _sleep(*sleep_range_s)
-
-            links = self._scroll_to_load_more(
-                max_rounds=16,
-                stable_rounds=3,
-                sleep_range_s=sleep_range_s,
-            )
-            random.shuffle(links)
-
-            for u in links:
-                if u not in seen:
-                    seen.add(u)
-                    out.append(u)
-                    if len(out) >= max_links:
-                        break
-
-            if len(out) >= max_links:
-                break
-
-        return out
-
-    # ---------------------------
-    # Title + price extraction (GBP)
-    # ---------------------------
 
     def read_title_and_price_gbp(self, url: str) -> Tuple[Optional[str], Optional[float], str]:
         assert self.page is not None
@@ -475,12 +377,8 @@ class FanaticalPWClient:
         if not self._goto(url, wait="networkidle"):
             return None, None, "failed (PW timeout)"
 
-        _sleep(0.25, 0.70)
+        _sleep(0.20, 0.55)
         self._try_accept_cookies()
-
-        blocked = self._page_looks_blocked()
-        if blocked:
-            return None, None, f"failed ({blocked})"
 
         title: Optional[str] = None
         try:
@@ -488,7 +386,7 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # JSON-LD first
+        # 1) JSON-LD prices
         try:
             html = self.page.content()
             prices = _extract_jsonld_prices(html)
@@ -497,7 +395,7 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # DOM fallback
+        # 2) DOM fallback
         dom_selectors = (
             "[data-testid*='price' i]",
             "[class*='price' i]",
@@ -509,7 +407,7 @@ class FanaticalPWClient:
             for sel in dom_selectors:
                 loc = self.page.locator(sel).first
                 try:
-                    txt = loc.inner_text(timeout=1500)
+                    txt = loc.inner_text(timeout=1200)
                 except Exception:
                     continue
                 txt = (txt or "").strip()
@@ -523,7 +421,7 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # Body last resort
+        # 3) Body scan
         try:
             body = self.page.inner_text("body")
             p = _extract_gbp_from_lines(body)
