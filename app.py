@@ -133,9 +133,7 @@ def render_file_links() -> None:
 # ------------------------------------------------------------
 st.set_page_config(page_title="Keyflip Scanner", layout="wide")
 st.title("Keyflip — Fanatical → Eneba Scanner")
-st.caption(
-    "Build a watchlist from Fanatical, then scan Eneba to find profitable resale deals."
-)
+st.caption("Build a watchlist from Fanatical, then scan Eneba to find profitable resale deals.")
 
 ensure_playwright_chromium_installed()
 
@@ -154,10 +152,9 @@ with st.sidebar:
     verify_limit = st.number_input("Verify limit (0 = use safety cap)", min_value=0, max_value=500, value=0, step=1)
     safety_cap = st.number_input("Verify safety cap", min_value=1, max_value=500, value=20, step=1)
 
-    # ✅ IMPORTANT: default to 0 so it scans ALL by default
+    # ✅ Default to 0 so it scans ALL items by default
     scan_limit = st.number_input("Scan limit (0 = scan ALL)", min_value=0, max_value=20000, value=0, step=25)
 
-    # Optional: use Playwright to refresh buy price during scan
     refresh_buy_price = st.checkbox("Refresh buy price during scan (Playwright)", value=False)
 
     avoid_recent_days = st.number_input("Avoid recent days", min_value=0, max_value=30, value=0, step=1)
@@ -219,11 +216,7 @@ if delete_outputs:
 # Build / Scan
 # ------------------------------------------------------------
 def make_config(*, include_scan_fields: bool) -> RunConfig:
-    """
-    Build RunConfig using the field names YOUR project currently uses.
-    (This matches your current app.py usage: max_buy, target, safety_cap, item_budget, run_budget, etc.)
-    """
-    kwargs = dict(
+    raw = dict(
         max_buy=float(max_buy),
         target=int(watchlist_target),
         verify_candidates=int(verify_candidates),
@@ -237,10 +230,11 @@ def make_config(*, include_scan_fields: bool) -> RunConfig:
         run_budget=float(run_budget),
     )
     if include_scan_fields:
-        kwargs["scan_limit"] = int(scan_limit)
-        # optional knob used by the rewritten core.py scan_watchlist
-        kwargs["refresh_buy_price"] = bool(refresh_buy_price)
-    return RunConfig(**kwargs)
+        raw["scan_limit"] = int(scan_limit)
+        raw["refresh_buy_price"] = bool(refresh_buy_price)
+
+    # ✅ Use the alias-tolerant constructor from the rewritten config.py
+    return RunConfig.from_kwargs(**raw)
 
 
 if build_clicked or play_clicked:
@@ -258,7 +252,6 @@ if build_clicked or play_clicked:
 if scan_clicked or play_clicked:
     cfg = make_config(include_scan_fields=True)
 
-    # Show what you're about to do (prevents confusion)
     wl = safe_read_csv(WATCHLIST_CSV)
     wl_n = len(wl) if wl is not None else 0
     planned = wl_n if int(scan_limit) == 0 else min(wl_n, int(scan_limit))
@@ -336,3 +329,5 @@ st.caption(
     "Tip: If Playwright fails on Streamlit Cloud, install browsers during deploy. "
     "Runtime install is best-effort only."
 )
+
+ 
