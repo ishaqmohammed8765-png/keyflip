@@ -21,17 +21,15 @@ from playwright.sync_api import (
 from .config import UA
 
 # =============================================================================
-# Loaded / CDKeys Playwright client
+# Loaded / CDKeys Playwright client (legacy name kept for compatibility)
 # =============================================================================
 #
-# NOTE ON LEGACY NAMES:
-# This project previously used "fanatical" naming in imports.
-# To avoid changing other modules, we KEEP the public class/function names:
+# Public API intentionally stays the same:
 #   - FanaticalPWClient
 #   - harvest_game_links()
 #   - read_title_and_price_gbp()
 #
-# Internally, everything is renamed and documented for Loaded/CDKeys.
+# Internally this targets Loaded/CDKeys pages.
 # =============================================================================
 
 log = logging.getLogger("keyflip.loaded_pw")
@@ -44,51 +42,27 @@ _ALLOWED_HOSTS = {
     "cdkeys.com",
 }
 
-# Known non-product / category-ish prefixes (best-effort)
-_CATEGORY_PREFIXES = (
-    "/pc",
-    "/playstation",
-    "/xbox",
-    "/nintendo",
-    "/gift-cards",
-    "/explore",
-    "/deals",
-    "/loaded-gift-cards",
-    "/blog",
-    "/faqs",
-    "/privacy-policy",
-    "/terms",
-    "/customer",
-    "/checkout",
-    "/cart",
-    "/search",
-)
-
-_TITLE_CLEAN_RE = re.compile(
-    r"\s*(\|\s*(?:Loaded|CDKeys)\s*|-\s*(?:Loaded|CDKeys)\s*)$",
-    re.I,
-)
+_TITLE_CLEAN_RE = re.compile(r"\s*(\|\s*(?:Loaded|CDKeys)\s*|-\s*(?:Loaded|CDKeys)\s*)$", re.I)
 
 _PRICE_GBP_RE = re.compile(r"£\s*(\d+(?:\.\d{1,2})?)")
 _PRICE_GBP_WORD_RE = re.compile(r"\bGBP\s*(\d+(?:\.\d{1,2})?)\b", re.I)
 
-# Avoid matching absurd or irrelevant numbers.
 _MIN_PRICE = 0.01
 _MAX_PRICE = 9999.0
 
 
-# -----------------------------------------------------------------------------
-# Compatibility dataclass (not required by this module, but kept for imports)
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Compatibility dataclass (kept for imports)
+# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class FanaticalItem:
     title: str
     url: str
 
 
-# -----------------------------------------------------------------------------
-# Small helpers
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def _sleep(lo: float, hi: float) -> None:
     lo = max(0.0, float(lo))
     hi = max(lo, float(hi))
@@ -97,13 +71,12 @@ def _sleep(lo: float, hi: float) -> None:
 
 def _clean_title(t: str) -> str:
     t = (t or "").strip()
-    t = _TITLE_CLEAN_RE.sub("", t).strip()
-    return t
+    return _TITLE_CLEAN_RE.sub("", t).strip()
 
 
-def _parse_float(s: object) -> Optional[float]:
+def _parse_float(x: object) -> Optional[float]:
     try:
-        v = float(str(s).replace(",", "").strip())
+        v = float(str(x).replace(",", "").strip())
         if _MIN_PRICE <= v <= _MAX_PRICE:
             return v
     except Exception:
@@ -114,13 +87,12 @@ def _parse_float(s: object) -> Optional[float]:
 def _force_https(url: str) -> str:
     try:
         p = urlparse(url)
-        if p.scheme and p.scheme.lower() != "https":
-            return urlunparse(("https", p.netloc, p.path, "", p.query, ""))
-        if not p.scheme:
-            return urlunparse(("https", p.netloc, p.path, "", p.query, ""))
+        if not p.netloc:
+            return url
+        scheme = "https"
+        return urlunparse((scheme, p.netloc, p.path, "", p.query, ""))
     except Exception:
-        pass
-    return url
+        return url
 
 
 def _strip_query_and_fragment(url: str) -> str:
@@ -133,15 +105,17 @@ def _strip_query_and_fragment(url: str) -> str:
 
 def _is_probably_product_path(path: str) -> bool:
     """
-    Loaded product pages are commonly root-level paths like:
-      /the-last-of-us-part-i-pc-steam
+    Accept product pages for Loaded/CDKeys.
 
-    We avoid being too strict to prevent "0 links harvested" failure modes.
-    Heuristics:
-      - not empty, not "/"
-      - not under known category prefixes
-      - either single segment OR looks like a product even if 2 segments (rare)
-      - slug length >= 4
+    We MUST allow platform-prefixed product URLs, otherwise you harvest 0:
+      - /pc/<slug>
+      - /xbox/<slug>
+      - /playstation/<slug>
+      - /nintendo/<slug>
+      - sometimes: /pc/steam/<slug>
+
+    Reject obvious non-product sections:
+      - /explore, /deals, /blog, /cart, /checkout, /search, etc.
     """
     if not path:
         return False
@@ -150,31 +124,56 @@ def _is_probably_product_path(path: str) -> bool:
     if not p or p == "/":
         return False
 
-    for pref in _CATEGORY_PREFIXES:
-        if p == pref or p.startswith(pref + "/"):
-            return False
-
-    # Prefer root-level "/slug" but allow occasional "/something/slug" if it still looks product-like
     segs = [s for s in p.split("/") if s]
     if not segs:
         return False
 
+    # Hard reject obvious non-product top-level sections
+    hard_reject_first = {
+        "explore",
+        "deals",
+        "blog",
+        "faqs",
+        "privacy-policy",
+        "terms",
+        "customer",
+        "checkout",
+        "cart",
+        "search",
+        "account",
+    }
+    if segs[0].lower() in hard_reject_first:
+        return False
+
+    platform_prefixes = {"pc", "playstation", "xbox", "nintendo", "gift-cards"}
+
+    slug = ""
+
     if len(segs) == 1:
+        # /<slug>
         slug = segs[0]
+
     elif len(segs) == 2:
-        # sometimes marketing paths might include one extra segment; keep very conservative
-        slug = segs[1]
-        # and the first segment must be short-ish
-        if len(segs[0]) > 24:
+        # /product/<slug> OR /pc/<slug> etc.
+        if segs[0].lower() in {"product", "products"} or segs[0].lower() in platform_prefixes:
+            slug = segs[1]
+        else:
             return False
+
+    elif len(segs) == 3:
+        # /pc/steam/<slug> (or similar)
+        if segs[0].lower() in platform_prefixes and len(segs[1]) <= 24:
+            slug = segs[2]
+        else:
+            return False
+
     else:
         return False
 
     if len(slug) < 4:
         return False
 
-    # "Must contain hyphen" was too strict; loosen:
-    # accept if it has hyphen OR digits OR is long enough to be a real slug
+    # Keep a light heuristic to avoid nonsense:
     if "-" not in slug and not any(ch.isdigit() for ch in slug) and len(slug) < 12:
         return False
 
@@ -203,8 +202,7 @@ def _canonicalize_product_url(href_or_url: str) -> Optional[str]:
     if not _is_probably_product_path(path):
         return None
 
-    url = f"https://{host}{path}"
-    return url
+    return f"https://{host}{path}"
 
 
 def _extract_jsonld_gbp_prices(html: str) -> List[float]:
@@ -232,7 +230,6 @@ def _extract_jsonld_gbp_prices(html: str) -> List[float]:
                         if v is not None:
                             prices.append(v)
 
-            # common nested pattern
             ps = node.get("priceSpecification")
             if isinstance(ps, dict):
                 cur2 = str(ps.get("priceCurrency", "")).upper()
@@ -241,7 +238,6 @@ def _extract_jsonld_gbp_prices(html: str) -> List[float]:
                     if v is not None:
                         prices.append(v)
 
-            # offer(s) objects
             offers = node.get("offers")
             if isinstance(offers, dict):
                 walk(offers)
@@ -288,22 +284,16 @@ def _first_gbp_price_in_text(text: str) -> Optional[float]:
 
 
 def _pick_best_price(prices: Iterable[float]) -> Optional[float]:
-    """
-    If multiple GBP prices are found, pick the most plausible:
-    - prefer the lowest (usually "current price") but only among plausible bounds
-    - JSON-LD typically includes only the actual price anyway
-    """
     clean = [p for p in prices if p is not None and _MIN_PRICE <= p <= _MAX_PRICE]
     return min(clean) if clean else None
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Playwright client (reusable browser/context/page)
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 class FanaticalPWClient:
     """
     Playwright client for Loaded/CDKeys product harvesting and GBP price extraction.
-
     Public name retained for compatibility with existing imports.
     """
 
@@ -331,7 +321,6 @@ class FanaticalPWClient:
             self.browser = self._pw.chromium.launch(headless=self.headless)
         except Exception as e:
             msg = str(e).lower()
-            # common Streamlit Cloud failure: browser binaries missing
             if "executable doesn't exist" in msg or ("browser" in msg and "not found" in msg):
                 try:
                     if self._pw:
@@ -341,8 +330,7 @@ class FanaticalPWClient:
                 self._pw = None
                 raise RuntimeError(
                     "Playwright browser binaries not found. "
-                    "On Streamlit Cloud, ensure Playwright is installed and browsers are available, "
-                    "then restart the app."
+                    "On Streamlit Cloud, ensure Playwright is installed and browsers are available, then restart."
                 ) from e
             try:
                 if self._pw:
@@ -352,14 +340,9 @@ class FanaticalPWClient:
             self._pw = None
             raise
 
-        self.ctx = self.browser.new_context(
-            user_agent=UA,
-            locale=self.locale,
-            viewport=self.viewport,
-        )
+        self.ctx = self.browser.new_context(user_agent=UA, locale=self.locale, viewport=self.viewport)
         self.page = self.ctx.new_page()
         self.page.set_default_timeout(self.default_timeout_ms)
-
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -379,33 +362,20 @@ class FanaticalPWClient:
     # Page helpers
     # ---------------------------
     def _goto(self, url: str, *, wait: str = "domcontentloaded") -> bool:
-        """
-        Navigate with a conservative wait. If the site is heavily JS-driven,
-        callers may follow with a short wait_for_load_state or a small sleep.
-        """
         assert self.page is not None
-
         url = _force_https(url)
         try:
             self.page.goto(url, wait_until=wait)
             return True
-        except PWTimeoutError:
-            return False
-        except PWError:
+        except (PWTimeoutError, PWError):
             return False
         except Exception:
             return False
 
     def _tiny_settle(self) -> None:
-        """
-        Give React sites a brief moment to paint critical elements.
-        """
         _sleep(0.12, 0.28)
 
     def _try_accept_cookies(self) -> None:
-        """
-        Best-effort cookie dialog dismissal.
-        """
         assert self.page is not None
         selectors = (
             "button:has-text('Accept all')",
@@ -429,26 +399,15 @@ class FanaticalPWClient:
     def _try_set_currency_gbp(self) -> bool:
         """
         Best-effort currency switch to GBP.
-
-        Key improvement:
-        - We no longer assume currency state based on arbitrary '£' presence.
-        - We attempt to locate common currency UI patterns by attributes and
-          by searching for GBP options.
-        - Returns True if we believe we clicked a GBP option.
+        Returns True if we believe we clicked a GBP option.
         """
         assert self.page is not None
 
-        # If there's already a clear GBP marker in a typical UI spot, skip.
         try:
             if self.page.locator("text=GBP").first.is_visible(timeout=350):
                 return True
         except Exception:
             pass
-
-        # Strategy:
-        # 1) If a GBP option exists in DOM, try to open any likely menu first, then click GBP.
-        # 2) If not, try clicking likely currency triggers and re-try GBP.
-        gbp_clicked = False
 
         def click_gbp() -> bool:
             for sel in (
@@ -468,28 +427,22 @@ class FanaticalPWClient:
                     continue
             return False
 
-        # likely triggers
+        if click_gbp():
+            return True
+
         triggers = (
-            # common data/role hooks
             "[data-testid*='currency' i]",
             "[data-test*='currency' i]",
             "[class*='currency' i]",
-            # accessible menus
             "button[aria-haspopup='listbox']",
             "button[aria-haspopup='menu']",
             "[role='button'][aria-haspopup='listbox']",
             "[role='button'][aria-haspopup='menu']",
-            # fallback: visible currency codes
             "text=PLN",
             "text=EUR",
             "text=USD",
         )
 
-        # Try direct GBP click (sometimes list is already open/visible)
-        if click_gbp():
-            return True
-
-        # Try opening triggers then clicking GBP
         for trg in triggers:
             try:
                 t = self.page.locator(trg).first
@@ -498,24 +451,16 @@ class FanaticalPWClient:
                 t.click(timeout=900)
                 self._tiny_settle()
                 if click_gbp():
-                    gbp_clicked = True
-                    break
+                    return True
             except Exception:
                 continue
 
-        return gbp_clicked
+        return False
 
     # ---------------------------
     # Harvesting
     # ---------------------------
     def _collect_candidate_hrefs(self) -> List[str]:
-        """
-        Collect hrefs from the page. We gather broadly then canonicalize/filter.
-
-        Improvement:
-        - gather from anchors, plus elements with onclick navigation patterns
-          are too site-specific; we stay simple and robust.
-        """
         assert self.page is not None
         try:
             return self.page.eval_on_selector_all(
@@ -548,11 +493,7 @@ class FanaticalPWClient:
                     seen.add(canon)
                     out.append(canon)
 
-            if len(seen) == before:
-                stable += 1
-            else:
-                stable = 0
-
+            stable = stable + 1 if len(seen) == before else 0
             if stable >= max(1, int(stable_rounds)):
                 break
 
@@ -562,7 +503,6 @@ class FanaticalPWClient:
                 pass
 
             _sleep(*sleep_range_s)
-            # allow any lazy loaders to attach new anchors
             self._tiny_settle()
 
         return out
@@ -577,11 +517,6 @@ class FanaticalPWClient:
     ) -> List[str]:
         """
         Harvest product links from Loaded category/search pages.
-
-        Improvements:
-        - Better canonicalization to prevent under-harvesting.
-        - Slightly more robust scrolling behavior.
-        - Avoids relying on "p=" already being present in URL.
         """
         assert self.page is not None
 
@@ -592,7 +527,6 @@ class FanaticalPWClient:
             if n <= 1:
                 return base
             joiner = "&" if "?" in base else "?"
-            # Loaded uses ?p=2 for pagination on some listings
             if re.search(r"[?&]p=\d+", base):
                 return base
             return f"{base}{joiner}p={n}"
@@ -635,21 +569,13 @@ class FanaticalPWClient:
     # Title + GBP price extraction
     # ---------------------------
     def _extract_price_from_dom(self) -> Optional[float]:
-        """
-        Try to extract a GBP price from likely price containers.
-        More context-aware than scanning whole body first.
-        """
         assert self.page is not None
 
-        # Prefer structured / semantic locations first
         selectors = (
-            # explicit testids
             "[data-testid*='price' i]",
             "[data-test*='price' i]",
-            # common classes/ids
             "[class*='price' i]",
             "[id*='price' i]",
-            # buy box-ish regions
             "main [class*='buy' i] [class*='price' i]",
             "main form [class*='price' i]",
             "main",
@@ -672,13 +598,6 @@ class FanaticalPWClient:
     def read_title_and_price_gbp(self, url: str) -> Tuple[Optional[str], Optional[float], str]:
         """
         Return (title, price_gbp, notes).
-
-        Improvements:
-        - Stronger URL canonicalization
-        - JSON-LD is the first-class source and doesn't depend on currency UI
-        - DOM extraction is more context-aware
-        - BODY scan is last resort and conservative
-        - Clearer notes for diagnostics without noisy logs
         """
         assert self.page is not None
 
@@ -692,19 +611,16 @@ class FanaticalPWClient:
         self._tiny_settle()
         self._try_accept_cookies()
 
-        # Title (usually h1)
         title: Optional[str] = None
         try:
             title = _clean_title(self.page.locator("h1").first.inner_text(timeout=1600))
         except Exception:
-            # fallback: document title
             try:
                 title = _clean_title(self.page.title())
             except Exception:
                 title = None
 
-        # 1) JSON-LD is best and does not require UI currency switching
-        html: Optional[str] = None
+        # 1) JSON-LD (best)
         try:
             html = self.page.content()
             prices = _extract_jsonld_gbp_prices(html)
@@ -714,12 +630,11 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # 2) Attempt currency switch, then retry DOM/JSON-LD once
+        # 2) Try currency switch and retry JSON-LD once
         switched = self._try_set_currency_gbp()
         self._tiny_settle()
 
         if switched:
-            # retry JSON-LD after switch (sometimes rerenders)
             try:
                 html2 = self.page.content()
                 prices2 = _extract_jsonld_gbp_prices(html2)
@@ -729,7 +644,7 @@ class FanaticalPWClient:
             except Exception:
                 pass
 
-        # 3) DOM extraction (context-aware)
+        # 3) DOM extraction
         try:
             p = self._extract_price_from_dom()
             if p is not None:
@@ -737,13 +652,10 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # 4) Last resort: small body scan, but require it to be near common commerce keywords
-        # to avoid picking unrelated "£" values.
+        # 4) Last resort: body snippet with commerce keywords
         try:
             body = self.page.inner_text("body") or ""
-            # If body is enormous, keep the first chunk (performance + fewer false positives)
             snippet = body[:12000]
-            # require purchase-ish keywords nearby to reduce false positives
             if re.search(r"\b(add to cart|buy now|checkout|price|save|deal|offer)\b", snippet, re.I):
                 p = _first_gbp_price_in_text(snippet)
                 if p is not None:
@@ -751,22 +663,18 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # Helpful failure notes
         try:
             if self.page.locator("text=PLN").first.is_visible(timeout=300):
                 return title, None, "failed (site shows PLN; GBP not available via JSON-LD/DOM)"
         except Exception:
             pass
 
-        note = "failed (no GBP price found PW)"
-        if switched:
-            note = "failed (switched currency but no GBP price found PW)"
-        return title, None, note
+        return title, None, "failed (no GBP price found PW)" if not switched else "failed (switched but no GBP price found PW)"
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Backwards-compatible wrappers
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 def harvest_game_links(source_url: str, pages: int) -> List[str]:
     with FanaticalPWClient() as c:
         return c.harvest_game_links(source_url, pages)
