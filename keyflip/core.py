@@ -10,9 +10,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 
 from .cache import PriceCache
-# IMPORTANT: use the COMPAT RunConfig from config.py (prevents TypeError in app.py)
 from .config import (
-    RunConfig,
+    RunConfig,  # MUST be the compat one from config.py
     BUFFER_FIXED_GBP,
     BUFFER_PCT_OF_BUY,
     FANATICAL_SOURCES,
@@ -49,7 +48,7 @@ SCANS_COLS = [
 
 
 # ============================================================
-# Small helpers
+# Helpers
 # ============================================================
 
 def _now() -> str:
@@ -73,18 +72,25 @@ def _budget_ok(start: float, limit_s: float) -> bool:
     return limit_s <= 0 or (time.time() - start) <= limit_s
 
 
-def _ttl_fail(cfg: RunConfig) -> int:
-    # optional override
-    ttl = getattr(cfg, "cache_fail_ttl", None)
-    if ttl is None:
-        ttl = getattr(cfg, "cache_fail_ttl_s", None)
-    if ttl is not None:
+def _ttl_fail(cfg: RunConfig, fail_ttl_override: Optional[int] = None) -> int:
+    if fail_ttl_override is not None:
         try:
-            ttl_i = int(ttl)
-            if ttl_i > 0:
-                return ttl_i
+            v = int(fail_ttl_override)
+            if v > 0:
+                return v
         except Exception:
             pass
+
+    # compat: cfg might have cache_fail_ttl or cache_fail_ttl_s
+    for name in ("cache_fail_ttl", "cache_fail_ttl_s"):
+        if hasattr(cfg, name):
+            try:
+                v = int(getattr(cfg, name) or 0)
+                if v > 0:
+                    return v
+            except Exception:
+                pass
+
     return int(PRICE_FAIL_TTL_S)
 
 
@@ -93,11 +99,7 @@ def _join_notes(*xs: str) -> str:
 
 
 def _effective_verify_cap(cfg: RunConfig) -> int:
-    """
-    Effective cap on verify attempts:
-    - prefer cfg.effective_verify_limit() if present
-    - else compute using verify_limit + safety cap fields
-    """
+    # Prefer helper if present
     if hasattr(cfg, "effective_verify_limit"):
         try:
             return int(cfg.effective_verify_limit())
@@ -108,9 +110,7 @@ def _effective_verify_cap(cfg: RunConfig) -> int:
     safety_cap = int(getattr(cfg, "verify_safety_cap", getattr(cfg, "safety_cap", 0)) or 0)
 
     if verify_limit <= 0:
-        # unlimited requested => still apply safety cap if present
         return safety_cap if safety_cap > 0 else 0
-
     if safety_cap > 0:
         return min(verify_limit, safety_cap)
     return verify_limit
@@ -124,33 +124,51 @@ def _read_csv_safe(path: Path) -> pd.DataFrame:
     try:
         if not path.exists():
             return pd.DataFrame()
-        df = pd.read_csv(path)
-        return df
+        return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
 
 
 def _append_csv(path: Path, batch: pd.DataFrame, cols: List[str]) -> None:
-    """
-    Append batch to CSV. If existing CSV has different columns, we re-save as union.
-    """
     path.parent.mkdir(parents=True, exist_ok=True)
     prev = _read_csv_safe(path)
 
     if prev.empty:
-        batch[cols].to_csv(path, index=False)
+        batch.reindex(columns=cols).to_csv(path, index=False)
         return
 
-    # union columns to avoid "No columns to parse" / mismatch issues
     union_cols = list(dict.fromkeys(list(prev.columns) + cols))
     prev2 = prev.reindex(columns=union_cols)
     batch2 = batch.reindex(columns=union_cols)
-
     pd.concat([prev2, batch2], ignore_index=True).to_csv(path, index=False)
 
 
+def _get_run_limits(cfg: RunConfig) -> tuple[float, float]:
+    # compat: cfg can be run_budget or run_budget_s, item_budget or item_budget_s
+    run_budget = float(getattr(cfg, "run_budget", getattr(cfg, "run_budget_s", 0.0)) or 0.0)
+    item_budget = float(getattr(cfg, "item_budget", getattr(cfg, "item_budget_s", 0.0)) or 0.0)
+    return run_budget, item_budget
+
+
+def _get_thresholds(cfg: RunConfig) -> tuple[float, int]:
+    max_buy = float(getattr(cfg, "max_buy", getattr(cfg, "max_buy_gbp", 0.0)))
+    target = int(getattr(cfg, "target", getattr(cfg, "watchlist_target", 10)))
+    return max_buy, target
+
+
+def _open_cache(db_path: Optional[Path]) -> PriceCache:
+    # PriceCache signature varies in projects; handle common forms.
+    if db_path is None:
+        return PriceCache()  # type: ignore
+    try:
+        return PriceCache(db_path)  # type: ignore
+    except TypeError:
+        # some versions use keyword
+        return PriceCache(path=db_path)  # type: ignore
+
+
 # ============================================================
-# Cache wrappers (consistent keying for prices)
+# Cache wrappers
 # ============================================================
 
 def get_buy(
@@ -159,10 +177,8 @@ def get_buy(
     url: str,
     *,
     fan: Optional[FanaticalPWClient] = None,
+    fail_ttl_override: Optional[int] = None,
 ) -> Tuple[Optional[str], Optional[float], str]:
-    """
-    Get Fanatical buy price in GBP (cached). Returns (title, price, notes).
-    """
     key = _buy_key(url)
     c = cache.get(key)
     if c:
@@ -177,7 +193,7 @@ def get_buy(
             title, price, notes = tmp.read_title_and_price_gbp(url)
 
     if price is None:
-        cache.set(key, None, "GBP", ttl_s=_ttl_fail(cfg), ok=False, notes=notes)
+        cache.set(key, None, "GBP", ttl_s=_ttl_fail(cfg, fail_ttl_override), ok=False, notes=notes)
         return title, None, notes
 
     cache.set(key, float(price), "GBP", ttl_s=int(PRICE_OK_TTL_S), ok=True, notes=notes)
@@ -188,10 +204,9 @@ def get_sell(
     cfg: RunConfig,
     cache: PriceCache,
     url: str,
+    *,
+    fail_ttl_override: Optional[int] = None,
 ) -> Tuple[Optional[float], str]:
-    """
-    Get marketplace sell price in GBP (cached). Returns (price, notes).
-    """
     key = (url or "").strip()
     c = cache.get(key)
     if c:
@@ -201,7 +216,7 @@ def get_sell(
 
     price, notes = read_price_gbp(url)
     if price is None:
-        cache.set(key, None, "GBP", ttl_s=_ttl_fail(cfg), ok=False, notes=notes)
+        cache.set(key, None, "GBP", ttl_s=_ttl_fail(cfg, fail_ttl_override), ok=False, notes=notes)
         return None, notes
 
     cache.set(key, float(price), "GBP", ttl_s=int(PRICE_OK_TTL_S), ok=True, notes=notes)
@@ -209,32 +224,37 @@ def get_sell(
 
 
 # ============================================================
-# BUILD — Fanatical (Playwright)
+# PUBLIC API (must match app.py calls)
 # ============================================================
 
-def build_watchlist(cfg: RunConfig, cache: PriceCache, out_csv: Path) -> pd.DataFrame:
+def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
+    """
+    Match app.py: build_watchlist(config, WATCHLIST_CSV) -> returns number of rows added.
+    """
     start = time.time()
-    links: List[str] = []
+    run_budget, item_budget = _get_run_limits(cfg)
+    max_buy, target = _get_thresholds(cfg)
 
     pages = int(getattr(cfg, "pages_per_source", 2) or 2)
     verify_candidates = int(getattr(cfg, "verify_candidates", 200) or 200)
-
-    # compatible field names
-    max_buy = float(getattr(cfg, "max_buy", getattr(cfg, "max_buy_gbp", 0.0)))
-    target = int(getattr(cfg, "target", getattr(cfg, "watchlist_target", 10)))
     avoid_days = int(getattr(cfg, "avoid_recent_days", 0) or 0)
-
     verify_cap = _effective_verify_cap(cfg)  # 0 => unlimited
 
+    # open cache using cfg.root if present (best effort)
+    db_path = None
+    if getattr(cfg, "root", None):
+        db_path = Path(getattr(cfg, "root")) / "price_cache.sqlite"
+    cache = _open_cache(db_path)
+
+    links: List[str] = []
     rows: List[Dict[str, object]] = []
     kept = 0
     attempted = 0
 
     with FanaticalPWClient(headless=True) as fan:
         for src_url in FANATICAL_SOURCES.values():
-            if not _budget_ok(start, float(getattr(cfg, "run_budget", getattr(cfg, "run_budget_s", 0.0)) or 0.0)):
+            if not _budget_ok(start, run_budget):
                 break
-
             new_links = fan.harvest_game_links(
                 src_url,
                 pages=pages,
@@ -245,7 +265,6 @@ def build_watchlist(cfg: RunConfig, cache: PriceCache, out_csv: Path) -> pd.Data
 
         links = _dedupe(links)
         random.shuffle(links)
-
         pool = links[:verify_candidates] if verify_candidates > 0 else links
 
         for url in pool:
@@ -253,7 +272,7 @@ def build_watchlist(cfg: RunConfig, cache: PriceCache, out_csv: Path) -> pd.Data
                 break
             if verify_cap > 0 and attempted >= verify_cap:
                 break
-            if not _budget_ok(start, float(getattr(cfg, "run_budget", getattr(cfg, "run_budget_s", 0.0)) or 0.0)):
+            if not _budget_ok(start, run_budget):
                 break
 
             key = _buy_key(url)
@@ -265,10 +284,8 @@ def build_watchlist(cfg: RunConfig, cache: PriceCache, out_csv: Path) -> pd.Data
 
             title, buy_price, notes = get_buy(cfg, cache, url, fan=fan)
 
-            item_budget = float(getattr(cfg, "item_budget", getattr(cfg, "item_budget_s", 0.0)) or 0.0)
             if item_budget > 0 and (time.time() - t0) > item_budget:
                 continue
-
             if buy_price is None or buy_price > max_buy:
                 continue
 
@@ -291,25 +308,32 @@ def build_watchlist(cfg: RunConfig, cache: PriceCache, out_csv: Path) -> pd.Data
         "Built watchlist: harvested=%d attempted=%d kept=%d target=%d out=%s",
         len(links), attempted, kept, target, out_csv
     )
-    return df
+    return int(len(df))
 
-
-# ============================================================
-# SCAN — Eneba
-# ============================================================
 
 def scan_watchlist(
     cfg: RunConfig,
-    cache: PriceCache,
-    watchlist_csv: Path,
-    scans_csv: Path,
-    passes_csv: Path,
+    watchlist_path: Path,
+    scans_path: Path,
+    passes_path: Path,
+    db_path: Path,
+    fail_ttl: int,
 ) -> pd.DataFrame:
-    if not watchlist_csv.exists():
-        log.error("Watchlist file not found: %s", watchlist_csv)
+    """
+    Match app.py/core expectations:
+      scan_watchlist(config, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, fail_ttl)
+    """
+    cache = _open_cache(db_path)
+
+    run_budget, item_budget = _get_run_limits(cfg)
+    avoid_days = int(getattr(cfg, "avoid_recent_days", 0) or 0)
+    scan_limit = int(getattr(cfg, "scan_limit", 0) or 0)  # 0 = unlimited
+
+    if not watchlist_path.exists():
+        log.error("Watchlist file not found: %s", watchlist_path)
         return pd.DataFrame(columns=SCANS_COLS)
 
-    watch = _read_csv_safe(watchlist_csv).fillna("")
+    watch = _read_csv_safe(watchlist_path).fillna("")
     if watch.empty:
         log.warning("Watchlist is empty. Skipping scan.")
         return pd.DataFrame(columns=SCANS_COLS)
@@ -319,11 +343,6 @@ def scan_watchlist(
             log.error("Watchlist missing required column '%s'.", col)
             return pd.DataFrame(columns=SCANS_COLS)
 
-    # compatible field names
-    avoid_days = int(getattr(cfg, "avoid_recent_days", 0) or 0)
-    scan_limit = int(getattr(cfg, "scan_limit", 0) or 0)  # 0 = unlimited
-    run_budget = float(getattr(cfg, "run_budget", getattr(cfg, "run_budget_s", 0.0)) or 0.0)
-
     start = time.time()
     batch_id = uuid.uuid4().hex[:12]
 
@@ -332,7 +351,7 @@ def scan_watchlist(
             return False
         return cache.is_recent(_recent_key("scan", _buy_key(buy_url)), avoid_days)
 
-    # Rotate order: prefer not-recently-scanned items first
+    # Prefer not-recently-scanned items first
     watch["__recent_scan"] = watch["buy_url"].astype(str).apply(was_scanned_recently)
     fresh = watch[watch["__recent_scan"] == False].sample(frac=1.0, random_state=None)
     stale = watch[watch["__recent_scan"] == True].sample(frac=1.0, random_state=None)
@@ -354,17 +373,16 @@ def scan_watchlist(
 
             t0 = time.time()
 
-            # Re-check buy price
-            _, buy_price, buy_notes = get_buy(cfg, cache, buy_url, fan=fan)
+            _, buy_price, buy_notes = get_buy(cfg, cache, buy_url, fan=fan, fail_ttl_override=fail_ttl)
 
-            # Resolve product on Eneba
+            # resolve on eneba
             store_url = make_store_search_url(title)
             prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
 
             sell_price: Optional[float] = None
             sell_notes = ""
             if prod_url:
-                sell_price, sell_notes = get_sell(cfg, cache, prod_url)
+                sell_price, sell_notes = get_sell(cfg, cache, prod_url, fail_ttl_override=fail_ttl)
 
             market_after_fee = buffer = profit = roi = None
             passes = False
@@ -380,6 +398,9 @@ def scan_watchlist(
                     and profit >= MIN_PROFIT_GBP
                     and roi >= MIN_ROI
                 )
+
+            if item_budget > 0 and (time.time() - t0) > item_budget:
+                continue
 
             rows.append(
                 {
@@ -401,19 +422,17 @@ def scan_watchlist(
                 }
             )
 
-            # mark as scanned to rotate next time
             cache.mark_recent(_recent_key("scan", _buy_key(buy_url)))
 
     batch = pd.DataFrame(rows, columns=SCANS_COLS)
+    _append_csv(scans_path, batch, SCANS_COLS)
 
-    # Write scans history and passes
-    _append_csv(scans_csv, batch, SCANS_COLS)
-    passes_csv.parent.mkdir(parents=True, exist_ok=True)
-    batch[batch["passes"] == True].to_csv(passes_csv, index=False)
+    passes_path.parent.mkdir(parents=True, exist_ok=True)
+    batch[batch["passes"] == True].to_csv(passes_path, index=False)
 
     passes_count = int(batch["passes"].sum()) if not batch.empty else 0
     log.info(
         "Scan complete: scanned=%d passes=%d scans=%s passes=%s",
-        len(batch), passes_count, scans_csv, passes_csv
+        len(batch), passes_count, scans_path, passes_path
     )
     return batch
