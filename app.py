@@ -73,17 +73,34 @@ def safe_read_bytes(path: Path) -> Optional[bytes]:
         return None
 
 
-def latest_timestamp_from_scans(df: pd.DataFrame) -> Tuple[Optional[pd.Timestamp], pd.DataFrame]:
+def latest_batch_from_scans(df: pd.DataFrame) -> Tuple[Optional[str], Optional[pd.Timestamp], pd.DataFrame]:
+    """
+    Show the most recent scan run.
+    Prefer grouping by batch_id (written by core.scan_watchlist).
+    """
     if df.empty:
-        return None, df
-    if "timestamp" not in df.columns:
-        return None, df.tail(50)
-    ts = pd.to_datetime(df["timestamp"], errors="coerce")
-    if ts.isna().all():
-        return None, df.tail(50)
-    latest_ts = ts.max()
-    latest_rows = df[ts == latest_ts]
-    return latest_ts, latest_rows.head(200)
+        return None, None, df
+
+    # Prefer batch_id (best representation of a single "run")
+    if "batch_id" in df.columns and df["batch_id"].astype(str).str.len().gt(0).any():
+        last_batch = str(df.iloc[-1]["batch_id"])
+        batch_df = df[df["batch_id"].astype(str) == last_batch].copy()
+
+        ts_val: Optional[pd.Timestamp] = None
+        if "timestamp" in batch_df.columns:
+            ts = pd.to_datetime(batch_df["timestamp"], errors="coerce")
+            if not ts.isna().all():
+                ts_val = ts.max()
+
+        return last_batch, ts_val, batch_df.head(500)
+
+    # Fallback: last 200 rows
+    ts_val = None
+    if "timestamp" in df.columns:
+        ts = pd.to_datetime(df["timestamp"], errors="coerce")
+        if not ts.isna().all():
+            ts_val = ts.max()
+    return None, ts_val, df.tail(200)
 
 
 def ensure_playwright_chromium_installed() -> None:
@@ -152,9 +169,8 @@ with st.sidebar:
     verify_limit = st.number_input("Verify limit (0 = use safety cap)", min_value=0, max_value=500, value=0, step=1)
     safety_cap = st.number_input("Verify safety cap", min_value=1, max_value=500, value=20, step=1)
 
-    # ✅ Default to 0 so it scans ALL items by default
+    # Default to 0 so it scans ALL items by default
     scan_limit = st.number_input("Scan limit (0 = scan ALL)", min_value=0, max_value=20000, value=0, step=25)
-
     refresh_buy_price = st.checkbox("Refresh buy price during scan (Playwright)", value=False)
 
     avoid_recent_days = st.number_input("Avoid recent days", min_value=0, max_value=30, value=0, step=1)
@@ -233,7 +249,6 @@ def make_config(*, include_scan_fields: bool) -> RunConfig:
         raw["scan_limit"] = int(scan_limit)
         raw["refresh_buy_price"] = bool(refresh_buy_price)
 
-    # ✅ Use the alias-tolerant constructor from the rewritten config.py
     return RunConfig.from_kwargs(**raw)
 
 
@@ -290,9 +305,11 @@ with tabs[1]:
 
 with tabs[2]:
     if scans_df is not None and not scans_df.empty:
-        ts, recent = latest_timestamp_from_scans(scans_df)
+        batch_id, ts, recent = latest_batch_from_scans(scans_df)
+        if batch_id:
+            st.caption(f"Latest scan batch: {batch_id}")
         if ts is not None:
-            st.caption(f"Most recent scan at: {ts}")
+            st.caption(f"Latest scan time: {ts}")
         st.dataframe(recent, use_container_width=True)
     else:
         st.info("No scan results found yet.")
@@ -329,5 +346,3 @@ st.caption(
     "Tip: If Playwright fails on Streamlit Cloud, install browsers during deploy. "
     "Runtime install is best-effort only."
 )
-
- 
