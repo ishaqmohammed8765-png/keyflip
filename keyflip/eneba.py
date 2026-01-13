@@ -1,6 +1,11 @@
-# ==========================
+# =========================
 # keyflip/eneba.py (rewrite)
-# ==========================
+# - Stronger anti-429 pacing + post-429 cooldown
+# - Better block/challenge detection (even when HTTP 200)
+# - More tolerant product URL shapes (/gb/<slug> and /gb/<cat>/<slug>)
+# - Price extraction returns GBP, with optional EUR->GBP conversion
+#   read_price_gbp(url, allow_eur=False, eur_to_gbp=0.86)
+# =========================
 from __future__ import annotations
 
 import json
@@ -35,7 +40,7 @@ _BAD_SLUG_TOKENS = {
     "expansion",
 }
 
-# Accept /gb/<slug> AND /gb/<category>/<slug>
+# Accept /gb/<slug> AND /gb/<category>/<slug> (1 optional extra segment)
 _PRODUCT_PATH_RE = re.compile(r"^/gb/(?:[a-z0-9-]+/)?[a-z0-9-]{8,}$", re.I)
 
 _PRODUCT_URL_RE = re.compile(
@@ -44,6 +49,7 @@ _PRODUCT_URL_RE = re.compile(
 )
 
 _GBP_RE = re.compile(r"£\s*(\d+(?:\.\d{1,2})?)")
+_EUR_RE = re.compile(r"€\s*(\d+(?:\.\d{1,2})?)")
 
 
 # -----------------------------------------------------------------------------
@@ -74,17 +80,17 @@ def _make_session() -> requests.Session:
         from urllib3.util.retry import Retry
 
         retry = Retry(
-            total=3,
-            connect=3,
-            read=3,
-            status=3,
+            total=2,
+            connect=2,
+            read=2,
+            status=2,
             backoff_factor=0.6,
             status_forcelist=(429, 500, 502, 503, 504),
             allowed_methods=frozenset(["GET", "HEAD"]),
             raise_on_status=False,
             respect_retry_after_header=True,
         )
-        adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+        adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
         s.mount("https://", adapter)
         s.mount("http://", adapter)
     except Exception:
@@ -221,6 +227,9 @@ def _looks_like_block_page(html: str) -> bool:
         "access denied",
         "verify you are",
         "cloudflare",
+        "cf-turnstile",
+        "attention required",
+        "security check",
         "rate limit",
         "too many requests",
         "unusual traffic",
@@ -230,6 +239,12 @@ def _looks_like_block_page(html: str) -> bool:
 
 
 def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
+    """
+    Friendly GET:
+    - steady pacing (~4–7s) to reduce 429s
+    - explicit 429 handling + post-429 cooldown so you don't re-429 immediately
+    - detects block/challenge HTML (even if HTTP 200)
+    """
     global _THROTTLE_NEXT_OK, _BACKOFF_S
 
     u = (url or "").strip()
@@ -240,7 +255,9 @@ def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
     now = time.time()
     if now < _THROTTLE_NEXT_OK:
         time.sleep(_THROTTLE_NEXT_OK - now)
-    _THROTTLE_NEXT_OK = time.time() + (2.2 + random.random() * 1.6)  # ~2.2–3.8s
+
+    # ~4–7 seconds between requests
+    _THROTTLE_NEXT_OK = time.time() + (4.0 + random.random() * 3.0)
 
     try:
         r = _SESS.get(u, timeout=_timeout_value())
@@ -257,11 +274,15 @@ def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
         else:
             sleep_s = _BACKOFF_S
 
-        sleep_s = sleep_s + random.random() * 1.0
+        sleep_s = sleep_s + random.random() * 1.5
         time.sleep(sleep_s)
-        _BACKOFF_S = min(_BACKOFF_S * 1.8, 30.0)
+
+        _BACKOFF_S = min(_BACKOFF_S * 1.8, 45.0)
+        # Extra cooldown after 429 to prevent immediate re-block
+        _THROTTLE_NEXT_OK = max(_THROTTLE_NEXT_OK, time.time() + 10.0 + random.random() * 10.0)
         return r, "failed (blocked HTTP 429)"
 
+    # Reset backoff after success-ish responses
     if r.status_code < 400:
         _BACKOFF_S = 2.0
 
@@ -309,6 +330,7 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
             if sc > best_score:
                 best_score, best_url = sc, canon
 
+    # If you're still missing valid links, you can drop threshold to 3.
     if best_url and best_score >= 6:
         return best_url, f"ok (store->product scored={best_score})"
 
@@ -316,7 +338,7 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
 
 
 # -----------------------------------------------------------------------------
-# Price extraction
+# Price extraction (currency-aware)
 # -----------------------------------------------------------------------------
 def _walk(obj: Any) -> Iterable[Any]:
     stack = [obj]
@@ -329,7 +351,19 @@ def _walk(obj: Any) -> Iterable[Any]:
             stack.extend(cur)
 
 
-def _extract_price_from_ldjson(soup: BeautifulSoup) -> Optional[float]:
+def _convert_to_gbp(price: float, currency: str, *, allow_eur: bool, eur_to_gbp: float) -> Tuple[Optional[float], str]:
+    cur = (currency or "").upper().strip()
+    if cur == "GBP":
+        return price, "GBP"
+    if cur == "EUR":
+        if allow_eur and eur_to_gbp > 0:
+            return price * eur_to_gbp, "EUR->GBP"
+        return None, "EUR (blocked)"
+    # unknown currency
+    return None, f"{cur or 'UNKNOWN'} (blocked)"
+
+
+def _extract_price_from_ldjson(soup: BeautifulSoup) -> Tuple[Optional[float], Optional[str]]:
     for script in soup.select('script[type="application/ld+json"]'):
         txt = script.get_text(strip=True) or ""
         if not txt:
@@ -350,40 +384,38 @@ def _extract_price_from_ldjson(soup: BeautifulSoup) -> Optional[float]:
             for off in offer_list:
                 if not isinstance(off, dict):
                     continue
-                cur = str(off.get("priceCurrency") or "").upper()
-                if cur != "GBP":
-                    continue
+                cur = str(off.get("priceCurrency") or "").upper().strip() or None
                 for k in ("price", "lowPrice", "highPrice"):
                     p = _parse_float(off.get(k))
                     if p is not None:
-                        return p
-    return None
+                        return p, cur
+    return None, None
 
 
-def _extract_price_from_meta(soup: BeautifulSoup) -> Optional[float]:
+def _extract_price_from_meta(soup: BeautifulSoup) -> Tuple[Optional[float], Optional[str]]:
     meta_price = soup.select_one('meta[itemprop="price"]')
     meta_cur = soup.select_one('meta[itemprop="priceCurrency"]')
     if not meta_price or not meta_cur:
-        return None
-    if str(meta_cur.get("content") or "").upper() != "GBP":
-        return None
-    return _parse_float(meta_price.get("content"))
+        return None, None
+    cur = str(meta_cur.get("content") or "").upper().strip() or None
+    p = _parse_float(meta_price.get("content"))
+    return p, cur
 
 
-def _extract_price_from_next_data(html_text: str) -> Optional[float]:
+def _extract_price_from_next_data(html_text: str) -> Tuple[Optional[float], Optional[str]]:
     m = re.search(
         r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
         html_text or "",
         re.S | re.I,
     )
     if not m:
-        return None
+        return None, None
 
     raw = (m.group(1) or "").strip()
     try:
         data = json.loads(raw)
     except Exception:
-        return None
+        return None, None
 
     candidate_keys = (
         "amount",
@@ -402,18 +434,17 @@ def _extract_price_from_next_data(html_text: str) -> Optional[float]:
             continue
 
         cur = node.get("currency") or node.get("priceCurrency") or node.get("currencyCode")
-        if str(cur).upper() != "GBP":
-            continue
+        cur_s = str(cur).upper().strip() if cur is not None else None
 
         for k in candidate_keys:
             p = _parse_float(node.get(k))
             if p is not None:
-                return p
+                return p, cur_s
 
-    return None
+    return None, None
 
 
-def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
+def _extract_price_from_visible(html_text: str) -> Tuple[Optional[float], Optional[str]]:
     html_text = html_text or ""
     lower = html_text.lower()
 
@@ -430,11 +461,21 @@ def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
     for w in windows:
         m = _GBP_RE.search(w)
         if m:
-            return _parse_float(m.group(1))
-    return None
+            return _parse_float(m.group(1)), "GBP"
+        m = _EUR_RE.search(w)
+        if m:
+            return _parse_float(m.group(1)), "EUR"
+
+    return None, None
 
 
-def read_price_gbp(url: str) -> Tuple[Optional[float], str]:
+def read_price_gbp(url: str, *, allow_eur: bool = False, eur_to_gbp: float = 0.86) -> Tuple[Optional[float], str]:
+    """
+    Fetch a product page and attempt to extract a price.
+    Returns (price_gbp, status_string).
+
+    If allow_eur=True, EUR prices are converted via eur_to_gbp.
+    """
     r, err = _http_get(url)
     if err:
         return None, err
@@ -446,22 +487,33 @@ def read_price_gbp(url: str) -> Tuple[Optional[float], str]:
         return None, f"failed (http {r.status_code})"
 
     html = r.text or ""
+    if _looks_like_block_page(html):
+        return None, "failed (blocked challenge page)"
+
     soup = _soup(html)
 
-    p = _extract_price_from_ldjson(soup)
+    p, cur = _extract_price_from_ldjson(soup)
     if p is not None:
-        return p, "ok (JSON-LD offers GBP)"
+        gbp, how = _convert_to_gbp(p, cur or "", allow_eur=allow_eur, eur_to_gbp=eur_to_gbp)
+        if gbp is not None:
+            return gbp, f"ok (JSON-LD {how})"
 
-    p = _extract_price_from_meta(soup)
+    p, cur = _extract_price_from_meta(soup)
     if p is not None:
-        return p, "ok (META price+currency GBP)"
+        gbp, how = _convert_to_gbp(p, cur or "", allow_eur=allow_eur, eur_to_gbp=eur_to_gbp)
+        if gbp is not None:
+            return gbp, f"ok (META {how})"
 
-    p = _extract_price_from_next_data(html)
+    p, cur = _extract_price_from_next_data(html)
     if p is not None:
-        return p, "ok (__NEXT_DATA__ GBP)"
+        gbp, how = _convert_to_gbp(p, cur or "", allow_eur=allow_eur, eur_to_gbp=eur_to_gbp)
+        if gbp is not None:
+            return gbp, f"ok (__NEXT_DATA__ {how})"
 
-    p = _extract_price_from_visible_gbp(html)
+    p, cur = _extract_price_from_visible(html)
     if p is not None:
-        return p, "ok (REGEX £ price, UI-window)"
+        gbp, how = _convert_to_gbp(p, cur or "", allow_eur=allow_eur, eur_to_gbp=eur_to_gbp)
+        if gbp is not None:
+            return gbp, f"ok (VISIBLE {how})"
 
-    return None, "failed (no GBP price found)"
+    return None, "failed (no GBP/EUR price found)"
