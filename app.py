@@ -2,13 +2,11 @@ from __future__ import annotations
 
 # IMPORTANT: set Playwright browser install dir BEFORE importing Playwright anywhere
 import os
-
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers")
 
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -28,32 +26,28 @@ DB_PATH = ROOT_DIR / "price_cache.sqlite"
 
 DEFAULT_CACHE_FAIL_TTL = 1200  # seconds (20 minutes)
 
-
 # ============================================================
-# Utilities
+# Minimal helpers
 # ============================================================
-def _open_cache(db_path: Path) -> PriceCache:
-    """
-    Support multiple PriceCache constructor signatures without changing cache.py.
-    """
-    db_path = Path(db_path)
-    for ctor in (
-        lambda: PriceCache(db_path),
-        lambda: PriceCache(path=db_path),
-        lambda: PriceCache(str(db_path)),
-        lambda: PriceCache(path=str(db_path)),
-        lambda: PriceCache(db_path=str(db_path)),
-    ):
+def open_cache(db_path: Path) -> PriceCache:
+    p = Path(db_path)
+    attempts = (
+        lambda: PriceCache(p),
+        lambda: PriceCache(str(p)),
+        lambda: PriceCache(path=p),
+        lambda: PriceCache(path=str(p)),
+        lambda: PriceCache(db_path=str(p)),
+    )
+    last_err: Optional[Exception] = None
+    for ctor in attempts:
         try:
             return ctor()
-        except TypeError:
-            continue
-    raise TypeError(
-        "Unsupported PriceCache constructor. Tried: PriceCache(path/str), PriceCache(path=...), PriceCache(db_path=...)."
-    )
+        except TypeError as e:
+            last_err = e
+    raise TypeError("Unsupported PriceCache constructor signature.") from last_err
 
 
-def safe_read_csv(path: Path) -> Optional[pd.DataFrame]:
+def read_csv_if_present(path: Path) -> Optional[pd.DataFrame]:
     try:
         if not path.exists() or path.stat().st_size == 0:
             return None
@@ -67,7 +61,7 @@ def safe_read_csv(path: Path) -> Optional[pd.DataFrame]:
         return None
 
 
-def safe_read_bytes(path: Path) -> Optional[bytes]:
+def file_bytes_or_none(path: Path) -> Optional[bytes]:
     try:
         if not path.exists() or path.stat().st_size == 0:
             return None
@@ -76,74 +70,39 @@ def safe_read_bytes(path: Path) -> Optional[bytes]:
         return None
 
 
-def latest_batch_from_scans(df: pd.DataFrame) -> Tuple[Optional[str], Optional[pd.Timestamp], pd.DataFrame]:
-    """
-    Show the most recent scan run.
-    Prefer grouping by batch_id (written by core.scan_watchlist).
-    """
-    if df.empty:
-        return None, None, df
-
-    if "batch_id" in df.columns and df["batch_id"].astype(str).str.len().gt(0).any():
-        last_batch = str(df.iloc[-1]["batch_id"])
-        batch_df = df[df["batch_id"].astype(str) == last_batch].copy()
-
-        ts_val: Optional[pd.Timestamp] = None
-        if "timestamp" in batch_df.columns:
-            ts = pd.to_datetime(batch_df["timestamp"], errors="coerce")
-            if not ts.isna().all():
-                ts_val = ts.max()
-
-        return last_batch, ts_val, batch_df.head(500)
-
-    ts_val = None
-    if "timestamp" in df.columns:
-        ts = pd.to_datetime(df["timestamp"], errors="coerce")
-        if not ts.isna().all():
-            ts_val = ts.max()
-    return None, ts_val, df.tail(200)
-
-
-def watchlist_is_ready() -> bool:
-    """
-    True if watchlist.csv exists and contains at least 1 data row.
-    """
-    df = safe_read_csv(WATCHLIST_CSV)
-    return df is not None and len(df) > 0
-
-
-def ensure_playwright_chromium_installed() -> bool:
-    """
-    Best-effort runtime install. Prefer installing browsers during deploy.
-    Returns True if browsers appear present after this function.
-    """
-    browsers_dir = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+def has_playwright_browsers() -> bool:
     try:
-        if browsers_dir.exists() and any(browsers_dir.iterdir()):
-            return True
-    except Exception:
-        pass
-
-    with st.spinner("Installing Playwright Chromium browser (first-time setup)..."):
-        try:
-            subprocess.run(
-                ["playwright", "install", "chromium"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            st.success("Chromium installed successfully.")
-        except Exception as e:
-            st.warning(
-                "Automatic Chromium install did not succeed in this environment.\n\n"
-                "If scans fail on Streamlit Cloud, install Playwright browsers during deploy.\n\n"
-                f"Details: {type(e).__name__}: {e}"
-            )
-
-    try:
-        return browsers_dir.exists() and any(browsers_dir.iterdir())
+        d = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+        return d.exists() and any(d.iterdir())
     except Exception:
         return False
+
+
+def _run_playwright_install() -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["playwright", "install", "chromium"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def ensure_playwright_chromium_installed(show_ui: bool) -> bool:
+    if has_playwright_browsers():
+        return True
+
+    proc = _run_playwright_install()
+    if show_ui:
+        if proc.returncode == 0:
+            st.success("Playwright Chromium installed.")
+        else:
+            st.warning("Playwright Chromium install failed in this environment.")
+            with st.expander("Install logs (stdout/stderr)"):
+                st.code(proc.stdout or "(no stdout)")
+                st.code(proc.stderr or "(no stderr)")
+
+    return has_playwright_browsers()
 
 
 def delete_outputs() -> int:
@@ -158,232 +117,197 @@ def delete_outputs() -> int:
     return deleted
 
 
-def render_paths() -> None:
-    st.caption("Files are saved next to this app file:")
-    st.code(
-        "\n".join(
-            [
-                f"watchlist.csv: {WATCHLIST_CSV}",
-                f"scans.csv:     {SCANS_CSV}",
-                f"passes.csv:    {PASSES_CSV}",
-                f"cache db:      {DB_PATH}",
-            ]
-        )
-    )
-
-
 def make_config(
     *,
     max_buy: float,
     watchlist_target: int,
-    verify_candidates: int,
-    pages_per_source: int,
-    verify_limit: int,
-    safety_cap: int,
-    avoid_recent_days: int,
-    allow_eur: bool,
-    eur_to_gbp: float,
-    item_budget: float,
-    run_budget: float,
-    include_scan_fields: bool,
     scan_limit: int,
     refresh_buy_price: bool,
+    allow_eur: bool,
+    eur_to_gbp: float,
+    avoid_recent_days: int,
+    include_scan_fields: bool,
 ) -> RunConfig:
-    raw = dict(
-        max_buy=float(max_buy),
-        target=int(watchlist_target),
-        verify_candidates=int(verify_candidates),
-        pages_per_source=int(pages_per_source),
-        verify_limit=int(verify_limit),
-        safety_cap=int(safety_cap),
-        avoid_recent_days=int(avoid_recent_days),
-        allow_eur=bool(allow_eur),
-        eur_to_gbp=float(eur_to_gbp),
-        item_budget=float(item_budget),
-        run_budget=float(run_budget),
-    )
+    # Sensible defaults (hidden from UI)
+    raw = {
+        "max_buy": float(max_buy),
+        "target": int(watchlist_target),
+        "verify_candidates": 300,
+        "pages_per_source": 5,
+        "verify_limit": 0,
+        "safety_cap": 20,
+        "avoid_recent_days": int(avoid_recent_days),
+        "allow_eur": bool(allow_eur),
+        "eur_to_gbp": float(eur_to_gbp),
+        "item_budget": 55.0,
+        "run_budget": 0.0,
+    }
     if include_scan_fields:
         raw["scan_limit"] = int(scan_limit)
         raw["refresh_buy_price"] = bool(refresh_buy_price)
 
-    return RunConfig.from_kwargs(**raw)
-
-
-def describe_scan_plan(scan_limit: int) -> Tuple[int, int, int]:
-    wl = safe_read_csv(WATCHLIST_CSV)
-    wl_n = len(wl) if wl is not None else 0
-    planned = wl_n if int(scan_limit) == 0 else min(wl_n, int(scan_limit))
-    return planned, wl_n, int(scan_limit)
-
-
-def safe_result_count(result: object) -> Optional[int]:
-    """
-    scan_watchlist() might return a list, df, dict, None, etc.
-    We only display a row count if it's safely discoverable.
-    """
-    if result is None:
-        return None
     try:
-        return len(result)  # type: ignore[arg-type]
-    except Exception:
-        return None
+        return RunConfig.from_kwargs(**raw)
+    except Exception as e:
+        st.error(f"Failed to build RunConfig: {type(e).__name__}: {e}")
+        st.caption("Keys passed to RunConfig.from_kwargs:")
+        st.code(str(raw))
+        raise
 
 
 # ============================================================
-# Streamlit UI
+# Streamlit UI (clean)
 # ============================================================
-st.set_page_config(page_title="Keyflip Scanner", layout="wide")
+st.set_page_config(page_title="Keyflip", layout="wide")
 
-st.title("Keyflip — Fanatical → Eneba Scanner")
-st.caption("Build a watchlist from Fanatical, then scan Eneba to find profitable resale deals.")
+# cold-boot auto install (once per server session)
+if "pw_bootstrap_done" not in st.session_state:
+    st.session_state.pw_bootstrap_done = False
 
-# ------------------------------------------------------------
-# Sidebar
-# ------------------------------------------------------------
+if not st.session_state.pw_bootstrap_done:
+    # show install outcome once
+    ensure_playwright_chromium_installed(show_ui=True)
+    st.session_state.pw_bootstrap_done = True
+
+if "is_running" not in st.session_state:
+    st.session_state.is_running = False
+
+
+# ---------- Header ----------
+left, right = st.columns([2.2, 1])
+with left:
+    st.markdown("## Keyflip")
+    st.caption("Build a watchlist from Fanatical and scan Eneba for profitable resale deals.")
+
+with right:
+    wl = read_csv_if_present(WATCHLIST_CSV)
+    wl_n = 0 if wl is None else len(wl)
+    chrome_ok = has_playwright_browsers()
+
+    st.markdown("#### Status")
+    st.write(f"**Watchlist:** {'✅' if wl_n > 0 else '—'} {wl_n} items")
+    st.write(f"**Playwright Chromium:** {'✅ Installed' if chrome_ok else '⚠️ Missing'}")
+
+
+st.divider()
+
+# ---------- Sidebar (simple) ----------
 with st.sidebar:
-    st.header("Run settings")
+    st.markdown("### Settings")
 
-    max_buy = st.number_input("Max buy price (£)", min_value=1.0, max_value=200.0, value=15.0, step=0.5)
-    watchlist_target = st.number_input("Watchlist size target", min_value=1, max_value=200, value=15, step=1)
+    max_buy = st.slider("Max buy price (£)", min_value=1.0, max_value=200.0, value=15.0, step=0.5)
+    watchlist_target = st.slider("Watchlist size", min_value=5, max_value=200, value=20, step=5)
+    scan_limit = st.slider("Scan items per run", min_value=5, max_value=200, value=20, step=5)
 
-    st.divider()
-    st.subheader("Build (verification)")
+    st.markdown("### Options")
+    refresh_buy_price = st.toggle("Refresh buy price (Playwright)", value=False)
+    avoid_recent_days = st.slider("Avoid recently scanned (days)", min_value=0, max_value=30, value=0, step=1)
 
-    verify_candidates = st.number_input("Verify candidates", min_value=0, max_value=5000, value=300, step=25)
-    pages_per_source = st.number_input("Pages per source", min_value=1, max_value=25, value=5, step=1)
-    verify_limit = st.number_input("Verify limit (0 = use safety cap)", min_value=0, max_value=500, value=0, step=1)
-    safety_cap = st.number_input("Verify safety cap", min_value=1, max_value=500, value=20, step=1)
-
-    st.divider()
-    st.subheader("Scan")
-
-    scan_limit = st.number_input("Scan limit (0 = scan ALL)", min_value=0, max_value=20000, value=0, step=25)
-    refresh_buy_price = st.checkbox("Refresh buy price during scan (Playwright)", value=False)
-    avoid_recent_days = st.number_input("Avoid recent days", min_value=0, max_value=30, value=0, step=1)
+    allow_eur = st.toggle("Allow EUR listings", value=False)
+    eur_to_gbp = st.number_input("EUR→GBP", min_value=0.1, max_value=2.0, value=0.86, step=0.01)
 
     st.divider()
-    st.subheader("Currency / timeouts")
+    st.markdown("### Maintenance")
+    m1, m2 = st.columns(2)
+    do_install_pw = m1.button("Install Chromium", use_container_width=True, disabled=st.session_state.is_running)
+    do_clear_cache = m2.button("Clear cache", use_container_width=True, disabled=st.session_state.is_running)
 
-    allow_eur = st.checkbox("Allow EUR prices (convert to GBP)", value=False)
-    eur_to_gbp = st.number_input("EUR→GBP conversion rate", min_value=0.1, max_value=2.0, value=0.86, step=0.01)
-    item_budget = st.number_input("Per-item time budget (sec)", min_value=5.0, max_value=180.0, value=55.0, step=5.0)
-    run_budget = st.number_input("Overall run time budget (sec, 0 = none)", min_value=0.0, max_value=3600.0, value=0.0, step=10.0)
+    do_delete_outputs = st.button("Delete CSV outputs", use_container_width=True, disabled=st.session_state.is_running)
 
-    st.divider()
-    st.header("Maintenance")
-
-    colA, colB = st.columns(2)
-    do_install_pw = colA.button("Install Chromium", use_container_width=True)
-    do_clear_cache = colB.button("Clear cache DB", use_container_width=True)
-
-    do_clear_recent = st.button("Clear recent flags", use_container_width=True)
-    do_delete_outputs = st.button("Delete CSV outputs", use_container_width=True)
-
-# ------------------------------------------------------------
-# Maintenance actions
-# ------------------------------------------------------------
+# ---------- Maintenance ----------
 if do_install_pw:
-    ensure_playwright_chromium_installed()
+    ensure_playwright_chromium_installed(show_ui=True)
 
 if do_clear_cache:
     try:
-        cache = _open_cache(DB_PATH)
+        cache = open_cache(DB_PATH)
         cache.clear_all()
         st.success("Cache cleared.")
     except Exception as e:
         st.error(f"Failed to clear cache: {type(e).__name__}: {e}")
 
-if do_clear_recent:
-    try:
-        cache = _open_cache(DB_PATH)
-        if hasattr(cache, "clear_recent"):
-            cache.clear_recent()  # type: ignore[attr-defined]
-            st.success("Recent flags cleared.")
-        else:
-            cache.clear_all()
-            st.success("Recent flags cleared (by clearing cache).")
-    except Exception as e:
-        st.error(f"Failed to clear recent flags: {type(e).__name__}: {e}")
-
 if do_delete_outputs:
     n = delete_outputs()
     st.success(f"Deleted {n} output file(s).")
 
-# ------------------------------------------------------------
-# Action buttons
-# ------------------------------------------------------------
-st.divider()
-a1, a2, a3 = st.columns([1, 1, 1])
-build_clicked = a1.button("🔨 Build watchlist", use_container_width=True)
-scan_clicked = a2.button("🔍 Scan watchlist", use_container_width=True)
-play_clicked = a3.button("▶️ Play all (build + scan)", use_container_width=True)
 
-# ------------------------------------------------------------
-# Build / Scan logic (preserve core functionality)
-# ------------------------------------------------------------
-def run_build() -> None:
+# ---------- Main actions (nice layout) ----------
+c1, c2, c3 = st.columns([1, 1, 1])
+
+build_clicked = c1.button("🔨 Build watchlist", use_container_width=True, disabled=st.session_state.is_running)
+scan_clicked = c2.button(
+    "🔍 Scan watchlist",
+    use_container_width=True,
+    disabled=st.session_state.is_running or wl_n == 0,
+)
+play_clicked = c3.button("▶️ Play all", use_container_width=True, disabled=st.session_state.is_running)
+
+if wl_n == 0:
+    st.info("Build a watchlist to enable scanning.")
+
+
+def run_build() -> int:
     cfg = make_config(
         max_buy=max_buy,
         watchlist_target=watchlist_target,
-        verify_candidates=verify_candidates,
-        pages_per_source=pages_per_source,
-        verify_limit=verify_limit,
-        safety_cap=safety_cap,
-        avoid_recent_days=avoid_recent_days,
-        allow_eur=allow_eur,
-        eur_to_gbp=eur_to_gbp,
-        item_budget=item_budget,
-        run_budget=run_budget,
-        include_scan_fields=False,
         scan_limit=scan_limit,
         refresh_buy_price=refresh_buy_price,
+        allow_eur=allow_eur,
+        eur_to_gbp=eur_to_gbp,
+        avoid_recent_days=avoid_recent_days,
+        include_scan_fields=False,
     )
     with st.spinner("Building watchlist from Fanatical..."):
         added = build_watchlist(cfg, WATCHLIST_CSV)
 
-    if added:
-        st.success(f"Watchlist built with {added} item(s).")
+    if added is None:
+        st.warning("Build finished but returned None (expected an int).")
+        return 0
+
+    added_i = int(added)
+    if added_i > 0:
+        st.success(f"Watchlist built: {added_i} item(s).")
     else:
-        st.warning("Watchlist built, but no items were added (no matches found).")
+        st.warning("Watchlist built, but no items were added.")
+    return added_i
 
 
 def run_scan() -> None:
-    planned, wl_n, lim = describe_scan_plan(int(scan_limit))
-    st.info(f"Scan plan: {planned} / {wl_n} watchlist items (scan_limit={lim})")
-
-    if wl_n == 0:
-        st.warning("No watchlist items found. Build a watchlist first.")
+    if refresh_buy_price and not has_playwright_browsers():
+        st.error("Refresh buy price is enabled but Chromium is missing. Install Chromium or disable this option.")
         return
+
+    wl_df = read_csv_if_present(WATCHLIST_CSV)
+    wl_count = 0 if wl_df is None else len(wl_df)
+    if wl_count == 0:
+        st.warning("No watchlist items found. Build first.")
+        return
+
+    planned = min(wl_count, int(scan_limit))
+    st.caption(f"Scanning {planned} / {wl_count} items (limit={int(scan_limit)})")
 
     cfg = make_config(
         max_buy=max_buy,
         watchlist_target=watchlist_target,
-        verify_candidates=verify_candidates,
-        pages_per_source=pages_per_source,
-        verify_limit=verify_limit,
-        safety_cap=safety_cap,
-        avoid_recent_days=avoid_recent_days,
-        allow_eur=allow_eur,
-        eur_to_gbp=eur_to_gbp,
-        item_budget=item_budget,
-        run_budget=run_budget,
-        include_scan_fields=True,
         scan_limit=scan_limit,
         refresh_buy_price=refresh_buy_price,
+        allow_eur=allow_eur,
+        eur_to_gbp=eur_to_gbp,
+        avoid_recent_days=avoid_recent_days,
+        include_scan_fields=True,
     )
 
     with st.spinner("Scanning watchlist on Eneba..."):
-        result = scan_watchlist(cfg, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, DEFAULT_CACHE_FAIL_TTL)
+        scan_watchlist(cfg, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, DEFAULT_CACHE_FAIL_TTL)
 
-    n = safe_result_count(result)
-    if n is None:
-        st.success("Scan complete. Results saved to scans.csv (and passes.csv if any deals matched).")
-    else:
-        st.success(f"Scan complete. Wrote {n} row(s) to scans.csv.")
+    st.success("Scan complete. Results saved to scans.csv (and passes.csv if any deals matched).")
 
 
-# Execute actions
+# ---------- Execute actions ----------
 try:
+    if build_clicked or scan_clicked or play_clicked:
+        st.session_state.is_running = True
+
     if build_clicked:
         run_build()
 
@@ -391,82 +315,74 @@ try:
         run_scan()
 
     if play_clicked:
-        run_build()
-        # Only scan if a watchlist exists and has items
-        if watchlist_is_ready():
+        added = run_build()
+        if added > 0:
             run_scan()
         else:
-            st.warning("Play All stopped after build because the watchlist is empty.")
-except Exception as e:
-    st.error(f"Run failed: {type(e).__name__}: {e}")
+            st.warning("Play all stopped because the watchlist is empty.")
 
-# ------------------------------------------------------------
-# Outputs
-# ------------------------------------------------------------
+finally:
+    st.session_state.is_running = False
+
+
+# ---------- Results ----------
 st.divider()
-render_paths()
 
-watch_df = safe_read_csv(WATCHLIST_CSV)
-scans_df = safe_read_csv(SCANS_CSV)
-passes_df = safe_read_csv(PASSES_CSV)
+watch_df = read_csv_if_present(WATCHLIST_CSV)
+scans_df = read_csv_if_present(SCANS_CSV)
+passes_df = read_csv_if_present(PASSES_CSV)
 
-tabs = st.tabs(["📋 Watchlist", "✅ Good deals", "📈 Latest scan", "⬇️ Downloads"])
+tab1, tab2, tab3, tab4 = st.tabs(["📋 Watchlist", "✅ Good deals", "📈 Latest scans", "⬇️ Downloads"])
 
-with tabs[0]:
+with tab1:
     if watch_df is None or watch_df.empty:
-        st.info("No watchlist available yet. Build one first.")
+        st.info("No watchlist yet.")
     else:
         st.dataframe(watch_df, use_container_width=True, height=520)
 
-with tabs[1]:
+with tab2:
     if passes_df is None or passes_df.empty:
-        st.info("No good deals found yet (passes.csv is empty).")
+        st.info("No good deals found yet.")
     else:
         st.dataframe(passes_df, use_container_width=True, height=520)
 
-with tabs[2]:
+with tab3:
     if scans_df is None or scans_df.empty:
-        st.info("No scan results found yet.")
+        st.info("No scan results yet.")
     else:
-        batch_id, ts, recent = latest_batch_from_scans(scans_df)
+        recent = scans_df.tail(500).copy()
         meta = []
-        if batch_id:
-            meta.append(f"Batch: `{batch_id}`")
-        if ts is not None:
-            meta.append(f"Latest time: `{ts}`")
+        if "timestamp" in recent.columns:
+            ts = pd.to_datetime(recent["timestamp"], errors="coerce")
+            if not ts.isna().all():
+                meta.append(f"Latest: `{ts.max()}`")
+        if "batch_id" in recent.columns and recent["batch_id"].astype(str).str.len().gt(0).any():
+            meta.append(f"Batch: `{str(recent.iloc[-1]['batch_id'])}`")
         if meta:
             st.caption(" • ".join(meta))
         st.dataframe(recent, use_container_width=True, height=520)
 
-with tabs[3]:
-    b = safe_read_bytes(WATCHLIST_CSV)
-    st.download_button(
-        "Download watchlist.csv",
-        data=b if b is not None else b"",
-        file_name="watchlist.csv",
-        use_container_width=True,
-        disabled=b is None,
-    )
+with tab4:
+    b = file_bytes_or_none(WATCHLIST_CSV)
+    if b is not None:
+        st.download_button("Download watchlist.csv", data=b, file_name="watchlist.csv", use_container_width=True)
 
-    b = safe_read_bytes(SCANS_CSV)
-    st.download_button(
-        "Download scans.csv",
-        data=b if b is not None else b"",
-        file_name="scans.csv",
-        use_container_width=True,
-        disabled=b is None,
-    )
+    b = file_bytes_or_none(SCANS_CSV)
+    if b is not None:
+        st.download_button("Download scans.csv", data=b, file_name="scans.csv", use_container_width=True)
 
-    b = safe_read_bytes(PASSES_CSV)
-    st.download_button(
-        "Download passes.csv",
-        data=b if b is not None else b"",
-        file_name="passes.csv",
-        use_container_width=True,
-        disabled=b is None,
-    )
+    b = file_bytes_or_none(PASSES_CSV)
+    if b is not None:
+        st.download_button("Download passes.csv", data=b, file_name="passes.csv", use_container_width=True)
+
+    if (
+        file_bytes_or_none(WATCHLIST_CSV) is None
+        and file_bytes_or_none(SCANS_CSV) is None
+        and file_bytes_or_none(PASSES_CSV) is None
+    ):
+        st.info("Nothing to download yet.")
 
 st.caption(
-    "Note: On Streamlit Cloud, Playwright browsers are best installed during deploy. "
-    "If you enable Playwright-based scanning, use the sidebar ‘Install Chromium’ button if needed."
+    "Tip: Keep 'Refresh buy price (Playwright)' OFF unless you need it. "
+    "It’s slower and requires Chromium to be installed."
 )
