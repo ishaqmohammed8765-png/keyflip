@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 # ============================================================
 # Networking
@@ -9,6 +10,8 @@ from typing import Any, Optional
 
 HTTP_CONNECT_TIMEOUT_S = 6
 HTTP_READ_TIMEOUT_S = 20
+
+# Some code expects a single timeout value
 HTTP_TIMEOUT_S = HTTP_READ_TIMEOUT_S
 
 UA = (
@@ -42,46 +45,36 @@ def compute_profit(buy_gbp: float, sell_gbp: float) -> tuple[float, float]:
 # Cache TTL
 # ============================================================
 
-PRICE_OK_TTL_S = 60 * 30
-PRICE_FAIL_TTL_S = 60 * 20
+PRICE_OK_TTL_S = 60 * 30   # 30 minutes
+PRICE_FAIL_TTL_S = 60 * 20  # 20 minutes
 
 # Back-compat aliases some files may import
 PRICE_OK_TTL = PRICE_OK_TTL_S
 PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 
+
 # ============================================================
-# Buy-side sources (CDKeys / Loaded)
-# ============================================================
-#
-# NOTE:
-# - cdkeys.com often redirects to loaded.com.
-# - Some /pc/... listing pages are JS-heavy and can yield "0 links" with simple
-#   anchor harvesting.
-# - /explore/... pages tend to be more stable for extracting product URLs and
-#   support ?p= pagination.
+# Buy-side sources (Loaded / CDKeys)
 # ============================================================
 
-CDKEYS_SOURCES = {
+CDKEYS_SOURCES: Dict[str, str] = {
     # Deals
     "deals": "https://www.loaded.com/deals",
     "deals_pc": "https://www.loaded.com/deals/pc",
-
-    # Explore categories (good harvest targets)
+    # Explore categories (stable for pagination / harvesting)
     "explore_action": "https://www.loaded.com/explore/action-games",
     "explore_adventure": "https://www.loaded.com/explore/adventure-games",
     "explore_arcade": "https://www.loaded.com/explore/arcade-games",
     "explore_open_world": "https://www.loaded.com/explore/open-world-games",
     "explore_rpg": "https://www.loaded.com/explore/rpg-games",
     "explore_strategy": "https://www.loaded.com/explore/strategy-games",
-
-    # A few extra buckets to widen coverage (harvest more links)
+    # Extra coverage
     "explore_simulation": "https://www.loaded.com/explore/simulation-games",
     "explore_sports": "https://www.loaded.com/explore/sports-games",
     "explore_indie": "https://www.loaded.com/explore/indie-games",
 }
 
 # Compatibility alias: older modules may still import FANATICAL_SOURCES.
-# It now points at CDKeys/Loaded sources.
 FANATICAL_SOURCES = CDKEYS_SOURCES
 
 
@@ -104,16 +97,51 @@ def _parse_bool(v: Any, default: bool = False) -> bool:
     return default
 
 
+@dataclass
 class RunConfig:
     """
-    Compatibility config object.
-
-    Accepts ALL known argument styles used across your project and normalizes them
-    to canonical fields. This prevents TypeError crashes without touching other files.
+    Canonical config fields used by the Streamlit app.
+    This dataclass is deliberately flexible: it accepts older naming via from_kwargs().
     """
+    # optional project root (not required by app)
+    root: Optional[Path] = None
 
-    def __init__(self, **kwargs: Any) -> None:
-        # ---- aliases from different versions ----
+    # core controls
+    max_buy: float = 10.0
+    target: int = 15
+
+    # build controls
+    verify_candidates: int = 200
+    pages_per_source: int = 5
+    verify_limit: int = 0       # 0 => use safety cap
+    safety_cap: int = 20
+
+    # scan controls
+    scan_limit: int = 0         # 0 => scan all
+    avoid_recent_days: int = 0
+
+    # currency handling
+    allow_eur: bool = False
+    eur_to_gbp: float = 0.86
+
+    # budgets (seconds)
+    item_budget: float = 45.0
+    run_budget: float = 0.0
+
+    # optional cache ttl override
+    cache_fail_ttl: Optional[int] = None
+
+    # Optional knobs (safe to ignore if unused elsewhere)
+    refresh_buy_price: bool = False
+    scan_sleep_s: float = 0.0
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> "RunConfig":
+        """
+        Accept known historical argument styles and normalize to this dataclass.
+        Unknown keys are rejected (to catch typos).
+        """
+        # --- normalize aliases ---
         if "max_buy_gbp" in kwargs and "max_buy" not in kwargs:
             kwargs["max_buy"] = kwargs.pop("max_buy_gbp")
 
@@ -129,59 +157,35 @@ class RunConfig:
         if "run_budget_s" in kwargs and "run_budget" not in kwargs:
             kwargs["run_budget"] = kwargs.pop("run_budget_s")
 
-        # NOTE: some old code incorrectly used scan_limit_s; accept it anyway.
+        # Sometimes old code used scan_limit_s by mistake
         if "scan_limit_s" in kwargs and "scan_limit" not in kwargs:
             kwargs["scan_limit"] = kwargs.pop("scan_limit_s")
 
-        # optional extras some files pass
-        root = kwargs.pop("root", None)
-        self.root: Optional[Path] = Path(root) if root else None
-
         # compat: allow either name
-        self.cache_fail_ttl = kwargs.pop("cache_fail_ttl", kwargs.pop("fail_ttl", None))
+        if "fail_ttl" in kwargs and "cache_fail_ttl" not in kwargs:
+            kwargs["cache_fail_ttl"] = kwargs.pop("fail_ttl")
 
-        # ---- canonical fields (with safe defaults) ----
-        self.max_buy: float = float(kwargs.pop("max_buy", 10.0))
-        self.target: int = int(kwargs.pop("target", 15))
+        # root can be str or Path
+        if "root" in kwargs and kwargs["root"] is not None and not isinstance(kwargs["root"], Path):
+            kwargs["root"] = Path(str(kwargs["root"]))
 
-        # 0 means "no limit"
-        self.verify_candidates: int = int(kwargs.pop("verify_candidates", 200))
-        self.pages_per_source: int = int(kwargs.pop("pages_per_source", 5))
+        # bool parsing
+        if "allow_eur" in kwargs:
+            kwargs["allow_eur"] = _parse_bool(kwargs["allow_eur"], default=False)
+        if "refresh_buy_price" in kwargs:
+            kwargs["refresh_buy_price"] = _parse_bool(kwargs["refresh_buy_price"], default=False)
 
-        # verify_limit: 0 means "use safety cap"
-        self.verify_limit: int = int(kwargs.pop("verify_limit", 0))
-        self.safety_cap: int = int(kwargs.pop("safety_cap", 20))
+        # --- reject unknown keys ---
+        allowed = set(cls.__dataclass_fields__.keys())
+        unknown = [k for k in kwargs.keys() if k not in allowed]
+        if unknown:
+            raise TypeError(f"Unexpected RunConfig argument(s): {', '.join(unknown)}")
 
-        self.avoid_recent_days: int = int(kwargs.pop("avoid_recent_days", 0))
+        cfg = cls(**kwargs)
+        cfg._validate()
+        return cfg
 
-        self.allow_eur: bool = _parse_bool(kwargs.pop("allow_eur", False), default=False)
-        self.eur_to_gbp: float = float(kwargs.pop("eur_to_gbp", 0.86))
-
-        # scan_limit: 0 means unlimited
-        self.scan_limit: int = int(kwargs.pop("scan_limit", 0))
-
-        # budgets: seconds (0 means unlimited)
-        self.item_budget: float = float(kwargs.pop("item_budget", 45.0))
-        self.run_budget: float = float(kwargs.pop("run_budget", 0.0))
-
-        if kwargs:
-            raise TypeError(f"Unexpected RunConfig argument(s): {', '.join(kwargs)}")
-
-        self._validate()
-
-    def __repr__(self) -> str:
-        return (
-            "RunConfig("
-            f"max_buy={self.max_buy}, target={self.target}, "
-            f"verify_candidates={self.verify_candidates}, pages_per_source={self.pages_per_source}, "
-            f"verify_limit={self.verify_limit}, safety_cap={self.safety_cap}, "
-            f"scan_limit={self.scan_limit}, avoid_recent_days={self.avoid_recent_days}, "
-            f"allow_eur={self.allow_eur}, eur_to_gbp={self.eur_to_gbp}, "
-            f"item_budget={self.item_budget}, run_budget={self.run_budget}"
-            ")"
-        )
-
-    # ---- compatibility properties ----
+    # ---- compatibility properties (older code may read these) ----
     @property
     def max_buy_gbp(self) -> float:
         return self.max_buy
@@ -223,7 +227,6 @@ class RunConfig:
         if self.target <= 0:
             raise ValueError("target must be > 0")
 
-        # allow 0 for "unlimited"
         if self.verify_candidates < 0:
             raise ValueError("verify_candidates must be >= 0")
         if self.pages_per_source <= 0:
@@ -236,6 +239,8 @@ class RunConfig:
 
         if self.scan_limit < 0:
             raise ValueError("scan_limit must be >= 0")
+        if self.avoid_recent_days < 0:
+            raise ValueError("avoid_recent_days must be >= 0")
 
         if self.item_budget <= 0:
             raise ValueError("item_budget must be > 0")
@@ -244,6 +249,34 @@ class RunConfig:
 
         if self.allow_eur and self.eur_to_gbp <= 0:
             raise ValueError("eur_to_gbp must be > 0 when allow_eur=True")
+        if self.scan_sleep_s < 0:
+            raise ValueError("scan_sleep_s must be >= 0")
+
+
+# ============================================================
+# Backwards-compatible constructor behavior
+# ============================================================
+#
+# Your app does: RunConfig(**kwargs)
+# but we want alias-support + validation.
+# So we keep __init__ from dataclass and provide this wrapper.
+#
+
+def _runconfig_ctor_shim(**kwargs: Any) -> RunConfig:
+    return RunConfig.from_kwargs(**kwargs)
+
+
+# If you want the exact same call style (RunConfig(**kwargs)) to work with aliases,
+# you can optionally export a name that matches what app imports.
+# But since your app imports RunConfig directly, the simplest is:
+#
+#   - Update app.py to call RunConfig.from_kwargs(**kwargs)
+#
+# If you cannot change app.py, uncomment the block below and change app.py import
+# to: from keyflip.config import RunConfig as RunConfig
+#
+# However: Python won't let us replace the class name with a function cleanly
+# without breaking type assumptions in other modules. So prefer using from_kwargs().
 
 
 # ============================================================
