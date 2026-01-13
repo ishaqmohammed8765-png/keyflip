@@ -4,7 +4,6 @@ import logging
 import random
 import time
 import uuid
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -25,7 +24,9 @@ from .fanatical_pw import FanaticalPWClient
 
 log = logging.getLogger("keyflip.core")
 
-WATCHLIST_COLS = ["title", "buy_url", "buy_price_gbp", "buy_notes"]
+# Added: persist Eneba product URL + notes so future scans avoid store search (1 request/item instead of 2)
+WATCHLIST_COLS = ["title", "buy_url", "buy_price_gbp", "buy_notes", "eneba_url", "eneba_notes"]
+
 SCANS_COLS = [
     "batch_id",
     "timestamp",
@@ -150,7 +151,7 @@ def _cfg_bool(cfg: RunConfig, name: str, default: bool) -> bool:
 def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
     """
     Build a watchlist from Fanatical sources using Playwright.
-    Writes: title, buy_url, buy_price_gbp, buy_notes
+    Writes: title, buy_url, buy_price_gbp, buy_notes, eneba_url, eneba_notes
     """
     out_csv = Path(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -200,6 +201,8 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
                     "buy_url": str(url).strip(),
                     "buy_price_gbp": float(price),
                     "buy_notes": str(notes or "").strip(),
+                    "eneba_url": "",   # filled during scan when resolved
+                    "eneba_notes": "", # filled during scan when resolved
                 }
             )
 
@@ -226,11 +229,9 @@ def scan_watchlist(
     """
     Scans ALL items in the watchlist (unless cfg.scan_limit > 0).
 
-    Key changes to ensure you don't "scan only one":
-    - We DO NOT depend on Playwright per-row to proceed.
-    - We use watchlist CSV values for buy_price/buy_notes by default.
-    - Playwright is kept, and can optionally refresh buy price; if it fails it won't stop the scan.
-    - We always append a scan row (even if market lookup fails) so you can see what happened.
+    Improvements:
+    - Persist resolved Eneba product URLs back into watchlist.csv (eneba_url/eneba_notes)
+      so future scans skip store search resolution (fewer requests, fewer 429s, faster).
     """
     cache = _open_cache(db_path)  # kept (and future-proof), even if not used heavily here
     _ = cache
@@ -246,7 +247,7 @@ def scan_watchlist(
     # Ensure expected columns exist (older watchlists won't crash scan)
     for c in WATCHLIST_COLS:
         if c not in watch.columns:
-            watch[c] = None
+            watch[c] = "" if c in ("eneba_url", "eneba_notes") else None
 
     scan_limit = _cfg_int(cfg, "scan_limit", 0)  # 0 = unlimited
     refresh_buy_price = _cfg_bool(cfg, "refresh_buy_price", False)  # optional knob
@@ -257,6 +258,9 @@ def scan_watchlist(
 
     attempted = 0
     rows: List[Dict[str, object]] = []
+
+    # Track whether we changed watchlist (to avoid rewriting file every time)
+    watchlist_dirty = False
 
     log.info(
         "Scanning watchlist: size=%d scan_limit=%d refresh_buy_price=%s",
@@ -289,7 +293,7 @@ def scan_watchlist(
         fan = _fan_start()
 
     try:
-        for _, r in watch.iterrows():
+        for idx, r in watch.iterrows():
             if scan_limit > 0 and attempted >= scan_limit:
                 break
             attempted += 1
@@ -315,17 +319,31 @@ def scan_watchlist(
                     _fan_stop(fan)
                     fan = _fan_start()
 
+            # NEW: reuse persisted eneba_url if present (skip store search)
+            existing_eneba_url = str(r.get("eneba_url", "") or "").strip()
+            existing_eneba_notes = str(r.get("eneba_notes", "") or "").strip()
+
             store_url = make_store_search_url(title)
-            prod_url: Optional[str] = None
-            resolve_notes = ""
+            prod_url: Optional[str] = existing_eneba_url or None
+            resolve_notes = existing_eneba_notes or ""
             sell_price: Optional[float] = None
             sell_notes = ""
 
-            try:
-                prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
-            except Exception as e:
-                resolve_notes = f"resolve_failed:{type(e).__name__}"
+            # Only resolve if we don't already have a product URL
+            if not prod_url:
+                try:
+                    prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
+                except Exception as e:
+                    resolve_notes = f"resolve_failed:{type(e).__name__}"
+                    prod_url = None
 
+                # Persist resolved URL for future scans
+                if prod_url:
+                    watch.at[idx, "eneba_url"] = prod_url
+                    watch.at[idx, "eneba_notes"] = resolve_notes
+                    watchlist_dirty = True
+
+            # Read price if we have a product URL (1 request/item after first resolve)
             if prod_url:
                 try:
                     sell_price, sell_notes = read_price_gbp(prod_url)
@@ -370,6 +388,15 @@ def scan_watchlist(
         _fan_stop(fan)
 
     batch = pd.DataFrame(rows, columns=SCANS_COLS)
+
+    # Persist updated watchlist (only if we filled eneba_url for any row)
+    if watchlist_dirty:
+        try:
+            # ensure column order + presence
+            watch.reindex(columns=WATCHLIST_COLS).to_csv(watchlist_path, index=False)
+            log.info("Updated watchlist with eneba_url/eneba_notes: %s", str(watchlist_path))
+        except Exception:
+            log.exception("Failed to persist updated watchlist: %s", str(watchlist_path))
 
     # Write scans.csv (append)
     _append_csv(scans_path, batch, SCANS_COLS)
