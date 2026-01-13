@@ -53,28 +53,35 @@ PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 # Buy-side sources (CDKeys / Loaded)
 # ============================================================
 #
-# IMPORTANT:
-# Many /pc/... listing pages on loaded.com are JS-heavy and can yield "0 links"
-# when harvesting <a href> elements.
-#
-# The /explore/... pages are generally much more stable for harvesting because
-# they tend to expose product links in the DOM + support ?p= pagination.
+# NOTE:
+# - cdkeys.com often redirects to loaded.com.
+# - Some /pc/... listing pages are JS-heavy and can yield "0 links" with simple
+#   anchor harvesting.
+# - /explore/... pages tend to be more stable for extracting product URLs and
+#   support ?p= pagination.
 # ============================================================
 
 CDKEYS_SOURCES = {
-    "explore_deals": "https://www.loaded.com/deals",
-    "explore_pc_deals": "https://www.loaded.com/deals/pc",
+    # Deals
+    "deals": "https://www.loaded.com/deals",
+    "deals_pc": "https://www.loaded.com/deals/pc",
 
-    # Game categories
+    # Explore categories (good harvest targets)
     "explore_action": "https://www.loaded.com/explore/action-games",
     "explore_adventure": "https://www.loaded.com/explore/adventure-games",
     "explore_arcade": "https://www.loaded.com/explore/arcade-games",
     "explore_open_world": "https://www.loaded.com/explore/open-world-games",
     "explore_rpg": "https://www.loaded.com/explore/rpg-games",
     "explore_strategy": "https://www.loaded.com/explore/strategy-games",
+
+    # A few extra buckets to widen coverage (harvest more links)
+    "explore_simulation": "https://www.loaded.com/explore/simulation-games",
+    "explore_sports": "https://www.loaded.com/explore/sports-games",
+    "explore_indie": "https://www.loaded.com/explore/indie-games",
 }
 
-# Backwards compatibility: older modules may still import FANATICAL_SOURCES.
+# Compatibility alias: older modules may still import FANATICAL_SOURCES.
+# It now points at CDKeys/Loaded sources.
 FANATICAL_SOURCES = CDKEYS_SOURCES
 
 
@@ -99,8 +106,10 @@ def _parse_bool(v: Any, default: bool = False) -> bool:
 
 class RunConfig:
     """
-    Accepts ALL known argument styles used across your project.
-    This prevents TypeError crashes without touching other files.
+    Compatibility config object.
+
+    Accepts ALL known argument styles used across your project and normalizes them
+    to canonical fields. This prevents TypeError crashes without touching other files.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -159,6 +168,18 @@ class RunConfig:
             raise TypeError(f"Unexpected RunConfig argument(s): {', '.join(kwargs)}")
 
         self._validate()
+
+    def __repr__(self) -> str:
+        return (
+            "RunConfig("
+            f"max_buy={self.max_buy}, target={self.target}, "
+            f"verify_candidates={self.verify_candidates}, pages_per_source={self.pages_per_source}, "
+            f"verify_limit={self.verify_limit}, safety_cap={self.safety_cap}, "
+            f"scan_limit={self.scan_limit}, avoid_recent_days={self.avoid_recent_days}, "
+            f"allow_eur={self.allow_eur}, eur_to_gbp={self.eur_to_gbp}, "
+            f"item_budget={self.item_budget}, run_budget={self.run_budget}"
+            ")"
+        )
 
     # ---- compatibility properties ----
     @property
