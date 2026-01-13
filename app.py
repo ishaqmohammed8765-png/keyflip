@@ -169,17 +169,17 @@ with st.sidebar:
     run_budget = st.number_input("Overall run time budget (sec, 0 = none)", min_value=0.0, max_value=3600.0, value=0.0, step=10.0)
 
     st.divider()
-    clear_cache = st.button("Clear price cache (DB)", use_container_width=True)
-    clear_recent = st.button("Clear recent flags (avoid_recent_days)", use_container_width=True)
-    delete_outputs = st.button("Delete CSV outputs", use_container_width=True)
+    clear_cache = st.button("Clear price cache (DB)", width="stretch")
+    clear_recent = st.button("Clear recent flags (avoid_recent_days)", width="stretch")
+    delete_outputs = st.button("Delete CSV outputs", width="stretch")
 
 # ------------------------------------------------------------
 # Actions row
 # ------------------------------------------------------------
 col1, col2, col3 = st.columns([1, 1, 1])
-build_clicked = col1.button("🔨 Build Watchlist", use_container_width=True)
-scan_clicked = col2.button("🔍 Scan Watchlist", use_container_width=True)
-play_clicked = col3.button("▶️ Play All (Build + Scan)", use_container_width=True)
+build_clicked = col1.button("🔨 Build Watchlist", width="stretch")
+scan_clicked = col2.button("🔍 Scan Watchlist", width="stretch")
+play_clicked = col3.button("▶️ Play All (Build + Scan)", width="stretch")
 
 # ------------------------------------------------------------
 # Maintenance actions
@@ -196,7 +196,6 @@ if clear_recent:
     # "recent flags" live in the DB (cache.mark_recent / cache.is_recent), not in watchlist.csv
     try:
         cache = _open_cache(DB_PATH)
-        cleared = 0
 
         # Prefer a method if cache.py provides it
         if hasattr(cache, "clear_recent"):
@@ -204,7 +203,6 @@ if clear_recent:
             st.success("Recent flags cleared.")
         else:
             # Fallback: safest behavior is to clear the cache entirely.
-            # This guarantees avoid_recent_days won't skip items.
             cache.clear_all()
             st.success("Recent flags cleared (by clearing cache).")
     except Exception as e:
@@ -278,14 +276,13 @@ tabs = st.tabs(["📋 Watchlist", "✅ Good Deals", "📈 Latest Scan", "⬇️ 
 
 with tabs[0]:
     if watch_df is not None:
-        st.dataframe(watch_df, use_container_width=True)
+        st.dataframe(watch_df, width="stretch")
     else:
         st.info("No watchlist available yet. Build one first.")
 
 with tabs[1]:
-    # Good deals = passes.csv (items that passed profit/ROI checks)
     if passes_df is not None and not passes_df.empty:
-        st.dataframe(passes_df, use_container_width=True)
+        st.dataframe(passes_df, width="stretch")
     else:
         st.info("No good deals found yet (passes.csv is empty).")
 
@@ -294,7 +291,7 @@ with tabs[2]:
         ts, recent = latest_timestamp_from_scans(scans_df)
         if ts is not None:
             st.caption(f"Most recent scan at: {ts}")
-        st.dataframe(recent, use_container_width=True)
+        st.dataframe(recent, width="stretch")
     else:
         st.info("No scan results found yet.")
 
@@ -304,7 +301,7 @@ with tabs[3]:
         "Download watchlist.csv",
         data=b if b is not None else b"",
         file_name="watchlist.csv",
-        use_container_width=True,
+        width="stretch",
         disabled=b is None,
     )
 
@@ -313,7 +310,7 @@ with tabs[3]:
         "Download scans.csv",
         data=b if b is not None else b"",
         file_name="scans.csv",
-        use_container_width=True,
+        width="stretch",
         disabled=b is None,
     )
 
@@ -322,7 +319,7 @@ with tabs[3]:
         "Download passes.csv",
         data=b if b is not None else b"",
         file_name="passes.csv",
-        use_container_width=True,
+        width="stretch",
         disabled=b is None,
     )
 
