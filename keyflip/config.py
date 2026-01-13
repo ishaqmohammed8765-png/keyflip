@@ -1,7 +1,8 @@
-# keyflip/config.py
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Optional
 
 # ============================================================
 # Networking
@@ -9,8 +10,6 @@ from dataclasses import dataclass
 
 HTTP_CONNECT_TIMEOUT_S = 6
 HTTP_READ_TIMEOUT_S = 20
-
-# Some modules expect a single timeout variable:
 HTTP_TIMEOUT_S = HTTP_READ_TIMEOUT_S
 
 UA = (
@@ -20,7 +19,7 @@ UA = (
 )
 
 # ============================================================
-# Pricing / profitability assumptions (tune these)
+# Pricing / profitability assumptions
 # ============================================================
 
 SELL_FEE_PCT = 0.12
@@ -32,7 +31,6 @@ MIN_ROI = 0.20
 
 
 def compute_profit(buy_gbp: float, sell_gbp: float) -> tuple[float, float]:
-    """Returns (profit_gbp, roi)."""
     net_sell = sell_gbp * (1.0 - SELL_FEE_PCT)
     buffer = BUFFER_FIXED_GBP + (buy_gbp * BUFFER_PCT_OF_BUY)
     profit = net_sell - buy_gbp - buffer
@@ -41,18 +39,17 @@ def compute_profit(buy_gbp: float, sell_gbp: float) -> tuple[float, float]:
 
 
 # ============================================================
-# Cache TTL defaults
+# Cache TTL
 # ============================================================
 
-PRICE_OK_TTL_S = 60 * 30        # 30 minutes
-PRICE_FAIL_TTL_S = 60 * 20      # 20 minutes
+PRICE_OK_TTL_S = 60 * 30
+PRICE_FAIL_TTL_S = 60 * 20
 
-# Some code names this slightly differently; define both to be safe.
 PRICE_OK_TTL = PRICE_OK_TTL_S
 PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 
 # ============================================================
-# Fanatical sources (used by builder)
+# Fanatical sources
 # ============================================================
 
 FANATICAL_SOURCES = {
@@ -63,63 +60,85 @@ FANATICAL_SOURCES = {
 }
 
 # ============================================================
-# Run configuration (your existing config object)
+# RunConfig (backwards + forwards compatible)
 # ============================================================
 
-
-@dataclass
 class RunConfig:
-    max_buy: float
-    target: int = 15
-    verify_candidates: int = 200
-    pages_per_source: int = 5
-    verify_limit: int = 0          # 0 = unlimited (but safety_cap still applies)
-    safety_cap: int = 20
-    avoid_recent_days: int = 0
-    allow_eur: bool = False
-    eur_to_gbp: float = 0.86
-    scan_limit: int = 0            # 0 = unlimited
-    item_budget: float = 45.0      # seconds
-    run_budget: float = 0.0        # 0 = unlimited
+    """
+    Accepts ALL known argument styles used across your project.
+    This prevents TypeError crashes without touching other files.
+    """
 
-    def __post_init__(self) -> None:
-        # Fail-fast validation (prevents silent weird behaviour later)
-        if self.max_buy <= 0:
-            raise ValueError("max_buy must be > 0")
+    def __init__(self, **kwargs: Any) -> None:
+        # ---- aliases from different versions ----
+        if "max_buy_gbp" in kwargs:
+            kwargs["max_buy"] = kwargs.pop("max_buy_gbp")
 
-        if self.target <= 0:
-            raise ValueError("target must be > 0")
+        if "watchlist_target" in kwargs:
+            kwargs["target"] = kwargs.pop("watchlist_target")
 
-        if self.verify_candidates <= 0:
-            raise ValueError("verify_candidates must be > 0")
+        if "verify_safety_cap" in kwargs:
+            kwargs["safety_cap"] = kwargs.pop("verify_safety_cap")
 
-        if self.pages_per_source <= 0:
-            raise ValueError("pages_per_source must be > 0")
+        if "item_budget_s" in kwargs:
+            kwargs["item_budget"] = kwargs.pop("item_budget_s")
 
-        if self.verify_limit < 0:
-            raise ValueError("verify_limit must be >= 0 (0 means unlimited)")
+        if "run_budget_s" in kwargs:
+            kwargs["run_budget"] = kwargs.pop("run_budget_s")
 
-        if self.safety_cap <= 0:
-            raise ValueError("safety_cap must be > 0")
+        if "scan_limit_s" in kwargs:
+            kwargs["scan_limit"] = kwargs.pop("scan_limit_s")
 
-        if self.avoid_recent_days < 0:
-            raise ValueError("avoid_recent_days must be >= 0")
+        # optional extras some files pass
+        root = kwargs.pop("root", None)
+        self.root: Optional[Path] = Path(root) if root else None
+        self.cache_fail_ttl = kwargs.pop(
+            "cache_fail_ttl",
+            kwargs.pop("fail_ttl", None)
+        )
 
-        if self.scan_limit < 0:
-            raise ValueError("scan_limit must be >= 0 (0 means unlimited)")
+        # ---- canonical fields ----
+        self.max_buy: float = float(kwargs.pop("max_buy"))
+        self.target: int = int(kwargs.pop("target", 15))
+        self.verify_candidates: int = int(kwargs.pop("verify_candidates", 200))
+        self.pages_per_source: int = int(kwargs.pop("pages_per_source", 5))
+        self.verify_limit: int = int(kwargs.pop("verify_limit", 0))
+        self.safety_cap: int = int(kwargs.pop("safety_cap", 20))
+        self.avoid_recent_days: int = int(kwargs.pop("avoid_recent_days", 0))
+        self.allow_eur: bool = bool(kwargs.pop("allow_eur", False))
+        self.eur_to_gbp: float = float(kwargs.pop("eur_to_gbp", 0.86))
+        self.scan_limit: int = int(kwargs.pop("scan_limit", 0))
+        self.item_budget: float = float(kwargs.pop("item_budget", 45.0))
+        self.run_budget: float = float(kwargs.pop("run_budget", 0.0))
 
-        if self.item_budget <= 0:
-            raise ValueError("item_budget must be > 0 seconds")
+        if kwargs:
+            raise TypeError(f"Unexpected RunConfig argument(s): {', '.join(kwargs)}")
 
-        if self.run_budget < 0:
-            raise ValueError("run_budget must be >= 0 seconds (0 means unlimited)")
+        self._validate()
 
-        if self.allow_eur and self.eur_to_gbp <= 0:
-            raise ValueError("eur_to_gbp must be > 0 when allow_eur=True")
+    # ---- compatibility properties ----
+    @property
+    def max_buy_gbp(self) -> float:
+        return self.max_buy
 
-    # Helpers: safe to add; other files don't need to use them
+    @property
+    def watchlist_target(self) -> int:
+        return self.target
+
+    @property
+    def verify_safety_cap(self) -> int:
+        return self.safety_cap
+
+    @property
+    def item_budget_s(self) -> float:
+        return self.item_budget
+
+    @property
+    def run_budget_s(self) -> float:
+        return self.run_budget
+
+    # ---- helpers ----
     def effective_verify_limit(self) -> int:
-        """Apply safety cap even if verify_limit is unlimited (0)."""
         if self.verify_limit == 0:
             return self.safety_cap
         return min(self.verify_limit, self.safety_cap)
@@ -127,23 +146,45 @@ class RunConfig:
     def is_unlimited_scan(self) -> bool:
         return self.scan_limit == 0
 
+    # ---- validation ----
+    def _validate(self) -> None:
+        if self.max_buy <= 0:
+            raise ValueError("max_buy must be > 0")
+        if self.target <= 0:
+            raise ValueError("target must be > 0")
+        if self.verify_candidates <= 0:
+            raise ValueError("verify_candidates must be > 0")
+        if self.pages_per_source <= 0:
+            raise ValueError("pages_per_source must be > 0")
+        if self.verify_limit < 0:
+            raise ValueError("verify_limit must be >= 0")
+        if self.safety_cap <= 0:
+            raise ValueError("safety_cap must be > 0")
+        if self.scan_limit < 0:
+            raise ValueError("scan_limit must be >= 0")
+        if self.item_budget <= 0:
+            raise ValueError("item_budget must be > 0")
+        if self.run_budget < 0:
+            raise ValueError("run_budget must be >= 0")
+        if self.allow_eur and self.eur_to_gbp <= 0:
+            raise ValueError("eur_to_gbp must be > 0 when allow_eur=True")
+
 
 # ============================================================
-# Placeholders (kept so imports don't break)
+# Placeholders (do not remove – imports rely on them)
 # ============================================================
 
 def build_watchlist(config: RunConfig, output_path) -> int:
-    """
-    Build a watchlist using Fanatical scraping logic (placeholder).
-    Return: number of items written.
-    """
-    print("Building watchlist with:", config)
+    print("Building watchlist with:", config.__dict__)
     return 0
 
 
-def scan_watchlist(config: RunConfig, watchlist_path, scans_path, passes_path, db_path, fail_ttl):
-    """
-    Scan watchlist using Eneba logic (placeholder).
-    """
-    print("Scanning watchlist using:", config)
-    return
+def scan_watchlist(
+    config: RunConfig,
+    watchlist_path,
+    scans_path,
+    passes_path,
+    db_path,
+    fail_ttl,
+):
+    print("Scanning watchlist with:", config.__dict__)
