@@ -1,5 +1,9 @@
 # =========================
 # keyflip/core.py (rewrite)
+# - Persists eneba_url/eneba_notes to watchlist.csv
+# - Robust NaN handling (never tries to fetch "nan")
+# - Passes allow_eur + eur_to_gbp into read_price_gbp()
+# - Optional: avoid store+product burst by skipping price fetch on newly resolved URLs
 # =========================
 from __future__ import annotations
 
@@ -27,7 +31,6 @@ from .fanatical_pw import FanaticalPWClient
 
 log = logging.getLogger("keyflip.core")
 
-# Persist Eneba product URL + notes so future scans avoid store search (1 request/item after first resolve)
 WATCHLIST_COLS = ["title", "buy_url", "buy_price_gbp", "buy_notes", "eneba_url", "eneba_notes"]
 
 SCANS_COLS = [
@@ -58,11 +61,22 @@ def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
+def _to_str(x: Any) -> str:
+    if x is None:
+        return ""
+    try:
+        if pd.isna(x):
+            return ""
+    except Exception:
+        pass
+    s = str(x).strip()
+    return "" if s.lower() == "nan" else s
+
+
 def _to_float(x: Any) -> Optional[float]:
     try:
         if x is None:
             return None
-        # pandas NaN
         try:
             if pd.isna(x):
                 return None
@@ -74,23 +88,6 @@ def _to_float(x: Any) -> Optional[float]:
         return float(s)
     except Exception:
         return None
-
-
-def _to_str(x: Any) -> str:
-    """
-    Robust string conversion for pandas cells:
-    - treats NaN as empty string
-    - strips whitespace
-    """
-    if x is None:
-        return ""
-    try:
-        if pd.isna(x):
-            return ""
-    except Exception:
-        pass
-    s = str(x).strip()
-    return "" if s.lower() == "nan" else s
 
 
 def _dedupe(items: List[str]) -> List[str]:
@@ -134,9 +131,6 @@ def _open_cache(db_path: Path) -> PriceCache:
 
 
 def _compute_profit(buy_gbp: float, sell_gbp: float) -> Tuple[float, float, float, float]:
-    """
-    Returns (market_after_fee, buffer, profit, roi)
-    """
     market_after_fee = sell_gbp * (1.0 - SELL_FEE_PCT)
     buffer = BUFFER_FIXED_GBP + (BUFFER_PCT_OF_BUY * buy_gbp)
     profit = market_after_fee - buy_gbp - buffer
@@ -171,16 +165,12 @@ def _cfg_bool(cfg: RunConfig, name: str, default: bool) -> bool:
 
 
 def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
-    """
-    Build a watchlist from Fanatical sources using Playwright.
-    Writes: title, buy_url, buy_price_gbp, buy_notes, eneba_url, eneba_notes
-    """
     out_csv = Path(out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     target = _cfg_int(cfg, "watchlist_target", 10)
     pages = _cfg_int(cfg, "pages_per_source", 2)
-    max_links = _cfg_int(cfg, "max_links_per_source", 200)  # optional config knob
+    max_links = _cfg_int(cfg, "max_links_per_source", 200)
 
     if target <= 0:
         log.warning("watchlist_target <= 0, nothing to build.")
@@ -230,7 +220,6 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
 
     df = pd.DataFrame(rows, columns=WATCHLIST_COLS)
     df.to_csv(out_csv, index=False)
-
     log.info("Wrote %d rows to %s", len(df), str(out_csv))
     return int(len(df))
 
@@ -248,17 +237,7 @@ def scan_watchlist(
     db_path: Path,
     fail_ttl: int,
 ) -> pd.DataFrame:
-    """
-    Scans ALL items in the watchlist (unless cfg.scan_limit > 0).
-
-    Key improvements:
-    - eneba_url/eneba_notes are persisted to watchlist.csv when first resolved.
-      Next scans skip store resolution and go straight to product pricing.
-    - robust NaN handling so we never try to fetch "nan" as a URL.
-    """
-    cache = _open_cache(db_path)  # kept
-    _ = cache
-
+    _ = _open_cache(db_path)  # kept
     watchlist_path = Path(watchlist_path)
     scans_path = Path(scans_path)
     passes_path = Path(passes_path)
@@ -268,14 +247,20 @@ def scan_watchlist(
         log.warning("Watchlist empty: %s", str(watchlist_path))
         return pd.DataFrame(columns=SCANS_COLS)
 
-    # Ensure expected columns exist (older watchlists won't crash scan)
     for c in WATCHLIST_COLS:
         if c not in watch.columns:
             watch[c] = "" if c in ("eneba_url", "eneba_notes") else None
 
-    scan_limit = _cfg_int(cfg, "scan_limit", 0)  # 0 = unlimited
-    refresh_buy_price = _cfg_bool(cfg, "refresh_buy_price", False)  # optional knob
-    per_item_sleep_s = _cfg_float(cfg, "scan_sleep_s", 0.0)  # optional knob
+    scan_limit = _cfg_int(cfg, "scan_limit", 0)
+    refresh_buy_price = _cfg_bool(cfg, "refresh_buy_price", False)
+    per_item_sleep_s = _cfg_float(cfg, "scan_sleep_s", 0.0)
+
+    # currency conversion settings (from cfg)
+    allow_eur = _cfg_bool(cfg, "allow_eur", False)
+    eur_to_gbp = _cfg_float(cfg, "eur_to_gbp", 0.86)
+
+    # Optional burst control (default True): skip product fetch on newly resolved URL this run
+    skip_price_on_new_resolve = _cfg_bool(cfg, "skip_price_on_new_resolve", True)
 
     batch_id = uuid.uuid4().hex[:12]
     start = time.time()
@@ -285,13 +270,13 @@ def scan_watchlist(
     watchlist_dirty = False
 
     log.info(
-        "Scanning watchlist: size=%d scan_limit=%d refresh_buy_price=%s",
+        "Scanning watchlist: size=%d scan_limit=%d refresh_buy_price=%s allow_eur=%s",
         int(len(watch)),
         int(scan_limit),
         bool(refresh_buy_price),
+        bool(allow_eur),
     )
 
-    # Start Playwright once, but allow fallback if it dies.
     fan: Optional[FanaticalPWClient] = None
 
     def _fan_start() -> Optional[FanaticalPWClient]:
@@ -326,7 +311,6 @@ def scan_watchlist(
             buy_price = _to_float(r.get("buy_price_gbp", None))
             buy_notes = _to_str(r.get("buy_notes", ""))
 
-            # Optional refresh buy price via Playwright (non-fatal)
             if refresh_buy_price and fan is not None and buy_url:
                 try:
                     _t, p, n = fan.read_title_and_price_gbp(buy_url)
@@ -348,7 +332,8 @@ def scan_watchlist(
             sell_price: Optional[float] = None
             sell_notes = ""
 
-            # Only resolve if we don't already have a product URL
+            newly_resolved = False
+
             if not prod_url:
                 try:
                     prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
@@ -360,10 +345,17 @@ def scan_watchlist(
                     watch.at[idx, "eneba_url"] = prod_url
                     watch.at[idx, "eneba_notes"] = resolve_notes
                     watchlist_dirty = True
+                    newly_resolved = True
 
-            # Price fetch (1 request/item after first resolve)
             if prod_url:
-                sell_price, sell_notes = read_price_gbp(prod_url)
+                if newly_resolved and skip_price_on_new_resolve:
+                    sell_price, sell_notes = None, "skipped (newly resolved; price next scan)"
+                else:
+                    sell_price, sell_notes = read_price_gbp(
+                        prod_url,
+                        allow_eur=allow_eur,
+                        eur_to_gbp=eur_to_gbp,
+                    )
 
             market_after_fee = None
             buffer = None
@@ -403,7 +395,6 @@ def scan_watchlist(
 
     batch = pd.DataFrame(rows, columns=SCANS_COLS)
 
-    # Persist updated watchlist (only if we filled eneba_url for any row)
     if watchlist_dirty:
         try:
             watch.reindex(columns=WATCHLIST_COLS).to_csv(watchlist_path, index=False)
