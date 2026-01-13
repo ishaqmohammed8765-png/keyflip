@@ -45,7 +45,7 @@ def compute_profit(buy_gbp: float, sell_gbp: float) -> tuple[float, float]:
 # Cache TTL
 # ============================================================
 
-PRICE_OK_TTL_S = 60 * 30   # 30 minutes
+PRICE_OK_TTL_S = 60 * 30    # 30 minutes
 PRICE_FAIL_TTL_S = 60 * 20  # 20 minutes
 
 # Back-compat aliases some files may import
@@ -54,10 +54,10 @@ PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 
 
 # ============================================================
-# Buy-side sources (Loaded / CDKeys)
+# Buy-side sources (Loaded)
 # ============================================================
 
-CDKEYS_SOURCES: Dict[str, str] = {
+LOADED_SOURCES: Dict[str, str] = {
     # Deals
     "deals": "https://www.loaded.com/deals",
     "deals_pc": "https://www.loaded.com/deals/pc",
@@ -74,8 +74,9 @@ CDKEYS_SOURCES: Dict[str, str] = {
     "explore_indie": "https://www.loaded.com/explore/indie-games",
 }
 
-# Compatibility alias: older modules may still import FANATICAL_SOURCES.
-FANATICAL_SOURCES = CDKEYS_SOURCES
+# Compatibility aliases (older modules may still import these)
+CDKEYS_SOURCES = LOADED_SOURCES
+FANATICAL_SOURCES = LOADED_SOURCES
 
 
 # ============================================================
@@ -103,6 +104,7 @@ class RunConfig:
     Canonical config fields used by the Streamlit app.
     This dataclass is deliberately flexible: it accepts older naming via from_kwargs().
     """
+
     # optional project root (not required by app)
     root: Optional[Path] = None
 
@@ -113,11 +115,11 @@ class RunConfig:
     # build controls
     verify_candidates: int = 200
     pages_per_source: int = 5
-    verify_limit: int = 0       # 0 => use safety cap
+    verify_limit: int = 0  # 0 => use safety cap
     safety_cap: int = 20
 
     # scan controls
-    scan_limit: int = 0         # 0 => scan all
+    scan_limit: int = 0  # 0 => scan all
     avoid_recent_days: int = 0
 
     # currency handling
@@ -157,11 +159,9 @@ class RunConfig:
         if "run_budget_s" in kwargs and "run_budget" not in kwargs:
             kwargs["run_budget"] = kwargs.pop("run_budget_s")
 
-        # Sometimes old code used scan_limit_s by mistake
         if "scan_limit_s" in kwargs and "scan_limit" not in kwargs:
             kwargs["scan_limit"] = kwargs.pop("scan_limit_s")
 
-        # compat: allow either name
         if "fail_ttl" in kwargs and "cache_fail_ttl" not in kwargs:
             kwargs["cache_fail_ttl"] = kwargs.pop("fail_ttl")
 
@@ -208,11 +208,6 @@ class RunConfig:
 
     # ---- helpers ----
     def effective_verify_limit(self) -> int:
-        """
-        Effective max number of verifies per build run.
-        - verify_limit == 0 => use safety cap
-        - else min(verify_limit, safety_cap)
-        """
         if self.verify_limit == 0:
             return self.safety_cap
         return min(self.verify_limit, self.safety_cap)
@@ -251,50 +246,3 @@ class RunConfig:
             raise ValueError("eur_to_gbp must be > 0 when allow_eur=True")
         if self.scan_sleep_s < 0:
             raise ValueError("scan_sleep_s must be >= 0")
-
-
-# ============================================================
-# Backwards-compatible constructor behavior
-# ============================================================
-#
-# Your app does: RunConfig(**kwargs)
-# but we want alias-support + validation.
-# So we keep __init__ from dataclass and provide this wrapper.
-#
-
-def _runconfig_ctor_shim(**kwargs: Any) -> RunConfig:
-    return RunConfig.from_kwargs(**kwargs)
-
-
-# If you want the exact same call style (RunConfig(**kwargs)) to work with aliases,
-# you can optionally export a name that matches what app imports.
-# But since your app imports RunConfig directly, the simplest is:
-#
-#   - Update app.py to call RunConfig.from_kwargs(**kwargs)
-#
-# If you cannot change app.py, uncomment the block below and change app.py import
-# to: from keyflip.config import RunConfig as RunConfig
-#
-# However: Python won't let us replace the class name with a function cleanly
-# without breaking type assumptions in other modules. So prefer using from_kwargs().
-
-
-# ============================================================
-# Legacy forwarders (do not remove if other modules import them)
-# ============================================================
-
-def build_watchlist(config: RunConfig, output_path) -> int:
-    from .core import build_watchlist as _build_watchlist
-    return _build_watchlist(config, output_path)
-
-
-def scan_watchlist(
-    config: RunConfig,
-    watchlist_path,
-    scans_path,
-    passes_path,
-    db_path,
-    fail_ttl,
-):
-    from .core import scan_watchlist as _scan_watchlist
-    return _scan_watchlist(config, watchlist_path, scans_path, passes_path, db_path, fail_ttl)
