@@ -5,16 +5,15 @@ import os
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "/tmp/pw-browsers")
 
 import subprocess
-import time
 from pathlib import Path
 from typing import Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
+from keyflip.cache import PriceCache
 from keyflip.config import RunConfig
 from keyflip.core import build_watchlist, scan_watchlist
-from keyflip.cache import PriceCache
 
 # ------------------------------------------------------------
 # Paths (relative to this app file)
@@ -33,7 +32,6 @@ DEFAULT_CACHE_FAIL_TTL = 1200  # seconds (20 minutes)
 def _open_cache(db_path: Path) -> PriceCache:
     """
     Support multiple PriceCache constructor signatures without changing cache.py.
-    Mirrors the compatibility approach used in core.py.
     """
     db_path = Path(db_path)
     for ctor in (
@@ -85,21 +83,18 @@ def latest_timestamp_from_scans(df: pd.DataFrame) -> Tuple[Optional[pd.Timestamp
         return None, df.tail(50)
     latest_ts = ts.max()
     latest_rows = df[ts == latest_ts]
-    # Keep it readable
     return latest_ts, latest_rows.head(200)
 
 
 def ensure_playwright_chromium_installed() -> None:
     """
-    Best-effort runtime install. On Streamlit Cloud, you should still prefer
-    installing browsers during build/deploy. This is a fallback.
+    Best-effort runtime install. Prefer installing browsers during deploy.
     """
     browsers_dir = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
     try:
         if browsers_dir.exists() and any(browsers_dir.iterdir()):
             return
     except Exception:
-        # if listing fails, still try install
         pass
 
     with st.spinner("Installing Playwright Chromium browser (first-time setup)..."):
@@ -137,9 +132,9 @@ def render_file_links() -> None:
 # Streamlit page
 # ------------------------------------------------------------
 st.set_page_config(page_title="Keyflip Scanner", layout="wide")
-st.title("Keyflip — CDKeys/Loaded → Eneba Scanner")
+st.title("Keyflip — Fanatical → Eneba Scanner")
 st.caption(
-    "Build a watchlist of CDKeys/Loaded items under your max buy price, then scan Eneba to find profitable resale deals."
+    "Build a watchlist from Fanatical, then scan Eneba to find profitable resale deals."
 )
 
 ensure_playwright_chromium_installed()
@@ -151,7 +146,7 @@ with st.sidebar:
     st.header("Settings")
 
     max_buy = st.number_input("Max buy price (£)", min_value=1.0, max_value=200.0, value=15.0, step=0.5)
-    watchlist_target = st.number_input("Watchlist size target", min_value=1, max_value=100, value=15, step=1)
+    watchlist_target = st.number_input("Watchlist size target", min_value=1, max_value=200, value=15, step=1)
 
     verify_candidates = st.number_input("Verify candidates", min_value=0, max_value=5000, value=300, step=25)
     pages_per_source = st.number_input("Pages per source", min_value=1, max_value=25, value=5, step=1)
@@ -159,7 +154,12 @@ with st.sidebar:
     verify_limit = st.number_input("Verify limit (0 = use safety cap)", min_value=0, max_value=500, value=0, step=1)
     safety_cap = st.number_input("Verify safety cap", min_value=1, max_value=500, value=20, step=1)
 
-    scan_limit = st.number_input("Scan limit (0 = no limit)", min_value=0, max_value=2000, value=10, step=1)
+    # ✅ IMPORTANT: default to 0 so it scans ALL by default
+    scan_limit = st.number_input("Scan limit (0 = scan ALL)", min_value=0, max_value=20000, value=0, step=25)
+
+    # Optional: use Playwright to refresh buy price during scan
+    refresh_buy_price = st.checkbox("Refresh buy price during scan (Playwright)", value=False)
+
     avoid_recent_days = st.number_input("Avoid recent days", min_value=0, max_value=30, value=0, step=1)
 
     allow_eur = st.checkbox("Allow EUR prices (convert to GBP)", value=False)
@@ -169,17 +169,17 @@ with st.sidebar:
     run_budget = st.number_input("Overall run time budget (sec, 0 = none)", min_value=0.0, max_value=3600.0, value=0.0, step=10.0)
 
     st.divider()
-    clear_cache = st.button("Clear price cache (DB)", width="stretch")
-    clear_recent = st.button("Clear recent flags (avoid_recent_days)", width="stretch")
-    delete_outputs = st.button("Delete CSV outputs", width="stretch")
+    clear_cache = st.button("Clear price cache (DB)", use_container_width=True)
+    clear_recent = st.button("Clear recent flags (avoid_recent_days)", use_container_width=True)
+    delete_outputs = st.button("Delete CSV outputs", use_container_width=True)
 
 # ------------------------------------------------------------
 # Actions row
 # ------------------------------------------------------------
 col1, col2, col3 = st.columns([1, 1, 1])
-build_clicked = col1.button("🔨 Build Watchlist", width="stretch")
-scan_clicked = col2.button("🔍 Scan Watchlist", width="stretch")
-play_clicked = col3.button("▶️ Play All (Build + Scan)", width="stretch")
+build_clicked = col1.button("🔨 Build Watchlist", use_container_width=True)
+scan_clicked = col2.button("🔍 Scan Watchlist", use_container_width=True)
+play_clicked = col3.button("▶️ Play All (Build + Scan)", use_container_width=True)
 
 # ------------------------------------------------------------
 # Maintenance actions
@@ -193,16 +193,12 @@ if clear_cache:
         st.error(f"Failed to clear cache: {type(e).__name__}: {e}")
 
 if clear_recent:
-    # "recent flags" live in the DB (cache.mark_recent / cache.is_recent), not in watchlist.csv
     try:
         cache = _open_cache(DB_PATH)
-
-        # Prefer a method if cache.py provides it
         if hasattr(cache, "clear_recent"):
             cache.clear_recent()  # type: ignore[attr-defined]
             st.success("Recent flags cleared.")
         else:
-            # Fallback: safest behavior is to clear the cache entirely.
             cache.clear_all()
             st.success("Recent flags cleared (by clearing cache).")
     except Exception as e:
@@ -223,27 +219,33 @@ if delete_outputs:
 # Build / Scan
 # ------------------------------------------------------------
 def make_config(*, include_scan_fields: bool) -> RunConfig:
+    """
+    Build RunConfig using the field names YOUR project currently uses.
+    (This matches your current app.py usage: max_buy, target, safety_cap, item_budget, run_budget, etc.)
+    """
     kwargs = dict(
-        max_buy=max_buy,
+        max_buy=float(max_buy),
         target=int(watchlist_target),
         verify_candidates=int(verify_candidates),
         pages_per_source=int(pages_per_source),
         verify_limit=int(verify_limit),
         safety_cap=int(safety_cap),
         avoid_recent_days=int(avoid_recent_days),
-        allow_eur=allow_eur,
+        allow_eur=bool(allow_eur),
         eur_to_gbp=float(eur_to_gbp),
         item_budget=float(item_budget),
         run_budget=float(run_budget),
     )
     if include_scan_fields:
         kwargs["scan_limit"] = int(scan_limit)
+        # optional knob used by the rewritten core.py scan_watchlist
+        kwargs["refresh_buy_price"] = bool(refresh_buy_price)
     return RunConfig(**kwargs)
 
 
 if build_clicked or play_clicked:
     cfg = make_config(include_scan_fields=False)
-    with st.spinner("Building watchlist from CDKeys/Loaded..."):
+    with st.spinner("Building watchlist from Fanatical..."):
         try:
             added = build_watchlist(cfg, WATCHLIST_CSV)
             if added:
@@ -255,10 +257,17 @@ if build_clicked or play_clicked:
 
 if scan_clicked or play_clicked:
     cfg = make_config(include_scan_fields=True)
+
+    # Show what you're about to do (prevents confusion)
+    wl = safe_read_csv(WATCHLIST_CSV)
+    wl_n = len(wl) if wl is not None else 0
+    planned = wl_n if int(scan_limit) == 0 else min(wl_n, int(scan_limit))
+    st.info(f"Scan plan: {planned} / {wl_n} watchlist items (scan_limit={int(scan_limit)})")
+
     with st.spinner("Scanning watchlist on Eneba..."):
         try:
-            scan_watchlist(cfg, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, DEFAULT_CACHE_FAIL_TTL)
-            st.success("Scan complete. Results saved.")
+            batch = scan_watchlist(cfg, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH, DEFAULT_CACHE_FAIL_TTL)
+            st.success(f"Scan complete. Wrote {len(batch)} row(s) to scans.csv.")
         except Exception as e:
             st.error(f"Scan failed: {type(e).__name__}: {e}")
 
@@ -276,13 +285,13 @@ tabs = st.tabs(["📋 Watchlist", "✅ Good Deals", "📈 Latest Scan", "⬇️ 
 
 with tabs[0]:
     if watch_df is not None:
-        st.dataframe(watch_df, width="stretch")
+        st.dataframe(watch_df, use_container_width=True)
     else:
         st.info("No watchlist available yet. Build one first.")
 
 with tabs[1]:
     if passes_df is not None and not passes_df.empty:
-        st.dataframe(passes_df, width="stretch")
+        st.dataframe(passes_df, use_container_width=True)
     else:
         st.info("No good deals found yet (passes.csv is empty).")
 
@@ -291,7 +300,7 @@ with tabs[2]:
         ts, recent = latest_timestamp_from_scans(scans_df)
         if ts is not None:
             st.caption(f"Most recent scan at: {ts}")
-        st.dataframe(recent, width="stretch")
+        st.dataframe(recent, use_container_width=True)
     else:
         st.info("No scan results found yet.")
 
@@ -301,7 +310,7 @@ with tabs[3]:
         "Download watchlist.csv",
         data=b if b is not None else b"",
         file_name="watchlist.csv",
-        width="stretch",
+        use_container_width=True,
         disabled=b is None,
     )
 
@@ -310,7 +319,7 @@ with tabs[3]:
         "Download scans.csv",
         data=b if b is not None else b"",
         file_name="scans.csv",
-        width="stretch",
+        use_container_width=True,
         disabled=b is None,
     )
 
@@ -319,7 +328,7 @@ with tabs[3]:
         "Download passes.csv",
         data=b if b is not None else b"",
         file_name="passes.csv",
-        width="stretch",
+        use_container_width=True,
         disabled=b is None,
     )
 
