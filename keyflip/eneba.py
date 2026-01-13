@@ -1,3 +1,6 @@
+# ==========================
+# keyflip/eneba.py (rewrite)
+# ==========================
 from __future__ import annotations
 
 import json
@@ -17,7 +20,6 @@ log = logging.getLogger("keyflip.eneba")
 
 _BASE = "https://www.eneba.com"
 
-# Reject obvious non-key / wrong product types (token-based)
 _BAD_SLUG_TOKENS = {
     "gift-card",
     "wallet",
@@ -31,16 +33,11 @@ _BAD_SLUG_TOKENS = {
     "soundtrack",
     "artbook",
     "expansion",
-    # intentionally NOT including plain "card" (false negatives)
 }
 
-# Eneba URL shapes vary. Accept:
-#   /gb/<slug>
-#   /gb/<category>/<slug>
-# (one optional extra segment)
+# Accept /gb/<slug> AND /gb/<category>/<slug>
 _PRODUCT_PATH_RE = re.compile(r"^/gb/(?:[a-z0-9-]+/)?[a-z0-9-]{8,}$", re.I)
 
-# Regex scan for candidates in raw HTML (same shape as above)
 _PRODUCT_URL_RE = re.compile(
     r"https?://(?:www\.)?eneba\.com/gb/(?:[a-z0-9-]+/)?[a-z0-9\-]{8,}",
     re.I,
@@ -53,11 +50,6 @@ _GBP_RE = re.compile(r"£\s*(\d+(?:\.\d{1,2})?)")
 # Session
 # -----------------------------------------------------------------------------
 def _timeout_value() -> Any:
-    """
-    Support:
-      - HTTP_TIMEOUT_S = 20
-      - HTTP_TIMEOUT_S = (connect, read)
-    """
     t = HTTP_TIMEOUT_S
     if isinstance(t, tuple) and len(t) == 2:
         return t
@@ -76,7 +68,7 @@ def _make_session() -> requests.Session:
         }
     )
 
-    # Retry/backoff if available (helps, but we also do our own throttling)
+    # Keep urllib3 retry (nice to have), but throttling is the real protection.
     try:
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
@@ -105,9 +97,6 @@ _SESS = _make_session()
 
 
 def _soup(html: str) -> BeautifulSoup:
-    """
-    Prefer lxml if installed; fall back to stdlib html.parser if not.
-    """
     try:
         return BeautifulSoup(html, "lxml")
     except FeatureNotFound:
@@ -115,7 +104,7 @@ def _soup(html: str) -> BeautifulSoup:
 
 
 # -----------------------------------------------------------------------------
-# Public helpers
+# Public
 # -----------------------------------------------------------------------------
 def make_store_search_url(title: str) -> str:
     q = quote_plus(f"{title or ''} steam key pc")
@@ -123,7 +112,7 @@ def make_store_search_url(title: str) -> str:
 
 
 # -----------------------------------------------------------------------------
-# Internal helpers
+# Helpers
 # -----------------------------------------------------------------------------
 def _parse_float(x: Any) -> Optional[float]:
     if x is None:
@@ -144,15 +133,11 @@ def _parse_float(x: Any) -> Optional[float]:
 
 
 def _is_eneba_host(netloc: str) -> bool:
-    host = (netloc or "").lower().split(":")[0]  # strip port
+    host = (netloc or "").lower().split(":")[0]
     return host == "eneba.com" or host.endswith(".eneba.com")
 
 
 def _canonicalize(href: str) -> Optional[str]:
-    """
-    Convert an href into a canonical /gb/... product URL on www.eneba.com.
-    Rejects non-eneba domains and paths that don't look like product pages.
-    """
     href = (href or "").strip()
     if not href:
         return None
@@ -174,21 +159,16 @@ def _canonicalize(href: str) -> Optional[str]:
     if not _PRODUCT_PATH_RE.match(path_norm):
         return None
 
-    # Normalize to https://www.eneba.com/gb/...
     return urlunparse(("https", "www.eneba.com", path_norm, "", "", ""))
 
 
 def _slug_tokens(canon_url: str) -> List[str]:
     p = urlparse(canon_url)
-    # last segment is the slug (even if /gb/<cat>/<slug>)
     slug = (p.path or "").lower().rsplit("/", 1)[-1]
     return [t for t in slug.split("-") if t]
 
 
 def _score_candidate(canon_url: str, title: str) -> int:
-    """
-    Heuristic score: prefer Steam PC Key product pages and penalize gift cards/DLC/bundles.
-    """
     p = urlparse(canon_url)
     path = (p.path or "").lower()
 
@@ -228,7 +208,7 @@ def _score_candidate(canon_url: str, title: str) -> int:
 
 
 # -----------------------------------------------------------------------------
-# Throttling + 429 backoff + block-page detection
+# Throttling + 429 backoff + invalid URL guard
 # -----------------------------------------------------------------------------
 _THROTTLE_NEXT_OK: float = 0.0
 _BACKOFF_S: float = 2.0
@@ -236,7 +216,6 @@ _BACKOFF_S: float = 2.0
 
 def _looks_like_block_page(html: str) -> bool:
     t = (html or "").lower()
-    # conservative signals (not exhaustive)
     signals = (
         "captcha",
         "access denied",
@@ -251,28 +230,23 @@ def _looks_like_block_page(html: str) -> bool:
 
 
 def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
-    """
-    Host-friendly GET:
-      - steady pacing to prevent bursts
-      - explicit 429 handling (Retry-After + exponential backoff)
-      - detect challenge/block HTML and label accordingly
-    """
     global _THROTTLE_NEXT_OK, _BACKOFF_S
 
-    # Steady pacing (prevents burst 429s)
+    u = (url or "").strip()
+    if not u or u.lower() == "nan" or not (u.startswith("http://") or u.startswith("https://")):
+        return None, "failed (invalid url)"
+
+    # Steady pacing to avoid burst 429s
     now = time.time()
     if now < _THROTTLE_NEXT_OK:
         time.sleep(_THROTTLE_NEXT_OK - now)
-
-    # Next slot with jitter (tuneable)
     _THROTTLE_NEXT_OK = time.time() + (2.2 + random.random() * 1.6)  # ~2.2–3.8s
 
     try:
-        r = _SESS.get(url, timeout=_timeout_value())
+        r = _SESS.get(u, timeout=_timeout_value())
     except requests.RequestException as e:
         return None, f"failed (http error: {type(e).__name__})"
 
-    # Explicit rate-limit handling
     if r.status_code == 429:
         ra = r.headers.get("Retry-After")
         if ra:
@@ -283,18 +257,14 @@ def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
         else:
             sleep_s = _BACKOFF_S
 
-        # jitter
         sleep_s = sleep_s + random.random() * 1.0
         time.sleep(sleep_s)
-
         _BACKOFF_S = min(_BACKOFF_S * 1.8, 30.0)
         return r, "failed (blocked HTTP 429)"
 
-    # Reset backoff after success-ish responses
     if r.status_code < 400:
         _BACKOFF_S = 2.0
 
-    # Challenge/block HTML (often causes "no link found" downstream)
     ct = (r.headers.get("Content-Type") or "").lower()
     if "text/html" in ct and _looks_like_block_page(r.text or ""):
         return r, "failed (blocked challenge page)"
@@ -306,9 +276,6 @@ def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
 # Store resolver
 # -----------------------------------------------------------------------------
 def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional[str], str]:
-    """
-    Given a store search URL, try to find the best matching /gb/... product URL.
-    """
     r, err = _http_get(store_url)
     if err:
         return None, err
@@ -325,7 +292,6 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
     best_url: Optional[str] = None
     best_score = -10**9
 
-    # Primary: anchor tags
     for a in soup.select("a[href]"):
         canon = _canonicalize(a.get("href") or "")
         if not canon:
@@ -334,7 +300,6 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
         if sc > best_score:
             best_score, best_url = sc, canon
 
-    # Fallback: regex scan HTML
     if not best_url or best_score < 6:
         for full in _PRODUCT_URL_RE.findall(html):
             canon = _canonicalize(full)
@@ -344,7 +309,6 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
             if sc > best_score:
                 best_score, best_url = sc, canon
 
-    # NOTE: if you still see false negatives, drop threshold from 6 -> 3
     if best_url and best_score >= 6:
         return best_url, f"ok (store->product scored={best_score})"
 
@@ -471,10 +435,6 @@ def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
 
 
 def read_price_gbp(url: str) -> Tuple[Optional[float], str]:
-    """
-    Fetch a product page and attempt to extract a GBP price using multiple strategies.
-    Returns (price_gbp, status_string).
-    """
     r, err = _http_get(url)
     if err:
         return None, err
