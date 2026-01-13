@@ -30,6 +30,7 @@ MIN_ROI = 0.20
 
 
 def compute_profit(buy_gbp: float, sell_gbp: float) -> tuple[float, float]:
+    """Returns (profit_gbp, roi)."""
     net_sell = sell_gbp * (1.0 - SELL_FEE_PCT)
     buffer = BUFFER_FIXED_GBP + (buy_gbp * BUFFER_PCT_OF_BUY)
     profit = net_sell - buy_gbp - buffer
@@ -49,23 +50,45 @@ PRICE_OK_TTL = PRICE_OK_TTL_S
 PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 
 # ============================================================
-# Buy-side sources (variable name kept for compatibility)
-# Now pointing at CDKeys / Loaded (digital keys)
+# Buy-side sources (CDKeys / Loaded)
+# ============================================================
+#
+# IMPORTANT:
+# - cdkeys.com redirects heavily to loaded.com in many environments.
+# - Use loaded.com listing pages for stability.
+# - Keep values as listing/category pages that contain product links.
 # ============================================================
 
-# CDKeys redirects heavily to loaded.com. Use loaded.com directly for stability.
-# These are "listing" pages that contain product links.
-FANATICAL_SOURCES = {
+CDKEYS_SOURCES = {
     "pc_steam": "https://www.loaded.com/pc/steam",
     "pc_games": "https://www.loaded.com/pc/games",
     "pc_deals": "https://www.loaded.com/deals/pc",
-    # Optional: keep a broader PC landing as a final net
     "pc": "https://www.loaded.com/pc",
 }
+
+# Compatibility alias: older modules may still import FANATICAL_SOURCES.
+# We keep the alias but the project should use CDKEYS_SOURCES going forward.
+FANATICAL_SOURCES = CDKEYS_SOURCES
+
 
 # ============================================================
 # RunConfig (backwards + forwards compatible)
 # ============================================================
+
+def _parse_bool(v: Any, default: bool = False) -> bool:
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    s = str(v).strip().lower()
+    if s in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return default
+
 
 class RunConfig:
     """
@@ -90,6 +113,7 @@ class RunConfig:
         if "run_budget_s" in kwargs and "run_budget" not in kwargs:
             kwargs["run_budget"] = kwargs.pop("run_budget_s")
 
+        # NOTE: some old code incorrectly used scan_limit_s; accept it anyway.
         if "scan_limit_s" in kwargs and "scan_limit" not in kwargs:
             kwargs["scan_limit"] = kwargs.pop("scan_limit_s")
 
@@ -103,14 +127,23 @@ class RunConfig:
         # ---- canonical fields (with safe defaults) ----
         self.max_buy: float = float(kwargs.pop("max_buy", 10.0))
         self.target: int = int(kwargs.pop("target", 15))
+
+        # 0 means "no limit" / use all harvested
         self.verify_candidates: int = int(kwargs.pop("verify_candidates", 200))
         self.pages_per_source: int = int(kwargs.pop("pages_per_source", 5))
+
+        # verify_limit: 0 means "use safety cap" (caps work per run)
         self.verify_limit: int = int(kwargs.pop("verify_limit", 0))
         self.safety_cap: int = int(kwargs.pop("safety_cap", 20))
+
         self.avoid_recent_days: int = int(kwargs.pop("avoid_recent_days", 0))
-        self.allow_eur: bool = bool(kwargs.pop("allow_eur", False))
+        self.allow_eur: bool = _parse_bool(kwargs.pop("allow_eur", False), default=False)
         self.eur_to_gbp: float = float(kwargs.pop("eur_to_gbp", 0.86))
+
+        # scan_limit: 0 means unlimited
         self.scan_limit: int = int(kwargs.pop("scan_limit", 0))
+
+        # budgets: seconds (0 means unlimited)
         self.item_budget: float = float(kwargs.pop("item_budget", 45.0))
         self.run_budget: float = float(kwargs.pop("run_budget", 0.0))
 
@@ -142,7 +175,11 @@ class RunConfig:
 
     # ---- helpers ----
     def effective_verify_limit(self) -> int:
-        # 0 means "use safety cap"
+        """
+        Effective max number of verifies per build run.
+        - verify_limit == 0 => use safety cap
+        - else min(verify_limit, safety_cap)
+        """
         if self.verify_limit == 0:
             return self.safety_cap
         return min(self.verify_limit, self.safety_cap)
@@ -156,31 +193,38 @@ class RunConfig:
             raise ValueError("max_buy must be > 0")
         if self.target <= 0:
             raise ValueError("target must be > 0")
-        if self.verify_candidates <= 0:
-            raise ValueError("verify_candidates must be > 0")
+
+        # allow 0 for "unlimited"
+        if self.verify_candidates < 0:
+            raise ValueError("verify_candidates must be >= 0")
         if self.pages_per_source <= 0:
             raise ValueError("pages_per_source must be > 0")
+
         if self.verify_limit < 0:
             raise ValueError("verify_limit must be >= 0")
         if self.safety_cap <= 0:
             raise ValueError("safety_cap must be > 0")
+
         if self.scan_limit < 0:
             raise ValueError("scan_limit must be >= 0")
+
         if self.item_budget <= 0:
             raise ValueError("item_budget must be > 0")
         if self.run_budget < 0:
             raise ValueError("run_budget must be >= 0")
+
         if self.allow_eur and self.eur_to_gbp <= 0:
             raise ValueError("eur_to_gbp must be > 0 when allow_eur=True")
 
 
 # ============================================================
-# Placeholders (do not remove – imports rely on them)
-# These MUST forward to core.py or the watchlist will always be empty.
+# Legacy forwarders (do not remove if other modules import them)
+# ============================================================
+# Some older code imports build_watchlist/scan_watchlist from config.
+# These forward to core.py to avoid circular-import issues at module load time.
 # ============================================================
 
 def build_watchlist(config: RunConfig, output_path) -> int:
-    # Local import avoids circular imports at module load time.
     from .core import build_watchlist as _build_watchlist
     return _build_watchlist(config, output_path)
 
