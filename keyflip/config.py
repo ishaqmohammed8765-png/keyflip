@@ -49,14 +49,18 @@ PRICE_OK_TTL = PRICE_OK_TTL_S
 PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 
 # ============================================================
-# Fanatical sources
+# Buy-side sources (variable name kept for compatibility)
+# Now pointing at CDKeys / Loaded (digital keys)
 # ============================================================
 
+# CDKeys redirects heavily to loaded.com. Use loaded.com directly for stability.
+# These are "listing" pages that contain product links.
 FANATICAL_SOURCES = {
-    "sale": "https://www.fanatical.com/en/on-sale",
-    "latest": "https://www.fanatical.com/en/new-releases",
-    "top": "https://www.fanatical.com/en/top-sellers",
-    "trending": "https://www.fanatical.com/en/trending",
+    "pc_steam": "https://www.loaded.com/pc/steam",
+    "pc_games": "https://www.loaded.com/pc/games",
+    "pc_deals": "https://www.loaded.com/deals/pc",
+    # Optional: keep a broader PC landing as a final net
+    "pc": "https://www.loaded.com/pc",
 }
 
 # ============================================================
@@ -93,10 +97,10 @@ class RunConfig:
         root = kwargs.pop("root", None)
         self.root: Optional[Path] = Path(root) if root else None
 
+        # compat: allow either name
         self.cache_fail_ttl = kwargs.pop("cache_fail_ttl", kwargs.pop("fail_ttl", None))
 
         # ---- canonical fields (with safe defaults) ----
-        # IMPORTANT: allow missing max_buy (default to 10.0) so UI/apps don’t crash.
         self.max_buy: float = float(kwargs.pop("max_buy", 10.0))
         self.target: int = int(kwargs.pop("target", 15))
         self.verify_candidates: int = int(kwargs.pop("verify_candidates", 200))
