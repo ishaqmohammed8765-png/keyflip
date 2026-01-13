@@ -54,20 +54,27 @@ PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 # ============================================================
 #
 # IMPORTANT:
-# - cdkeys.com redirects heavily to loaded.com in many environments.
-# - Use loaded.com listing pages for stability.
-# - Keep values as listing/category pages that contain product links.
+# Many /pc/... listing pages on loaded.com are JS-heavy and can yield "0 links"
+# when harvesting <a href> elements.
+#
+# The /explore/... pages are generally much more stable for harvesting because
+# they tend to expose product links in the DOM + support ?p= pagination.
 # ============================================================
 
 CDKEYS_SOURCES = {
-    "pc_steam": "https://www.loaded.com/pc/steam",
-    "pc_games": "https://www.loaded.com/pc/games",
-    "pc_deals": "https://www.loaded.com/deals/pc",
-    "pc": "https://www.loaded.com/pc",
+    "explore_deals": "https://www.loaded.com/deals",
+    "explore_pc_deals": "https://www.loaded.com/deals/pc",
+
+    # Game categories
+    "explore_action": "https://www.loaded.com/explore/action-games",
+    "explore_adventure": "https://www.loaded.com/explore/adventure-games",
+    "explore_arcade": "https://www.loaded.com/explore/arcade-games",
+    "explore_open_world": "https://www.loaded.com/explore/open-world-games",
+    "explore_rpg": "https://www.loaded.com/explore/rpg-games",
+    "explore_strategy": "https://www.loaded.com/explore/strategy-games",
 }
 
-# Compatibility alias: older modules may still import FANATICAL_SOURCES.
-# We keep the alias but the project should use CDKEYS_SOURCES going forward.
+# Backwards compatibility: older modules may still import FANATICAL_SOURCES.
 FANATICAL_SOURCES = CDKEYS_SOURCES
 
 
@@ -128,15 +135,16 @@ class RunConfig:
         self.max_buy: float = float(kwargs.pop("max_buy", 10.0))
         self.target: int = int(kwargs.pop("target", 15))
 
-        # 0 means "no limit" / use all harvested
+        # 0 means "no limit"
         self.verify_candidates: int = int(kwargs.pop("verify_candidates", 200))
         self.pages_per_source: int = int(kwargs.pop("pages_per_source", 5))
 
-        # verify_limit: 0 means "use safety cap" (caps work per run)
+        # verify_limit: 0 means "use safety cap"
         self.verify_limit: int = int(kwargs.pop("verify_limit", 0))
         self.safety_cap: int = int(kwargs.pop("safety_cap", 20))
 
         self.avoid_recent_days: int = int(kwargs.pop("avoid_recent_days", 0))
+
         self.allow_eur: bool = _parse_bool(kwargs.pop("allow_eur", False), default=False)
         self.eur_to_gbp: float = float(kwargs.pop("eur_to_gbp", 0.86))
 
@@ -219,9 +227,6 @@ class RunConfig:
 
 # ============================================================
 # Legacy forwarders (do not remove if other modules import them)
-# ============================================================
-# Some older code imports build_watchlist/scan_watchlist from config.
-# These forward to core.py to avoid circular-import issues at module load time.
 # ============================================================
 
 def build_watchlist(config: RunConfig, output_path) -> int:
