@@ -7,8 +7,7 @@ from typing import Any, Iterable, Optional, Tuple, List
 from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 
 import requests
-from bs4 import BeautifulSoup
-from bs4.builder import FeatureNotFound
+from bs4 import BeautifulSoup, FeatureNotFound
 
 from .config import HTTP_TIMEOUT_S, UA
 
@@ -17,23 +16,21 @@ log = logging.getLogger("keyflip.eneba")
 _BASE = "https://www.eneba.com"
 
 # Reject obvious non-key / wrong product types (token-based)
-_BAD_SLUG_TOKENS = set(
-    [
-        "gift-card",
-        "wallet",
-        "prepaid",
-        "dlc",
-        "season-pass",
-        "seasonpass",
-        "add-on",
-        "addon",
-        "bundle",
-        "soundtrack",
-        "artbook",
-        "expansion",
-        # intentionally NOT including plain "card" (false negatives)
-    ]
-)
+_BAD_SLUG_TOKENS = {
+    "gift-card",
+    "wallet",
+    "prepaid",
+    "dlc",
+    "season-pass",
+    "seasonpass",
+    "add-on",
+    "addon",
+    "bundle",
+    "soundtrack",
+    "artbook",
+    "expansion",
+    # intentionally NOT including plain "card" (false negatives)
+}
 
 _PRODUCT_SLUG_RE = re.compile(r"^/gb/[a-z0-9-]{8,}$", re.I)
 _PRODUCT_URL_RE = re.compile(r"https?://(?:www\.)?eneba\.com/gb/[a-z0-9\-]{8,}", re.I)
@@ -87,6 +84,7 @@ def _make_session() -> requests.Session:
         s.mount("https://", adapter)
         s.mount("http://", adapter)
     except Exception:
+        # If urllib3 Retry API changes / not available, just run without retry.
         pass
 
     return s
@@ -96,6 +94,9 @@ _SESS = _make_session()
 
 
 def _soup(html: str) -> BeautifulSoup:
+    """
+    Prefer lxml if installed; fall back to stdlib html.parser if not.
+    """
     try:
         return BeautifulSoup(html, "lxml")
     except FeatureNotFound:
@@ -106,8 +107,8 @@ def _soup(html: str) -> BeautifulSoup:
 # Public helpers
 # -----------------------------------------------------------------------------
 def make_store_search_url(title: str) -> str:
-    q = quote_plus("%s steam key pc" % (title or ""))
-    return "%s/gb/store?text=%s" % (_BASE, q)
+    q = quote_plus(f"{title or ''} steam key pc")
+    return f"{_BASE}/gb/store?text={q}"
 
 
 # -----------------------------------------------------------------------------
@@ -132,12 +133,15 @@ def _parse_float(x: Any) -> Optional[float]:
 
 
 def _is_eneba_host(netloc: str) -> bool:
-    host = (netloc or "").lower()
-    host = host.split(":")[0]  # strip port
+    host = (netloc or "").lower().split(":")[0]  # strip port
     return host == "eneba.com" or host.endswith(".eneba.com")
 
 
 def _canonicalize(href: str) -> Optional[str]:
+    """
+    Convert an href into a canonical /gb/<slug> product URL on www.eneba.com.
+    Rejects non-eneba domains, non-/gb/ paths, and paths that don't look like product slugs.
+    """
     href = (href or "").strip()
     if not href:
         return None
@@ -169,6 +173,9 @@ def _slug_tokens(canon_url: str) -> List[str]:
 
 
 def _score_candidate(canon_url: str, title: str) -> int:
+    """
+    Heuristic score: prefer Steam PC Key product pages and penalize gift cards/DLC/bundles.
+    """
     p = urlparse(canon_url)
     path = (p.path or "").lower()
 
@@ -212,29 +219,33 @@ def _http_get(url: str) -> Tuple[Optional[requests.Response], Optional[str]]:
         r = _SESS.get(url, timeout=_timeout_value())
         return r, None
     except requests.RequestException as e:
-        return None, "failed (http error: %s)" % type(e).__name__
+        return None, f"failed (http error: {type(e).__name__})"
 
 
 # -----------------------------------------------------------------------------
 # Store resolver
 # -----------------------------------------------------------------------------
 def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional[str], str]:
+    """
+    Given a store search URL, try to find the best matching /gb/<slug> product URL.
+    """
     r, err = _http_get(store_url)
     if err:
         return None, err
     assert r is not None
 
     if r.status_code in (403, 429):
-        return None, "failed (blocked HTTP %d)" % r.status_code
+        return None, f"failed (blocked HTTP {r.status_code})"
     if r.status_code >= 400:
-        return None, "failed (http %d)" % r.status_code
+        return None, f"failed (http {r.status_code})"
 
     html = r.text or ""
     soup = _soup(html)
 
-    best_url = None  # type: Optional[str]
-    best_score = -10 ** 9
+    best_url: Optional[str] = None
+    best_score = -10**9
 
+    # Primary: anchor tags
     for a in soup.select("a[href]"):
         canon = _canonicalize(a.get("href") or "")
         if not canon:
@@ -243,6 +254,7 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
         if sc > best_score:
             best_score, best_url = sc, canon
 
+    # Fallback: regex scan HTML
     if not best_url or best_score < 6:
         for full in _PRODUCT_URL_RE.findall(html):
             canon = _canonicalize(full)
@@ -253,7 +265,7 @@ def resolve_product_url_from_store(store_url: str, title: str) -> Tuple[Optional
                 best_score, best_url = sc, canon
 
     if best_url and best_score >= 6:
-        return best_url, "ok (store->product scored=%d)" % best_score
+        return best_url, f"ok (store->product scored={best_score})"
 
     return None, "failed (no suitable product link found)"
 
@@ -267,11 +279,9 @@ def _walk(obj: Any) -> Iterable[Any]:
         cur = stack.pop()
         yield cur
         if isinstance(cur, dict):
-            for v in cur.values():
-                stack.append(v)
+            stack.extend(cur.values())
         elif isinstance(cur, list):
-            for v in cur:
-                stack.append(v)
+            stack.extend(cur)
 
 
 def _extract_price_from_ldjson(soup: BeautifulSoup) -> Optional[float]:
@@ -316,7 +326,11 @@ def _extract_price_from_meta(soup: BeautifulSoup) -> Optional[float]:
 
 
 def _extract_price_from_next_data(html_text: str) -> Optional[float]:
-    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text or "", re.S | re.I)
+    m = re.search(
+        r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        html_text or "",
+        re.S | re.I,
+    )
     if not m:
         return None
 
@@ -359,13 +373,9 @@ def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
     lower = html_text.lower()
 
     needles = ("buy now", "add to cart", "add to basket", "checkout", "purchase", "buy")
-    idxs = []
-    for n in needles:
-        i = lower.find(n)
-        if i != -1:
-            idxs.append(i)
+    idxs = [lower.find(n) for n in needles if lower.find(n) != -1]
 
-    windows = []
+    windows: List[str] = []
     if idxs:
         i = min(idxs)
         windows.append(html_text[max(0, i - 3500) : min(len(html_text), i + 3500)])
@@ -380,15 +390,19 @@ def _extract_price_from_visible_gbp(html_text: str) -> Optional[float]:
 
 
 def read_price_gbp(url: str) -> Tuple[Optional[float], str]:
+    """
+    Fetch a product page and attempt to extract a GBP price using multiple strategies.
+    Returns (price_gbp, status_string).
+    """
     r, err = _http_get(url)
     if err:
         return None, err
     assert r is not None
 
     if r.status_code in (403, 429):
-        return None, "failed (blocked HTTP %d)" % r.status_code
+        return None, f"failed (blocked HTTP {r.status_code})"
     if r.status_code >= 400:
-        return None, "failed (http %d)" % r.status_code
+        return None, f"failed (http {r.status_code})"
 
     html = r.text or ""
     soup = _soup(html)
