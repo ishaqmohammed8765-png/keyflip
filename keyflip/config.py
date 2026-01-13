@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -45,6 +44,7 @@ def compute_profit(buy_gbp: float, sell_gbp: float) -> tuple[float, float]:
 PRICE_OK_TTL_S = 60 * 30
 PRICE_FAIL_TTL_S = 60 * 20
 
+# Back-compat aliases some files may import
 PRICE_OK_TTL = PRICE_OK_TTL_S
 PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 
@@ -71,34 +71,33 @@ class RunConfig:
 
     def __init__(self, **kwargs: Any) -> None:
         # ---- aliases from different versions ----
-        if "max_buy_gbp" in kwargs:
+        if "max_buy_gbp" in kwargs and "max_buy" not in kwargs:
             kwargs["max_buy"] = kwargs.pop("max_buy_gbp")
 
-        if "watchlist_target" in kwargs:
+        if "watchlist_target" in kwargs and "target" not in kwargs:
             kwargs["target"] = kwargs.pop("watchlist_target")
 
-        if "verify_safety_cap" in kwargs:
+        if "verify_safety_cap" in kwargs and "safety_cap" not in kwargs:
             kwargs["safety_cap"] = kwargs.pop("verify_safety_cap")
 
-        if "item_budget_s" in kwargs:
+        if "item_budget_s" in kwargs and "item_budget" not in kwargs:
             kwargs["item_budget"] = kwargs.pop("item_budget_s")
 
-        if "run_budget_s" in kwargs:
+        if "run_budget_s" in kwargs and "run_budget" not in kwargs:
             kwargs["run_budget"] = kwargs.pop("run_budget_s")
 
-        if "scan_limit_s" in kwargs:
+        if "scan_limit_s" in kwargs and "scan_limit" not in kwargs:
             kwargs["scan_limit"] = kwargs.pop("scan_limit_s")
 
         # optional extras some files pass
         root = kwargs.pop("root", None)
         self.root: Optional[Path] = Path(root) if root else None
-        self.cache_fail_ttl = kwargs.pop(
-            "cache_fail_ttl",
-            kwargs.pop("fail_ttl", None)
-        )
 
-        # ---- canonical fields ----
-        self.max_buy: float = float(kwargs.pop("max_buy"))
+        self.cache_fail_ttl = kwargs.pop("cache_fail_ttl", kwargs.pop("fail_ttl", None))
+
+        # ---- canonical fields (with safe defaults) ----
+        # IMPORTANT: allow missing max_buy (default to 10.0) so UI/apps don’t crash.
+        self.max_buy: float = float(kwargs.pop("max_buy", 10.0))
         self.target: int = int(kwargs.pop("target", 15))
         self.verify_candidates: int = int(kwargs.pop("verify_candidates", 200))
         self.pages_per_source: int = int(kwargs.pop("pages_per_source", 5))
@@ -139,6 +138,7 @@ class RunConfig:
 
     # ---- helpers ----
     def effective_verify_limit(self) -> int:
+        # 0 means "use safety cap"
         if self.verify_limit == 0:
             return self.safety_cap
         return min(self.verify_limit, self.safety_cap)
@@ -172,11 +172,13 @@ class RunConfig:
 
 # ============================================================
 # Placeholders (do not remove – imports rely on them)
+# These MUST forward to core.py or the watchlist will always be empty.
 # ============================================================
 
 def build_watchlist(config: RunConfig, output_path) -> int:
-    print("Building watchlist with:", config.__dict__)
-    return 0
+    # Local import avoids circular imports at module load time.
+    from .core import build_watchlist as _build_watchlist
+    return _build_watchlist(config, output_path)
 
 
 def scan_watchlist(
@@ -187,4 +189,5 @@ def scan_watchlist(
     db_path,
     fail_ttl,
 ):
-    print("Scanning watchlist with:", config.__dict__)
+    from .core import scan_watchlist as _scan_watchlist
+    return _scan_watchlist(config, watchlist_path, scans_path, passes_path, db_path, fail_ttl)
