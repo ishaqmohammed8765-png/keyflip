@@ -25,7 +25,6 @@ _BASE = "https://www.fanatical.com"
 _ALLOWED_HOSTS = {"www.fanatical.com", "fanatical.com"}
 
 # Accept /game/... as well as /en/... and /en-gb/... etc (ONLY game pages).
-# (Old regex rejected /game/... which can appear depending on locale/redirect.)
 _GAME_PATH_RE = re.compile(r"^/(?:en(?:-[a-z]{2})/)?game/", re.I)
 
 # Strip site suffixes
@@ -73,7 +72,6 @@ def _canonicalize_game_url(href_or_url: str) -> Optional[str]:
     if not path:
         return None
 
-    # Ensure the URL is a game page
     if not _GAME_PATH_RE.match(path + "/"):
         return None
 
@@ -100,6 +98,7 @@ def _parse_float(s: object) -> Optional[float]:
 def _first_gbp_price_in_text(text: str) -> Optional[float]:
     """
     Conservative: returns the smallest plausible £ price in the *given text*.
+    Use only when the text is already scoped to a buybox-ish region.
     """
     if not text:
         return None
@@ -115,11 +114,21 @@ def _first_gbp_price_in_text(text: str) -> Optional[float]:
 
 def _looks_like_noise_price_context(s: str) -> bool:
     """
-    Simple heuristics to avoid 'Save £x', 'Was £x', etc when scanning a block.
-    We apply this to *small blocks/lines*, not the entire body.
+    Simple heuristics to avoid 'Save £x', 'Was £x', etc when scanning a block/line.
     """
     s = (s or "").lower()
-    noise_tokens = ("save", "was", "rrp", "off", "discount", "you save", "coupon", "lowest", "historical")
+    noise_tokens = (
+        "save",
+        "was",
+        "rrp",
+        "off",
+        "discount",
+        "you save",
+        "coupon",
+        "lowest",
+        "historical",
+        "bundle",
+    )
     return any(t in s for t in noise_tokens)
 
 
@@ -140,7 +149,6 @@ def _extract_jsonld_prices(html: str) -> List[float]:
 
     def walk(node: object) -> None:
         if isinstance(node, dict):
-            # Common schema.org offer structure
             cur = str(node.get("priceCurrency", "")).upper()
             if cur == "GBP":
                 for k in ("price", "lowPrice", "highPrice"):
@@ -149,7 +157,6 @@ def _extract_jsonld_prices(html: str) -> List[float]:
                         if v is not None:
                             prices.append(v)
 
-            # Some sites nest into priceSpecification
             ps = node.get("priceSpecification")
             if isinstance(ps, dict):
                 cur2 = str(ps.get("priceCurrency", "")).upper()
@@ -174,14 +181,13 @@ def _extract_jsonld_prices(html: str) -> List[float]:
         except Exception:
             continue
 
-    # Return sorted unique prices
     return sorted({p for p in prices if p is not None})
 
 
 def _extract_gbp_from_lines(text: str) -> Optional[float]:
     """
-    Slightly safer fallback: scan line-by-line and ignore lines that look like noise
-    (Save/Was/RRP/etc). Take the smallest remaining GBP value.
+    Scan line-by-line and ignore lines that look like noise (Save/Was/RRP/etc).
+    Take the smallest remaining GBP value.
     """
     if not text:
         return None
@@ -229,7 +235,7 @@ class FanaticalPWClient:
             self.browser = self._pw.chromium.launch(headless=self.headless)
         except Exception as e:
             msg = str(e).lower()
-            if "executable doesn't exist" in msg or "browser" in msg and "not found" in msg:
+            if "executable doesn't exist" in msg or ("browser" in msg and "not found" in msg):
                 if self._pw:
                     try:
                         self._pw.stop()
@@ -294,7 +300,6 @@ class FanaticalPWClient:
 
     def _try_accept_cookies(self) -> None:
         assert self.page is not None
-        # Keep this short and forgiving: cookie banners vary.
         for sel in (
             "button:has-text('Accept all')",
             "button:has-text('Accept All')",
@@ -313,14 +318,14 @@ class FanaticalPWClient:
 
     def _collect_anchors(self) -> List[str]:
         """
-        Optimised: collect only anchors that *look* like game links.
-        We still canonicalise afterwards, so this is safe.
+        Robust: collect ALL hrefs; _canonicalize_game_url does strict filtering.
+        This avoids missing links when the site doesn't expose '/game/' in href filters
+        early or uses dynamic routing/lazy-loaded cards.
         """
         assert self.page is not None
         try:
-            # Grab only hrefs containing '/game/' to reduce noise dramatically.
             return self.page.eval_on_selector_all(
-                "a[href*='/game/']",
+                "a[href]",
                 "els => els.map(e => e.getAttribute('href')).filter(Boolean)",
             )
         except Exception:
@@ -348,11 +353,7 @@ class FanaticalPWClient:
                     seen.add(canon)
                     out.append(canon)
 
-            if len(seen) == before:
-                stable += 1
-            else:
-                stable = 0
-
+            stable = stable + 1 if len(seen) == before else 0
             if stable >= max(1, int(stable_rounds)):
                 break
 
@@ -436,7 +437,7 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # 1) JSON-LD prices (preferred if present and correct)
+        # 1) JSON-LD prices (preferred)
         try:
             html = self.page.content()
             prices = _extract_jsonld_prices(html)
@@ -445,10 +446,8 @@ class FanaticalPWClient:
         except Exception:
             pass
 
-        # 2) DOM fallback (scoped selectors first; much safer than scanning full body)
-        # These selectors are intentionally broad; we still parse only GBP values.
+        # 2) DOM fallback (scoped selectors first)
         dom_selectors = (
-            # common “buy box”/price area patterns
             "[data-testid*='price' i]",
             "[class*='price' i]",
             "[id*='price' i]",
@@ -459,25 +458,24 @@ class FanaticalPWClient:
         try:
             for sel in dom_selectors:
                 loc = self.page.locator(sel).first
-                if not loc:
-                    continue
                 try:
                     txt = loc.inner_text(timeout=1200)
                 except Exception:
                     continue
+
                 txt = (txt or "").strip()
                 if not txt:
                     continue
-                # For small blocks, noise heuristics help
                 if _looks_like_noise_price_context(txt):
                     continue
+
                 p = _extract_gbp_from_lines(txt) or _first_gbp_price_in_text(txt)
                 if p is not None:
                     return title, p, "ok (PW DOM GBP fallback)"
         except Exception:
             pass
 
-        # 3) Last resort: limited body scan (line-by-line filtering)
+        # 3) Last resort: body scan (line-by-line filtering)
         try:
             body = self.page.inner_text("body")
             p = _extract_gbp_from_lines(body)
@@ -501,5 +499,3 @@ def harvest_game_links(source_url: str, pages: int) -> List[str]:
 def read_title_and_price_gbp(url: str) -> Tuple[Optional[str], Optional[float], str]:
     with FanaticalPWClient() as c:
         return c.read_title_and_price_gbp(url)
-
-      
