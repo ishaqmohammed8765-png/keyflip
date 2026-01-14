@@ -12,7 +12,7 @@ import random
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -21,17 +21,30 @@ from .config import (
     RunConfig,
     BUFFER_FIXED_GBP,
     BUFFER_PCT_OF_BUY,
-    FANATICAL_SOURCES,
     MIN_PROFIT_GBP,
     MIN_ROI,
+    PRICE_FAIL_TTL_S,
+    PRICE_OK_TTL_S,
     SELL_FEE_PCT,
+    buy_source_for_url,
+    trust_score,
+    trusted_buy_sources,
 )
 from .eneba import make_store_search_url, read_price_gbp, resolve_product_url_from_store
 from .fanatical_pw import FanaticalPWClient
 
 log = logging.getLogger("keyflip.core")
 
-WATCHLIST_COLS = ["title", "buy_url", "buy_price_gbp", "buy_notes", "eneba_url", "eneba_notes"]
+WATCHLIST_COLS = [
+    "title",
+    "buy_url",
+    "buy_price_gbp",
+    "buy_notes",
+    "buy_site",
+    "buy_trust",
+    "eneba_url",
+    "eneba_notes",
+]
 
 SCANS_COLS = [
     "batch_id",
@@ -47,6 +60,8 @@ SCANS_COLS = [
     "buy_url",
     "market_url",
     "buy_notes",
+    "buy_site",
+    "buy_trust",
     "market_notes",
     "elapsed_s",
 ]
@@ -90,16 +105,6 @@ def _to_float(x: Any) -> Optional[float]:
         return None
 
 
-def _dedupe(items: List[str]) -> List[str]:
-    seen: Set[str] = set()
-    out: List[str] = []
-    for x in items:
-        if x and x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out
-
-
 def _read_csv_safe(path: Path) -> pd.DataFrame:
     try:
         if not path.exists() or path.stat().st_size == 0:
@@ -122,12 +127,6 @@ def _append_csv(path: Path, batch: pd.DataFrame, cols: List[str]) -> None:
     batch2 = batch.reindex(columns=union_cols)
 
     pd.concat([prev2, batch2], ignore_index=True).to_csv(path, index=False)
-
-
-def _open_cache(db_path: Path) -> PriceCache:
-    db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    return PriceCache(db_path)
 
 
 def _compute_profit(buy_gbp: float, sell_gbp: float) -> Tuple[float, float, float, float]:
@@ -177,24 +176,29 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
         pd.DataFrame([], columns=WATCHLIST_COLS).to_csv(out_csv, index=False)
         return 0
 
-    links: List[str] = []
+    links: Dict[str, Dict[str, str]] = {}
     rows: List[Dict[str, object]] = []
 
     log.info("Building watchlist: target=%d pages_per_source=%d", target, pages)
 
     with FanaticalPWClient(headless=True) as fan:
-        for name, src in FANATICAL_SOURCES.items():
+        for src in trusted_buy_sources():
             try:
-                harvested = fan.harvest_game_links(src, pages=pages, max_links=max_links)
-                log.info("Harvested %d links from %s", len(harvested), name)
-                links.extend(harvested)
+                harvested = fan.harvest_game_links(src.url, pages=pages, max_links=max_links)
+                log.info("Harvested %d links from %s", len(harvested), src.label)
+                for url in harvested:
+                    if not url:
+                        continue
+                    existing = links.get(url)
+                    if not existing or trust_score(src.trust_rating) > trust_score(existing["trust"]):
+                        links[url] = {"label": src.label, "trust": src.trust_rating}
             except Exception as e:
-                log.warning("Harvest failed (%s): %s", name, e)
+                log.warning("Harvest failed (%s): %s", src.label, e)
 
-        links = _dedupe(links)
-        random.shuffle(links)
+        urls = list(links.keys())
+        random.shuffle(urls)
 
-        for url in links:
+        for url in urls:
             if len(rows) >= target:
                 break
 
@@ -213,6 +217,8 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
                     "buy_url": str(url).strip(),
                     "buy_price_gbp": float(price),
                     "buy_notes": str(notes or "").strip(),
+                    "buy_site": links.get(url, {}).get("label", ""),
+                    "buy_trust": links.get(url, {}).get("trust", ""),
                     "eneba_url": "",
                     "eneba_notes": "",
                 }
@@ -237,10 +243,11 @@ def scan_watchlist(
     db_path: Path,
     fail_ttl: int,
 ) -> pd.DataFrame:
-    _ = _open_cache(db_path)  # kept
     watchlist_path = Path(watchlist_path)
     scans_path = Path(scans_path)
     passes_path = Path(passes_path)
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
     watch = _read_csv_safe(watchlist_path)
     if watch.empty:
@@ -249,11 +256,12 @@ def scan_watchlist(
 
     for c in WATCHLIST_COLS:
         if c not in watch.columns:
-            watch[c] = "" if c in ("eneba_url", "eneba_notes") else None
+            watch[c] = "" if c in ("eneba_url", "eneba_notes", "buy_site", "buy_trust") else None
 
     scan_limit = _cfg_int(cfg, "scan_limit", 0)
     refresh_buy_price = _cfg_bool(cfg, "refresh_buy_price", False)
     per_item_sleep_s = _cfg_float(cfg, "scan_sleep_s", 0.0)
+    avoid_recent_days = _cfg_int(cfg, "avoid_recent_days", 0)
 
     # currency conversion settings (from cfg)
     allow_eur = _cfg_bool(cfg, "allow_eur", False)
@@ -266,15 +274,17 @@ def scan_watchlist(
     start = time.time()
 
     attempted = 0
+    skipped_recent = 0
     rows: List[Dict[str, object]] = []
     watchlist_dirty = False
 
     log.info(
-        "Scanning watchlist: size=%d scan_limit=%d refresh_buy_price=%s allow_eur=%s",
+        "Scanning watchlist: size=%d scan_limit=%d refresh_buy_price=%s allow_eur=%s avoid_recent_days=%s",
         int(len(watch)),
         int(scan_limit),
         bool(refresh_buy_price),
         bool(allow_eur),
+        int(avoid_recent_days),
     )
 
     fan: Optional[FanaticalPWClient] = None
@@ -299,99 +309,136 @@ def scan_watchlist(
     if refresh_buy_price:
         fan = _fan_start()
 
-    try:
-        for idx, r in watch.iterrows():
-            if scan_limit > 0 and attempted >= scan_limit:
-                break
-            attempted += 1
+    ok_ttl = PRICE_OK_TTL_S
+    fail_ttl_s = int(fail_ttl) if fail_ttl and fail_ttl > 0 else PRICE_FAIL_TTL_S
 
-            title = _to_str(r.get("title", ""))
-            buy_url = _to_str(r.get("buy_url", ""))
+    with PriceCache(db_path) as cache:
+        try:
+            for idx, r in watch.iterrows():
+                if scan_limit > 0 and attempted >= scan_limit:
+                    break
 
-            buy_price = _to_float(r.get("buy_price_gbp", None))
-            buy_notes = _to_str(r.get("buy_notes", ""))
+                title = _to_str(r.get("title", ""))
+                buy_url = _to_str(r.get("buy_url", ""))
 
-            if refresh_buy_price and fan is not None and buy_url:
-                try:
-                    _t, p, n = fan.read_title_and_price_gbp(buy_url)
-                    if p is not None:
-                        buy_price = float(p)
-                    if n:
-                        buy_notes = str(n).strip()
-                except Exception as e:
-                    buy_notes = (buy_notes + " | " if buy_notes else "") + f"buy_refresh_failed:{type(e).__name__}"
-                    _fan_stop(fan)
-                    fan = _fan_start()
+                buy_price = _to_float(r.get("buy_price_gbp", None))
+                buy_notes = _to_str(r.get("buy_notes", ""))
+                buy_site = _to_str(r.get("buy_site", ""))
+                buy_trust = _to_str(r.get("buy_trust", ""))
 
-            existing_eneba_url = _to_str(r.get("eneba_url", ""))
-            existing_eneba_notes = _to_str(r.get("eneba_notes", ""))
+                recent_key = buy_url or title
+                if recent_key and avoid_recent_days > 0 and cache.is_recent(recent_key, avoid_recent_days):
+                    skipped_recent += 1
+                    continue
 
-            store_url = make_store_search_url(title)
-            prod_url: Optional[str] = existing_eneba_url or None
-            resolve_notes = existing_eneba_notes or ""
-            sell_price: Optional[float] = None
-            sell_notes = ""
+                attempted += 1
 
-            newly_resolved = False
+                if refresh_buy_price and fan is not None and buy_url:
+                    try:
+                        _t, p, n = fan.read_title_and_price_gbp(buy_url)
+                        if p is not None:
+                            buy_price = float(p)
+                        if n:
+                            buy_notes = str(n).strip()
+                    except Exception as e:
+                        buy_notes = (buy_notes + " | " if buy_notes else "") + f"buy_refresh_failed:{type(e).__name__}"
+                        _fan_stop(fan)
+                        fan = _fan_start()
 
-            if not prod_url:
-                try:
-                    prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
-                except Exception as e:
-                    resolve_notes = f"resolve_failed:{type(e).__name__}"
-                    prod_url = None
+                if not buy_site or not buy_trust:
+                    inferred = buy_source_for_url(buy_url)
+                    if inferred:
+                        if not buy_site:
+                            buy_site = inferred.label
+                            watch.at[idx, "buy_site"] = buy_site
+                            watchlist_dirty = True
+                        if not buy_trust:
+                            buy_trust = inferred.trust_rating
+                            watch.at[idx, "buy_trust"] = buy_trust
+                            watchlist_dirty = True
+
+                existing_eneba_url = _to_str(r.get("eneba_url", ""))
+                existing_eneba_notes = _to_str(r.get("eneba_notes", ""))
+
+                store_url = make_store_search_url(title)
+                prod_url: Optional[str] = existing_eneba_url or None
+                resolve_notes = existing_eneba_notes or ""
+                sell_price: Optional[float] = None
+                sell_notes = ""
+
+                newly_resolved = False
+
+                if not prod_url:
+                    try:
+                        prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
+                    except Exception as e:
+                        resolve_notes = f"resolve_failed:{type(e).__name__}"
+                        prod_url = None
+
+                    if prod_url:
+                        watch.at[idx, "eneba_url"] = prod_url
+                        watch.at[idx, "eneba_notes"] = resolve_notes
+                        watchlist_dirty = True
+                        newly_resolved = True
 
                 if prod_url:
-                    watch.at[idx, "eneba_url"] = prod_url
-                    watch.at[idx, "eneba_notes"] = resolve_notes
-                    watchlist_dirty = True
-                    newly_resolved = True
+                    if newly_resolved and skip_price_on_new_resolve:
+                        sell_price, sell_notes = None, "skipped (newly resolved; price next scan)"
+                    else:
+                        entry = cache.get(prod_url)
+                        if entry is not None:
+                            sell_price = entry.value
+                            sell_notes = entry.notes
+                        else:
+                            sell_price, sell_notes = read_price_gbp(
+                                prod_url,
+                                allow_eur=allow_eur,
+                                eur_to_gbp=eur_to_gbp,
+                            )
+                            ok = sell_price is not None
+                            ttl = ok_ttl if ok else fail_ttl_s
+                            cache.set(prod_url, sell_price, currency="GBP", ttl_s=ttl, ok=ok, notes=sell_notes)
 
-            if prod_url:
-                if newly_resolved and skip_price_on_new_resolve:
-                    sell_price, sell_notes = None, "skipped (newly resolved; price next scan)"
-                else:
-                    sell_price, sell_notes = read_price_gbp(
-                        prod_url,
-                        allow_eur=allow_eur,
-                        eur_to_gbp=eur_to_gbp,
-                    )
+                market_after_fee = None
+                buffer = None
+                profit = None
+                roi = None
+                passes = False
 
-            market_after_fee = None
-            buffer = None
-            profit = None
-            roi = None
-            passes = False
+                if buy_price is not None and sell_price is not None:
+                    market_after_fee, buffer, profit, roi = _compute_profit(buy_price, sell_price)
+                    passes = bool(profit >= MIN_PROFIT_GBP and roi >= MIN_ROI)
 
-            if buy_price is not None and sell_price is not None:
-                market_after_fee, buffer, profit, roi = _compute_profit(buy_price, sell_price)
-                passes = bool(profit >= MIN_PROFIT_GBP and roi >= MIN_ROI)
+                rows.append(
+                    {
+                        "batch_id": batch_id,
+                        "timestamp": _now(),
+                        "title": title,
+                        "buy_price": buy_price,
+                        "market_price": sell_price,
+                        "market_after_fee": market_after_fee,
+                        "buffer": buffer,
+                        "edge": profit,
+                        "edge_pct": roi,
+                        "passes": bool(passes),
+                        "buy_url": buy_url,
+                        "market_url": prod_url or store_url,
+                        "buy_notes": buy_notes,
+                        "buy_site": buy_site,
+                        "buy_trust": buy_trust,
+                        "market_notes": (resolve_notes or "") + ((" | " + sell_notes) if sell_notes else ""),
+                        "elapsed_s": round(time.time() - start, 2),
+                    }
+                )
 
-            rows.append(
-                {
-                    "batch_id": batch_id,
-                    "timestamp": _now(),
-                    "title": title,
-                    "buy_price": buy_price,
-                    "market_price": sell_price,
-                    "market_after_fee": market_after_fee,
-                    "buffer": buffer,
-                    "edge": profit,
-                    "edge_pct": roi,
-                    "passes": bool(passes),
-                    "buy_url": buy_url,
-                    "market_url": prod_url or store_url,
-                    "buy_notes": buy_notes,
-                    "market_notes": (resolve_notes or "") + ((" | " + sell_notes) if sell_notes else ""),
-                    "elapsed_s": round(time.time() - start, 2),
-                }
-            )
+                if recent_key:
+                    cache.mark_recent(recent_key)
 
-            if per_item_sleep_s > 0:
-                time.sleep(per_item_sleep_s)
+                if per_item_sleep_s > 0:
+                    time.sleep(per_item_sleep_s)
 
-    finally:
-        _fan_stop(fan)
+        finally:
+            _fan_stop(fan)
 
     batch = pd.DataFrame(rows, columns=SCANS_COLS)
 
@@ -408,8 +455,9 @@ def scan_watchlist(
     batch[batch["passes"] == True].to_csv(passes_path, index=False)
 
     log.info(
-        "Scan complete: attempted=%d wrote=%d passes=%d scans_csv=%s passes_csv=%s",
+        "Scan complete: attempted=%d skipped_recent=%d wrote=%d passes=%d scans_csv=%s passes_csv=%s",
         int(attempted),
+        int(skipped_recent),
         int(len(batch)),
         int((batch["passes"] == True).sum()) if not batch.empty and "passes" in batch.columns else 0,
         str(scans_path),

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 # ============================================================
 # Networking
@@ -54,27 +55,80 @@ PRICE_FAIL_TTL = PRICE_FAIL_TTL_S
 
 
 # ============================================================
-# Buy-side sources (Loaded)
+# Buy-side sources (trusted)
 # ============================================================
 
-LOADED_SOURCES: Dict[str, str] = {
-    # Deals
-    "deals": "https://www.loaded.com/deals",
-    "deals_pc": "https://www.loaded.com/deals/pc",
-    # Explore categories (stable for pagination / harvesting)
-    "explore_action": "https://www.loaded.com/explore/action-games",
-    "explore_adventure": "https://www.loaded.com/explore/adventure-games",
-    "explore_arcade": "https://www.loaded.com/explore/arcade-games",
-    "explore_open_world": "https://www.loaded.com/explore/open-world-games",
-    "explore_rpg": "https://www.loaded.com/explore/rpg-games",
-    "explore_strategy": "https://www.loaded.com/explore/strategy-games",
-    # Extra coverage
-    "explore_simulation": "https://www.loaded.com/explore/simulation-games",
-    "explore_sports": "https://www.loaded.com/explore/sports-games",
-    "explore_indie": "https://www.loaded.com/explore/indie-games",
+@dataclass(frozen=True)
+class BuySource:
+    key: str
+    url: str
+    label: str
+    trust_rating: str
+
+
+TRUST_RATING_SCORES = {
+    "A+": 5,
+    "A": 4,
+    "A-": 3,
+    "B+": 2,
+    "B": 1,
+    "C": 0,
 }
 
+
+def trust_score(rating: str) -> int:
+    return TRUST_RATING_SCORES.get((rating or "").upper(), 0)
+
+
+TRUSTED_BUY_SOURCES: tuple[BuySource, ...] = (
+    # Loaded.com (trusted retailer)
+    BuySource("loaded_deals", "https://www.loaded.com/deals", "Loaded Deals", "A"),
+    BuySource("loaded_deals_pc", "https://www.loaded.com/deals/pc", "Loaded Deals (PC)", "A"),
+    BuySource("loaded_explore_action", "https://www.loaded.com/explore/action-games", "Loaded Action", "A"),
+    BuySource("loaded_explore_adventure", "https://www.loaded.com/explore/adventure-games", "Loaded Adventure", "A"),
+    BuySource("loaded_explore_arcade", "https://www.loaded.com/explore/arcade-games", "Loaded Arcade", "A"),
+    BuySource("loaded_explore_open_world", "https://www.loaded.com/explore/open-world-games", "Loaded Open World", "A"),
+    BuySource("loaded_explore_rpg", "https://www.loaded.com/explore/rpg-games", "Loaded RPG", "A"),
+    BuySource("loaded_explore_strategy", "https://www.loaded.com/explore/strategy-games", "Loaded Strategy", "A"),
+    BuySource("loaded_explore_simulation", "https://www.loaded.com/explore/simulation-games", "Loaded Simulation", "A"),
+    BuySource("loaded_explore_sports", "https://www.loaded.com/explore/sports-games", "Loaded Sports", "A"),
+    BuySource("loaded_explore_indie", "https://www.loaded.com/explore/indie-games", "Loaded Indie", "A"),
+    BuySource("loaded_explore_horror", "https://www.loaded.com/explore/horror-games", "Loaded Horror", "A"),
+    BuySource("loaded_explore_shooter", "https://www.loaded.com/explore/shooter-games", "Loaded Shooter", "A"),
+    # CDKeys (trusted retailer)
+    BuySource("cdkeys_deals", "https://www.cdkeys.com/deals", "CDKeys Deals", "A-"),
+    BuySource("cdkeys_pc", "https://www.cdkeys.com/pc", "CDKeys PC", "A-"),
+    BuySource("cdkeys_playstation", "https://www.cdkeys.com/playstation", "CDKeys PlayStation", "A-"),
+    BuySource("cdkeys_xbox", "https://www.cdkeys.com/xbox", "CDKeys Xbox", "A-"),
+    BuySource("cdkeys_nintendo", "https://www.cdkeys.com/nintendo", "CDKeys Nintendo", "A-"),
+)
+
+
+def trusted_buy_sources() -> tuple[BuySource, ...]:
+    return TRUSTED_BUY_SOURCES
+
+
+def buy_source_urls() -> Dict[str, str]:
+    return {src.key: src.url for src in TRUSTED_BUY_SOURCES}
+
+
+def buy_source_for_url(url: str) -> Optional[BuySource]:
+    try:
+        host = (urlparse(url).netloc or "").lower()
+    except Exception:
+        return None
+    if not host:
+        return None
+    host = host.split(":")[0].lstrip("www.")
+    for src in TRUSTED_BUY_SOURCES:
+        src_host = urlparse(src.url).netloc.lower().split(":")[0].lstrip("www.")
+        if host == src_host:
+            return src
+    return None
+
+
 # Compatibility aliases (older modules may still import these)
+LOADED_SOURCES = buy_source_urls()
 CDKEYS_SOURCES = LOADED_SOURCES
 FANATICAL_SOURCES = LOADED_SOURCES
 
