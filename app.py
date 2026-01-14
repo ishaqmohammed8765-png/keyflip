@@ -199,32 +199,30 @@ with st.sidebar:
     watchlist_target = st.slider("Watchlist size", min_value=5, max_value=200, value=20, step=5)
     scan_limit = st.slider("Scan items per run", min_value=5, max_value=200, value=20, step=5)
 
-    st.markdown("### Options")
-    refresh_buy_price = st.toggle("Refresh buy price (Playwright)", value=False)
-    avoid_recent_days = st.slider("Avoid recently scanned (days)", min_value=0, max_value=30, value=0, step=1)
+    with st.expander("Advanced options"):
+        refresh_buy_price = st.toggle("Refresh buy price (Playwright)", value=False)
+        avoid_recent_days = st.slider("Avoid recently scanned (days)", min_value=0, max_value=30, value=0, step=1)
 
-    allow_eur = st.toggle("Allow EUR listings", value=False)
-    eur_to_gbp = st.number_input("EUR→GBP", min_value=0.1, max_value=2.0, value=0.86, step=0.01)
+        allow_eur = st.toggle("Allow EUR listings", value=False)
+        eur_to_gbp = st.number_input("EUR→GBP", min_value=0.1, max_value=2.0, value=0.86, step=0.01)
 
-    st.divider()
-    st.markdown("### Maintenance")
-    m1, m2 = st.columns(2)
-    do_install_pw = m1.button("Install Chromium", use_container_width=True, disabled=st.session_state.is_running)
-    do_clear_cache = m2.button("Clear cache", use_container_width=True, disabled=st.session_state.is_running)
+    with st.expander("Maintenance"):
+        m1, m2 = st.columns(2)
+        do_install_pw = m1.button("Install Chromium", use_container_width=True, disabled=st.session_state.is_running)
+        do_clear_cache = m2.button("Clear cache", use_container_width=True, disabled=st.session_state.is_running)
 
-    do_delete_outputs = st.button("Delete CSV outputs", use_container_width=True, disabled=st.session_state.is_running)
+        do_delete_outputs = st.button("Delete CSV outputs", use_container_width=True, disabled=st.session_state.is_running)
 
-    st.divider()
-    st.markdown("### Trusted buy sources")
-    trusted_sources = trusted_buy_sources()
-    st.dataframe(
-        pd.DataFrame(
-            [{"Source": s.label, "Trust": s.trust_rating, "URL": s.url} for s in trusted_sources]
-        ),
-        use_container_width=True,
-        height=240,
-        hide_index=True,
-    )
+    with st.expander("Trusted buy sources"):
+        trusted_sources = trusted_buy_sources()
+        st.dataframe(
+            pd.DataFrame(
+                [{"Source": s.label, "Trust": s.trust_rating, "URL": s.url} for s in trusted_sources]
+            ),
+            use_container_width=True,
+            height=240,
+            hide_index=True,
+        )
 
 # ---------- Maintenance ----------
 if do_install_pw:
@@ -244,21 +242,22 @@ if do_delete_outputs:
 
 
 # ---------- Main actions (nice layout) ----------
-c1, c2, c3 = st.columns([1, 1, 1])
-
-build_clicked = c1.button("🔨 Build watchlist", use_container_width=True, disabled=st.session_state.is_running)
-scan_clicked = c2.button(
-    "🔍 Scan watchlist",
-    use_container_width=True,
-    disabled=st.session_state.is_running or wl_n == 0,
+action = st.selectbox(
+    "Action",
+    ["Build watchlist", "Scan watchlist", "Build & scan"],
+    index=0,
+    disabled=st.session_state.is_running,
 )
-play_clicked = c3.button("▶️ Play all", use_container_width=True, disabled=st.session_state.is_running)
+run_clicked = st.button("Run", use_container_width=True, disabled=st.session_state.is_running)
 
 if wl_n == 0:
     st.info("Build a watchlist to enable scanning.")
 
 
 def run_build() -> int:
+    if not ensure_playwright_chromium_installed(show_ui=True):
+        st.error("Chromium is required to build the watchlist. Install it in Maintenance and retry.")
+        return 0
     cfg = make_config(
         max_buy=max_buy,
         watchlist_target=watchlist_target,
@@ -317,21 +316,19 @@ def run_scan() -> None:
 
 # ---------- Execute actions ----------
 try:
-    if build_clicked or scan_clicked or play_clicked:
+    if run_clicked:
         st.session_state.is_running = True
 
-    if build_clicked:
-        run_build()
-
-    if scan_clicked:
-        run_scan()
-
-    if play_clicked:
-        added = run_build()
-        if added > 0:
+        if action == "Build watchlist":
+            run_build()
+        elif action == "Scan watchlist":
             run_scan()
         else:
-            st.warning("Play all stopped because the watchlist is empty.")
+            added = run_build()
+            if added > 0:
+                run_scan()
+            else:
+                st.warning("Build & scan stopped because the watchlist is empty.")
 
 finally:
     st.session_state.is_running = False
