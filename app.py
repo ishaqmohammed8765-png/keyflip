@@ -352,6 +352,40 @@ with tab1:
 with tab2:
     if passes_df is None or passes_df.empty:
         st.info("No good deals found yet.")
+        st.markdown(
+            "- **Raise scan volume:** increase **Watchlist size** or **Scan items per run** in the sidebar.\n"
+            "- **Loosen filters:** raise **Max buy price** or toggle **Allow EUR listings**.\n"
+            "- **Refresh buy price only if needed:** enabling it can change margins but is slower.\n"
+            "- **Avoid repeats:** set **Avoid recently scanned (days)** to 0 when hunting fresh finds."
+        )
+        if scans_df is not None and not scans_df.empty:
+            candidates = scans_df.copy()
+            for col in ["edge", "edge_pct", "buy_price", "market_price"]:
+                if col in candidates.columns:
+                    candidates[col] = pd.to_numeric(candidates[col], errors="coerce")
+            candidates = candidates.dropna(subset=["edge"]) if "edge" in candidates.columns else candidates
+            if not candidates.empty:
+                top = candidates.sort_values(by="edge", ascending=False).head(10)
+                st.caption("Best recent candidates (highest edge), even if they don't pass thresholds yet.")
+                st.dataframe(
+                    top[
+                        [
+                            c
+                            for c in [
+                                "title",
+                                "buy_price",
+                                "market_price",
+                                "edge",
+                                "edge_pct",
+                                "buy_site",
+                                "market_url",
+                            ]
+                            if c in top.columns
+                        ]
+                    ],
+                    use_container_width=True,
+                    height=320,
+                )
     else:
         st.dataframe(passes_df, use_container_width=True, height=520)
 
