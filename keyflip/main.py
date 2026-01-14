@@ -150,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     watchlist_csv = root / "watchlist.csv"
     scans_csv = root / "scans.csv"
     passes_csv = root / "passes.csv"
-    cache = PriceCache(root / "price_cache.sqlite")
+    cache_db = root / "price_cache.sqlite"
+    cache = PriceCache(cache_db)
 
     if args.clear_cache:
         cache.clear_cache()
@@ -194,13 +195,13 @@ def main(argv: list[str] | None = None) -> int:
     do_scan = args.scan or do_play
 
     if do_build:
-        build_watchlist(cfg, cache, watchlist_csv)
+        build_watchlist(cfg, watchlist_csv)
 
     if do_scan:
         if not _watchlist_ok(watchlist_csv):
             log.warning("watchlist.csv missing or empty — run --build first")
             return 0
-        scan_watchlist(cfg, cache, watchlist_csv, scans_csv, passes_csv)
+        scan_watchlist(cfg, watchlist_csv, scans_csv, passes_csv, cache_db, args.cache_fail_ttl)
 
     return 0
 

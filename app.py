@@ -12,7 +12,7 @@ import pandas as pd
 import streamlit as st
 
 from keyflip.cache import PriceCache
-from keyflip.config import RunConfig
+from keyflip.config import RunConfig, trusted_buy_sources
 from keyflip.core import build_watchlist, scan_watchlist
 
 # ============================================================
@@ -177,7 +177,7 @@ if "is_running" not in st.session_state:
 left, right = st.columns([2.2, 1])
 with left:
     st.markdown("## Keyflip")
-    st.caption("Build a watchlist from Fanatical and scan Eneba for profitable resale deals.")
+    st.caption("Build a watchlist from trusted stores and scan Eneba for profitable resale deals.")
 
 with right:
     wl = read_csv_if_present(WATCHLIST_CSV)
@@ -213,6 +213,18 @@ with st.sidebar:
     do_clear_cache = m2.button("Clear cache", use_container_width=True, disabled=st.session_state.is_running)
 
     do_delete_outputs = st.button("Delete CSV outputs", use_container_width=True, disabled=st.session_state.is_running)
+
+    st.divider()
+    st.markdown("### Trusted buy sources")
+    trusted_sources = trusted_buy_sources()
+    st.dataframe(
+        pd.DataFrame(
+            [{"Source": s.label, "Trust": s.trust_rating, "URL": s.url} for s in trusted_sources]
+        ),
+        use_container_width=True,
+        height=240,
+        hide_index=True,
+    )
 
 # ---------- Maintenance ----------
 if do_install_pw:
