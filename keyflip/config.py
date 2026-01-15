@@ -190,6 +190,8 @@ class RunConfig:
     # Optional knobs (safe to ignore if unused elsewhere)
     refresh_buy_price: bool = False
     scan_sleep_s: float = 0.0
+    reuse_watchlist_hours: float = 6.0
+    resolve_fail_backoff_hours: float = 6.0
 
     @classmethod
     def from_kwargs(cls, **kwargs: Any) -> "RunConfig":
@@ -300,3 +302,7 @@ class RunConfig:
             raise ValueError("eur_to_gbp must be > 0 when allow_eur=True")
         if self.scan_sleep_s < 0:
             raise ValueError("scan_sleep_s must be >= 0")
+        if self.reuse_watchlist_hours < 0:
+            raise ValueError("reuse_watchlist_hours must be >= 0")
+        if self.resolve_fail_backoff_hours < 0:
+            raise ValueError("resolve_fail_backoff_hours must be >= 0")

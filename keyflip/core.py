@@ -76,6 +76,22 @@ def _now() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
+def _resolve_fail_backoff_active(notes: str, *, backoff_hours: float) -> bool:
+    if not notes or backoff_hours <= 0:
+        return False
+    prefix = "resolve_failed:"
+    if not notes.startswith(prefix):
+        return False
+    parts = notes.split("@", 1)
+    if len(parts) != 2:
+        return False
+    try:
+        ts = float(parts[1])
+    except ValueError:
+        return False
+    return (time.time() - ts) < (backoff_hours * 3600.0)
+
+
 def _to_str(x: Any) -> str:
     if x is None:
         return ""
@@ -170,14 +186,63 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
     target = _cfg_int(cfg, "watchlist_target", 10)
     pages = _cfg_int(cfg, "pages_per_source", 2)
     max_links = _cfg_int(cfg, "max_links_per_source", 200)
+    reuse_watchlist_hours = _cfg_float(cfg, "reuse_watchlist_hours", 0.0)
 
     if target <= 0:
         log.warning("watchlist_target <= 0, nothing to build.")
         pd.DataFrame([], columns=WATCHLIST_COLS).to_csv(out_csv, index=False)
         return 0
 
+    existing_rows: List[Dict[str, object]] = []
+    existing_urls: set[str] = set()
+
+    if reuse_watchlist_hours > 0 and out_csv.exists():
+        existing = _read_csv_safe(out_csv)
+        if not existing.empty:
+            for c in WATCHLIST_COLS:
+                if c not in existing.columns:
+                    existing[c] = ""
+            existing["title"] = existing["title"].map(_to_str)
+            existing["buy_url"] = existing["buy_url"].map(_to_str)
+            existing["buy_price_gbp"] = existing["buy_price_gbp"].map(_to_float)
+            existing["buy_notes"] = existing["buy_notes"].map(_to_str)
+            existing["buy_site"] = existing["buy_site"].map(_to_str)
+            existing["buy_trust"] = existing["buy_trust"].map(_to_str)
+            existing["eneba_url"] = existing["eneba_url"].map(_to_str)
+            existing["eneba_notes"] = existing["eneba_notes"].map(_to_str)
+
+            valid = existing[
+                (existing["title"] != "")
+                & (existing["buy_url"] != "")
+                & (existing["buy_price_gbp"].notna())
+            ]
+            existing_count = int(len(valid))
+            age_s = time.time() - out_csv.stat().st_mtime
+            if age_s <= (reuse_watchlist_hours * 3600.0):
+                if existing_count >= target:
+                    log.info(
+                        "Watchlist fresh (%0.1fh old) and already meets target=%d; skipping rebuild.",
+                        age_s / 3600.0,
+                        target,
+                    )
+                    return existing_count
+                existing_rows = valid.head(target).to_dict("records")
+                existing_urls = {row.get("buy_url", "") for row in existing_rows if row.get("buy_url")}
+                log.info(
+                    "Watchlist fresh (%0.1fh old): reusing %d/%d rows and topping up to target=%d.",
+                    age_s / 3600.0,
+                    existing_count,
+                    target,
+                    target,
+                )
+            else:
+                log.info(
+                    "Watchlist is stale (%0.1fh old); rebuilding.",
+                    age_s / 3600.0,
+                )
+
     links: Dict[str, Dict[str, str]] = {}
-    rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, object]] = list(existing_rows)
 
     log.info("Building watchlist: target=%d pages_per_source=%d", target, pages)
 
@@ -188,6 +253,8 @@ def build_watchlist(cfg: RunConfig, out_csv: Path) -> int:
                 log.info("Harvested %d links from %s", len(harvested), src.label)
                 for url in harvested:
                     if not url:
+                        continue
+                    if url in existing_urls:
                         continue
                     existing = links.get(url)
                     if not existing or trust_score(src.trust_rating) > trust_score(existing["trust"]):
@@ -262,6 +329,7 @@ def scan_watchlist(
     refresh_buy_price = _cfg_bool(cfg, "refresh_buy_price", False)
     per_item_sleep_s = _cfg_float(cfg, "scan_sleep_s", 0.0)
     avoid_recent_days = _cfg_int(cfg, "avoid_recent_days", 0)
+    resolve_fail_backoff_hours = _cfg_float(cfg, "resolve_fail_backoff_hours", 0.0)
 
     # currency conversion settings (from cfg)
     allow_eur = _cfg_bool(cfg, "allow_eur", False)
@@ -369,17 +437,20 @@ def scan_watchlist(
                 newly_resolved = False
 
                 if not prod_url:
-                    try:
-                        prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
-                    except Exception as e:
-                        resolve_notes = f"resolve_failed:{type(e).__name__}"
-                        prod_url = None
+                    if _resolve_fail_backoff_active(resolve_notes, backoff_hours=resolve_fail_backoff_hours):
+                        sell_notes = f"resolve_backoff ({resolve_fail_backoff_hours:g}h)"
+                    else:
+                        try:
+                            prod_url, resolve_notes = resolve_product_url_from_store(store_url, title)
+                        except Exception as e:
+                            resolve_notes = f"resolve_failed:{type(e).__name__}@{int(time.time())}"
+                            prod_url = None
 
-                    if prod_url:
-                        watch.at[idx, "eneba_url"] = prod_url
-                        watch.at[idx, "eneba_notes"] = resolve_notes
-                        watchlist_dirty = True
-                        newly_resolved = True
+                        if prod_url:
+                            watch.at[idx, "eneba_url"] = prod_url
+                            watch.at[idx, "eneba_notes"] = resolve_notes
+                            watchlist_dirty = True
+                            newly_resolved = True
 
                 if prod_url:
                     if newly_resolved and skip_price_on_new_resolve:

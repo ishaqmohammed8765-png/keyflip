@@ -33,6 +33,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--watchlist-target", type=int, default=10)
     p.add_argument("--verify-candidates", type=int, default=220)
     p.add_argument("--pages-per-source", type=int, default=2)
+    p.add_argument("--reuse-watchlist-hours", type=float, default=6.0)
 
     p.add_argument("--verify-limit", type=int, default=10, help="0 = use safety cap")
     p.add_argument("--verify-safety-cap", type=int, default=14)
@@ -40,6 +41,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Scan
     p.add_argument("--scan-limit", type=int, default=10)
     p.add_argument("--avoid-recent-days", type=int, default=2)
+    p.add_argument("--resolve-backoff-hours", type=float, default=6.0)
 
     # Currency
     p.add_argument("--allow-eur", action="store_true")
@@ -181,8 +183,10 @@ def main(argv: list[str] | None = None) -> int:
         pages_per_source=args.pages_per_source,
         verify_limit=v.verify_limit,
         verify_safety_cap=v.safety_cap,
+        reuse_watchlist_hours=args.reuse_watchlist_hours,
         scan_limit=args.scan_limit,
         avoid_recent_days=args.avoid_recent_days,
+        resolve_fail_backoff_hours=args.resolve_backoff_hours,
         allow_eur=args.allow_eur,
         eur_to_gbp=args.eur_to_gbp,
         item_budget_s=args.item_budget,
