@@ -244,12 +244,18 @@ def select_batch(
     batch_size: int,
 ) -> list[WatchlistItem]:
     eligible = []
-    for item in items:
+
+    def _next_allowed(item: WatchlistItem) -> datetime:
         state = states.get(item.item_key)
-        next_allowed = state.next_allowed_at if state else None
-        if next_allowed is None or next_allowed <= now:
+        if state is None or state.next_allowed_at is None:
+            return now
+        return state.next_allowed_at
+
+    for item in items:
+        next_allowed = _next_allowed(item)
+        if next_allowed <= now:
             eligible.append(item)
-    eligible.sort(key=lambda i: (states.get(i.item_key).next_allowed_at or now))
+    eligible.sort(key=_next_allowed)
     return eligible[: max(0, int(batch_size))]
 
 
