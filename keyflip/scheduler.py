@@ -345,14 +345,22 @@ def _merge_watchlist_updates(watchlist_path: Path, updated_path: Path) -> None:
     if not updates:
         return
 
+    updated_index_map: dict[str, int] = {}
+    for idx, key in updated_keys.items():
+        if key:
+            updated_index_map[key] = idx
+
+    if not updated_index_map:
+        return
+
     changed = False
     for idx, key in original_keys.items():
         if not key:
             continue
-        matches = updated_keys == key
-        if not matches.any():
+        updated_idx = updated_index_map.get(key)
+        if updated_idx is None:
             continue
-        update_row = updated.loc[matches].iloc[-1]
+        update_row = updated.loc[updated_idx]
         for col, series in updates.items():
             val = update_row.get(col)
             if pd.isna(val) or val is None or val == "":
