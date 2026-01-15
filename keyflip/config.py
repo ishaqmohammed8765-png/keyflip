@@ -36,7 +36,7 @@ MIN_ROI = 0.20
 def compute_profit(buy_gbp: float, sell_gbp: float) -> tuple[float, float]:
     """Returns (profit_gbp, roi)."""
     net_sell = sell_gbp * (1.0 - SELL_FEE_PCT)
-    buffer = BUFFER_FIXED_GBP + (buy_gbp * BUFFER_PCT_OF_BUY)
+    buffer = max(BUFFER_FIXED_GBP, buy_gbp * BUFFER_PCT_OF_BUY)
     profit = net_sell - buy_gbp - buffer
     roi = profit / buy_gbp if buy_gbp > 0 else -1.0
     return profit, roi
