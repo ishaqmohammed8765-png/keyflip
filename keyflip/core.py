@@ -147,7 +147,7 @@ def _append_csv(path: Path, batch: pd.DataFrame, cols: List[str]) -> None:
 
 def _compute_profit(buy_gbp: float, sell_gbp: float) -> Tuple[float, float, float, float]:
     market_after_fee = sell_gbp * (1.0 - SELL_FEE_PCT)
-    buffer = BUFFER_FIXED_GBP + (BUFFER_PCT_OF_BUY * buy_gbp)
+    buffer = max(BUFFER_FIXED_GBP, BUFFER_PCT_OF_BUY * buy_gbp)
     profit = market_after_fee - buy_gbp - buffer
     roi = profit / buy_gbp if buy_gbp > 0 else -1.0
     return market_after_fee, buffer, profit, roi
