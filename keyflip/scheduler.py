@@ -301,7 +301,10 @@ def build_watchlist_items(watchlist_df: pd.DataFrame) -> list[WatchlistItem]:
 
 
 def _classify_failure(notes: str) -> str:
-    n = (notes or "").lower()
+    cleaned = (notes or "").strip()
+    if not cleaned:
+        return "missing_price"
+    n = cleaned.lower()
     if "timeout" in n:
         return "timeout"
     if "captcha" in n or "blocked" in n:
@@ -310,7 +313,7 @@ def _classify_failure(notes: str) -> str:
         return "parse_error"
     if "no_result" in n or "not found" in n:
         return "no_result"
-    return "unknown"
+    return cleaned
 
 
 def _merge_watchlist_updates(watchlist_path: Path, updated_path: Path) -> None:
