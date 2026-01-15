@@ -358,9 +358,9 @@ def _convert_to_gbp(price: float, currency: str, *, allow_eur: bool, eur_to_gbp:
     if cur == "EUR":
         if allow_eur and eur_to_gbp > 0:
             return price * eur_to_gbp, "EUR->GBP"
-        return None, "EUR (blocked)"
+        return None, "EUR (disallowed)"
     # unknown currency
-    return None, f"{cur or 'UNKNOWN'} (blocked)"
+    return None, f"{cur or 'UNKNOWN'} (disallowed)"
 
 
 def _extract_price_from_ldjson(soup: BeautifulSoup) -> Tuple[Optional[float], Optional[str]]:

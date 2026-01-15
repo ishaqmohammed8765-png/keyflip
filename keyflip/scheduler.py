@@ -307,7 +307,18 @@ def _classify_failure(notes: str) -> str:
     n = cleaned.lower()
     if "timeout" in n:
         return "timeout"
-    if "captcha" in n or "blocked" in n:
+    if "newly resolved" in n:
+        return "newly_resolved"
+    blocked_signals = (
+        "captcha",
+        "blocked http",
+        "blocked challenge",
+        "challenge page",
+        "access denied",
+        "rate limit",
+        "too many requests",
+    )
+    if any(s in n for s in blocked_signals):
         return "blocked/captcha"
     if "parse" in n or "json" in n:
         return "parse_error"
