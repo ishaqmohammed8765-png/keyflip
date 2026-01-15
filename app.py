@@ -14,6 +14,12 @@ import streamlit as st
 from keyflip.cache import PriceCache
 from keyflip.config import RunConfig, trusted_buy_sources
 from keyflip.core import build_watchlist, scan_watchlist
+from keyflip.scheduler import (
+    AlertThresholds,
+    SchedulerConfig,
+    build_watchlist_items,
+    run_cycle,
+)
 
 # ============================================================
 # Paths (relative to this app file)
@@ -23,6 +29,8 @@ WATCHLIST_CSV = ROOT_DIR / "watchlist.csv"
 SCANS_CSV = ROOT_DIR / "scans.csv"
 PASSES_CSV = ROOT_DIR / "passes.csv"
 DB_PATH = ROOT_DIR / "price_cache.sqlite"
+SCHEDULER_DB = ROOT_DIR / "scheduler_state.sqlite"
+SCHEDULER_TEMP_WATCHLIST = ROOT_DIR / ".scheduler_watchlist.csv"
 
 DEFAULT_CACHE_FAIL_TTL = 1200  # seconds (20 minutes)
 
@@ -171,6 +179,8 @@ if not st.session_state.pw_bootstrap_done:
 
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
+if "continuous_scan_enabled" not in st.session_state:
+    st.session_state.continuous_scan_enabled = False
 
 
 # ---------- Header ----------
@@ -333,6 +343,150 @@ try:
 finally:
     st.session_state.is_running = False
 
+
+# ---------- Continuous scan ----------
+st.divider()
+st.markdown("### Continuous Scan")
+
+ctl1, ctl2, ctl3 = st.columns([1.2, 1.2, 1.6])
+with ctl1:
+    start_toggle = st.toggle(
+        "Start scanning",
+        value=st.session_state.continuous_scan_enabled,
+        disabled=st.session_state.is_running,
+        key="continuous_scan_start",
+    )
+with ctl2:
+    stop_toggle = st.toggle(
+        "Stop scanning",
+        value=not st.session_state.continuous_scan_enabled,
+        disabled=st.session_state.is_running,
+        key="continuous_scan_stop",
+    )
+with ctl3:
+    batch_size = st.number_input(
+        "Batch size (items per cycle)",
+        min_value=1,
+        max_value=200,
+        value=20,
+        step=1,
+        disabled=st.session_state.is_running,
+    )
+
+cycle_interval_min = st.number_input(
+    "Cycle interval (minutes)",
+    min_value=1,
+    max_value=120,
+    value=7,
+    step=1,
+    disabled=st.session_state.is_running,
+)
+
+with st.expander("Alert & scheduling options"):
+    cooldown_min = st.number_input("Cooldown after success (min minutes)", min_value=5, max_value=180, value=30, step=5)
+    cooldown_max = st.number_input("Cooldown after success (max minutes)", min_value=5, max_value=240, value=60, step=5)
+    alert_cooldown_hours = st.number_input("Alert cooldown (hours)", min_value=1.0, max_value=48.0, value=6.0, step=1.0)
+    alert_price_change_pct = st.number_input(
+        "Alert again if sell price changes by (%)",
+        min_value=0.5,
+        max_value=50.0,
+        value=3.0,
+        step=0.5,
+    )
+    min_profit_gbp = st.number_input(
+        "Min profit for alert (£)",
+        min_value=0.0,
+        max_value=50.0,
+        value=0.5,
+        step=0.1,
+    )
+    min_roi = st.number_input(
+        "Min ROI for alert",
+        min_value=0.0,
+        max_value=2.0,
+        value=0.2,
+        step=0.05,
+    )
+
+if stop_toggle and st.session_state.continuous_scan_enabled:
+    st.session_state.continuous_scan_enabled = False
+elif start_toggle:
+    st.session_state.continuous_scan_enabled = True
+
+if st.session_state.continuous_scan_enabled:
+    if refresh_buy_price and not has_playwright_browsers():
+        st.error("Continuous scan paused: Chromium is missing while refresh buy price is enabled.")
+    else:
+        wl_df = read_csv_if_present(WATCHLIST_CSV)
+        items = build_watchlist_items(wl_df) if wl_df is not None else []
+        if not items:
+            st.warning("No watchlist items found. Build the watchlist before starting continuous scan.")
+        else:
+            scheduler_config = SchedulerConfig(
+                state_db_path=SCHEDULER_DB,
+                watchlist_path=WATCHLIST_CSV,
+                scans_path=SCANS_CSV,
+                passes_path=PASSES_CSV,
+                price_cache_path=DB_PATH,
+                temp_watchlist_path=SCHEDULER_TEMP_WATCHLIST,
+                batch_size=int(batch_size),
+                cooldown_min_minutes=int(cooldown_min),
+                cooldown_max_minutes=int(cooldown_max),
+            )
+            thresholds = AlertThresholds(
+                min_profit_gbp=float(min_profit_gbp),
+                min_roi=float(min_roi),
+                cooldown_hours=float(alert_cooldown_hours),
+                price_change_pct=float(alert_price_change_pct),
+            )
+            cfg = make_config(
+                max_buy=max_buy,
+                watchlist_target=watchlist_target,
+                scan_limit=scan_limit,
+                refresh_buy_price=refresh_buy_price,
+                allow_eur=allow_eur,
+                eur_to_gbp=eur_to_gbp,
+                avoid_recent_days=avoid_recent_days,
+                include_scan_fields=True,
+            )
+
+            st.session_state.is_running = True
+            try:
+                with st.spinner("Running one continuous scan cycle..."):
+                    report = run_cycle(scheduler_config, items, cfg, thresholds)
+            finally:
+                st.session_state.is_running = False
+
+            st.caption(
+                f"Eligible now: {report.eligible_count} • "
+                f"Scanned this cycle: {len(report.scanned_titles)}"
+            )
+            if report.scanned_titles:
+                st.write("Scanned this cycle:")
+                st.dataframe(pd.DataFrame({"title": report.scanned_titles}), use_container_width=True, height=200)
+
+            if report.failures:
+                st.warning("Failures this cycle:")
+                st.dataframe(pd.DataFrame(report.failures), use_container_width=True, height=200)
+
+            if report.next_eligible_in:
+                mins = int(report.next_eligible_in.total_seconds() / 60)
+                st.info(f"Next eligible item in ~{mins} min.")
+            else:
+                st.info("Next eligible item: now (waiting for next cycle).")
+
+            if report.alerts:
+                for alert in report.alerts:
+                    st.error(
+                        f"🚨 Deal alert: {alert['title']} — "
+                        f"profit £{alert['profit_gbp']:.2f}, ROI {alert['roi']:.2f}"
+                    )
+                    st.write(f"Buy: {alert.get('buy_url') or 'n/a'}")
+                    st.write(f"Sell: {alert.get('sell_url') or 'n/a'}")
+            else:
+                st.success("No new alerts triggered in this cycle.")
+
+        st.autorefresh(interval=int(cycle_interval_min * 60 * 1000), key="continuous_scan_refresh")
 
 # ---------- Results ----------
 st.divider()
