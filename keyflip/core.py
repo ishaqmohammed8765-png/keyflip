@@ -325,6 +325,15 @@ def scan_watchlist(
         if c not in watch.columns:
             watch[c] = "" if c in ("eneba_url", "eneba_notes", "buy_site", "buy_trust") else None
 
+    watch["title"] = watch["title"].map(_to_str)
+    watch["buy_url"] = watch["buy_url"].map(_to_str)
+    watch["buy_price_gbp"] = watch["buy_price_gbp"].map(_to_float)
+    watch["buy_notes"] = watch["buy_notes"].map(_to_str)
+    watch["buy_site"] = watch["buy_site"].map(_to_str)
+    watch["buy_trust"] = watch["buy_trust"].map(_to_str)
+    watch["eneba_url"] = watch["eneba_url"].map(_to_str)
+    watch["eneba_notes"] = watch["eneba_notes"].map(_to_str)
+
     scan_limit = _cfg_int(cfg, "scan_limit", 0)
     refresh_buy_price = _cfg_bool(cfg, "refresh_buy_price", False)
     per_item_sleep_s = _cfg_float(cfg, "scan_sleep_s", 0.0)
@@ -382,17 +391,18 @@ def scan_watchlist(
 
     with PriceCache(db_path) as cache:
         try:
-            for idx, r in watch.iterrows():
+            for r in watch.itertuples(index=True):
                 if scan_limit > 0 and attempted >= scan_limit:
                     break
 
-                title = _to_str(r.get("title", ""))
-                buy_url = _to_str(r.get("buy_url", ""))
+                idx = r.Index
+                title = r.title
+                buy_url = r.buy_url
 
-                buy_price = _to_float(r.get("buy_price_gbp", None))
-                buy_notes = _to_str(r.get("buy_notes", ""))
-                buy_site = _to_str(r.get("buy_site", ""))
-                buy_trust = _to_str(r.get("buy_trust", ""))
+                buy_price = r.buy_price_gbp
+                buy_notes = r.buy_notes
+                buy_site = r.buy_site
+                buy_trust = r.buy_trust
 
                 recent_key = buy_url or title
                 if recent_key and avoid_recent_days > 0 and cache.is_recent(recent_key, avoid_recent_days):
@@ -425,8 +435,8 @@ def scan_watchlist(
                             watch.at[idx, "buy_trust"] = buy_trust
                             watchlist_dirty = True
 
-                existing_eneba_url = _to_str(r.get("eneba_url", ""))
-                existing_eneba_notes = _to_str(r.get("eneba_notes", ""))
+                existing_eneba_url = r.eneba_url
+                existing_eneba_notes = r.eneba_notes
 
                 store_url = make_store_search_url(title)
                 prod_url: Optional[str] = existing_eneba_url or None
