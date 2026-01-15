@@ -10,6 +10,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from keyflip.cache import PriceCache
 from keyflip.config import RunConfig, trusted_buy_sources
@@ -486,7 +487,7 @@ if st.session_state.continuous_scan_enabled:
             else:
                 st.success("No new alerts triggered in this cycle.")
 
-        st.autorefresh(interval=int(cycle_interval_min * 60 * 1000), key="continuous_scan_refresh")
+        st_autorefresh(interval=int(cycle_interval_min * 60 * 1000), key="continuous_scan_refresh")
 
 # ---------- Results ----------
 st.divider()
