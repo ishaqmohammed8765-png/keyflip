@@ -37,6 +37,9 @@ class RunSettings:
     allow_non_gbp: bool = False
     gbp_exchange_rate: float = DEFAULT_GBP_EXCHANGE_RATE
     currency_whitelist: tuple[str, ...] = ("GBP",)
+    blocked_keywords: tuple[str, ...] = ()
+    min_seller_feedback_pct: Optional[float] = None
+    min_seller_feedback_score: Optional[int] = None
 
 
 @dataclass(slots=True)

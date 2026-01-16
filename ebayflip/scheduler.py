@@ -18,7 +18,7 @@ from ebayflip.db import (
     upsert_listing,
     was_alert_sent,
 )
-from ebayflip.ebay_client import EbayClient
+from ebayflip.ebay_client import EbayClient, SearchAttemptLog, SearchResult
 from ebayflip.models import CompStats, Evaluation, Listing, Target
 from ebayflip.scoring import evaluate_listing
 
@@ -34,6 +34,7 @@ class ScanSummary:
     last_scan: str
     scanned_listings: list["ScannedListing"]
     request_cap_reached: bool
+    zero_result_debug: list["TargetSearchDebug"]
 
 
 @dataclass(slots=True)
@@ -46,6 +47,18 @@ class ScannedListing:
     condition: Optional[str] = None
 
 
+@dataclass(slots=True)
+class TargetSearchDebug:
+    target_name: str
+    target_query: str
+    retry_report: list[str]
+    diagnostics: list[SearchAttemptLog]
+    rejection_counts: dict[str, int]
+    raw_count: int
+    filtered_count: int
+    last_request_url: Optional[str]
+
+
 def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
     init_db(config.db_path)
     targets = [target for target in list_targets(config.db_path) if target.enabled]
@@ -56,6 +69,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
     scanned_targets = 0
     request_cap_reached = False
     scanned_listings: list[ScannedListing] = []
+    zero_result_debug: list[TargetSearchDebug] = []
 
     for target in targets:
         if stop_scan:
@@ -65,11 +79,25 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             request_cap_reached = True
             break
         scanned_targets += 1
-        listings = client.search_active_listings(target)
+        search_result: SearchResult = client.search_active_listings(target)
+        listings = search_result.listings
         if client.request_cap_reached:
             request_cap_reached = True
             stop_scan = True
             break
+        if not listings:
+            zero_result_debug.append(
+                TargetSearchDebug(
+                    target_name=target.name,
+                    target_query=target.query,
+                    retry_report=search_result.retry_report,
+                    diagnostics=search_result.diagnostics,
+                    rejection_counts=search_result.rejection_counts,
+                    raw_count=search_result.raw_count,
+                    filtered_count=search_result.filtered_count,
+                    last_request_url=search_result.last_request_url,
+                )
+            )
         for listing in listings:
             listing_id, is_new = upsert_listing(config.db_path, listing)
             if is_new:
@@ -117,6 +145,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
         last_scan=datetime.utcnow().isoformat(),
         scanned_listings=scanned_listings,
         request_cap_reached=request_cap_reached,
+        zero_result_debug=zero_result_debug,
     )
 
 
