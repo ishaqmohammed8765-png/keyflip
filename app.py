@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -30,6 +31,13 @@ from ebayflip.db import (
 from ebayflip.ebay_client import EbayClient
 from ebayflip.models import Target
 from ebayflip.scheduler import run_scan
+from ebayflip.taxonomy import (
+    Category,
+    ensure_categories_loaded,
+    get_category_path,
+    get_child_categories,
+    get_top_categories,
+)
 
 LOGGER = get_logger()
 ROOT_DIR = Path(__file__).parent
@@ -65,6 +73,77 @@ def build_config() -> AppConfig:
 
 def build_client() -> EbayClient:
     return EbayClient(st.session_state.settings, app_id=os.getenv("EBAY_APP_ID"))
+
+
+def _format_category_option(option: Optional[Category]) -> str:
+    return "Any" if option is None else option.name
+
+
+def _category_selectbox(
+    label: str,
+    options: list[Category],
+    selected_category_id: Optional[str],
+    key: str,
+) -> Optional[Category]:
+    choices: list[Optional[Category]] = [None] + options
+    index = 0
+    if selected_category_id:
+        for idx, option in enumerate(choices):
+            if option and option.category_id == selected_category_id:
+                index = idx
+                break
+    return st.selectbox(label, choices, index=index, format_func=_format_category_option, key=key)
+
+
+def _render_category_picker(
+    prefix: str,
+    selected_category_id: Optional[str],
+) -> Optional[str]:
+    top_categories = get_top_categories()
+    selected_path = get_category_path(selected_category_id) if selected_category_id else []
+
+    selected_top = _category_selectbox(
+        "Category",
+        top_categories,
+        selected_path[0].category_id if selected_path else None,
+        key=f"{prefix}_category",
+    )
+
+    selected_sub: Optional[Category] = None
+    child_categories = get_child_categories(selected_top.category_id) if selected_top else []
+    if child_categories:
+        selected_sub = _category_selectbox(
+            "Subcategory",
+            child_categories,
+            selected_path[1].category_id if len(selected_path) > 1 else None,
+            key=f"{prefix}_subcategory",
+        )
+
+    selected_sub_sub: Optional[Category] = None
+    sub_children = get_child_categories(selected_sub.category_id) if selected_sub else []
+    if sub_children:
+        selected_sub_sub = _category_selectbox(
+            "Sub-subcategory",
+            sub_children,
+            selected_path[2].category_id if len(selected_path) > 2 else None,
+            key=f"{prefix}_subsubcategory",
+        )
+
+    chosen = selected_sub_sub or selected_sub or selected_top
+    if chosen:
+        category_path = " \u203a ".join(category.name for category in get_category_path(chosen.category_id))
+        st.caption(f"Selected category: {category_path}")
+        return chosen.category_id
+    return None
+
+
+def _format_category_path(category_id: Optional[str]) -> str:
+    if not category_id:
+        return "-"
+    path = get_category_path(category_id)
+    if not path:
+        return category_id
+    return " \u203a ".join(category.name for category in path)
 
 
 st.sidebar.header("Scan Controls")
@@ -147,16 +226,21 @@ with Tabs[0]:
 with Tabs[1]:
     st.subheader("Targets")
     targets = list_targets(DB_PATH)
+    categories_ready = ensure_categories_loaded(DB_PATH)
     target_df = pd.DataFrame([dataclasses.asdict(t) for t in targets]) if targets else pd.DataFrame()
     if target_df.empty:
         st.info("No targets yet. Add one below.")
     else:
+        if categories_ready:
+            target_df["category"] = target_df["category_id"].apply(_format_category_path)
+        else:
+            target_df["category"] = target_df["category_id"].fillna("-")
         st.dataframe(
             target_df[[
                 "id",
                 "name",
                 "query",
-                "category_id",
+                "category",
                 "condition",
                 "max_buy_gbp",
                 "shipping_max_gbp",
@@ -172,7 +256,11 @@ with Tabs[1]:
         with st.form("add_target_form"):
             name = st.text_input("Name")
             query = st.text_input("Keywords")
-            category_id = st.text_input("Category ID (optional)")
+            if categories_ready:
+                category_id = _render_category_picker("add", None)
+            else:
+                st.warning("Category list unavailable. Category filters are disabled for now.")
+                category_id = None
             condition = st.text_input("Condition (optional)")
             max_buy_gbp = st.number_input("Max buy (£)", min_value=0.0, value=0.0, step=1.0)
             shipping_max_gbp = st.number_input("Max shipping (£)", min_value=0.0, value=0.0, step=1.0)
@@ -203,7 +291,11 @@ with Tabs[1]:
             with st.form("edit_target_form"):
                 name = st.text_input("Name", value=selected.name)
                 query = st.text_input("Keywords", value=selected.query)
-                category_id = st.text_input("Category ID", value=selected.category_id or "")
+                if categories_ready:
+                    category_id = _render_category_picker("edit", selected.category_id)
+                else:
+                    st.warning("Category list unavailable. Keeping existing category filter.")
+                    category_id = selected.category_id
                 condition = st.text_input("Condition", value=selected.condition or "")
                 max_buy_gbp = st.number_input(
                     "Max buy (£)",

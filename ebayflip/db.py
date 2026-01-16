@@ -45,6 +45,23 @@ def init_db(db_path: str) -> None:
         )
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category_id TEXT UNIQUE,
+                name TEXT,
+                parent_id TEXT,
+                level INTEGER
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_categories_parent
+            ON categories(parent_id)
+            """
+        )
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS listings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ebay_item_id TEXT UNIQUE,

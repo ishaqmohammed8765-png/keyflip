@@ -1,0 +1,74 @@
+[
+  {
+    "category_id": "293",
+    "name": "Electronics",
+    "parent_id": null,
+    "level": 0
+  },
+  {
+    "category_id": "1249",
+    "name": "Video Games & Consoles",
+    "parent_id": "293",
+    "level": 1
+  },
+  {
+    "category_id": "139971",
+    "name": "Consoles",
+    "parent_id": "1249",
+    "level": 2
+  },
+  {
+    "category_id": "139973",
+    "name": "Games",
+    "parent_id": "1249",
+    "level": 2
+  },
+  {
+    "category_id": "9355",
+    "name": "Phones & Accessories",
+    "parent_id": "293",
+    "level": 1
+  },
+  {
+    "category_id": "15032",
+    "name": "Mobile Phones",
+    "parent_id": "9355",
+    "level": 2
+  },
+  {
+    "category_id": "58058",
+    "name": "Computers/Tablets & Networking",
+    "parent_id": null,
+    "level": 0
+  },
+  {
+    "category_id": "175673",
+    "name": "Laptops & Netbooks",
+    "parent_id": "58058",
+    "level": 1
+  },
+  {
+    "category_id": "175672",
+    "name": "PC Laptops & Netbooks",
+    "parent_id": "175673",
+    "level": 2
+  },
+  {
+    "category_id": "11450",
+    "name": "Clothing, Shoes & Accessories",
+    "parent_id": null,
+    "level": 0
+  },
+  {
+    "category_id": "15724",
+    "name": "Men's Clothing",
+    "parent_id": "11450",
+    "level": 1
+  },
+  {
+    "category_id": "1059",
+    "name": "Men's Shoes",
+    "parent_id": "11450",
+    "level": 1
+  }
+]
