@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import statistics
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,9 +21,6 @@ from .config import (
 from .ebay_api import EbayApiClient, parse_iso8601
 
 log = logging.getLogger("keyflip.core")
-
-WATCHLIST_COLS = DEFAULT_WATCHLIST_COLUMNS
-SCANS_COLS = DEFAULT_SCANS_COLUMNS
 
 
 @dataclass(frozen=True)
@@ -46,6 +42,18 @@ class SoldCompStats:
     median_gbp: Optional[float]
     sample_size: int
     variance_ratio: float
+
+
+@dataclass(frozen=True)
+class ScanContext:
+    now_iso: str
+    query: WatchlistQuery
+    listing: Any
+    comp_stats: SoldCompStats
+    price_gbp: Optional[float]
+    shipping_gbp: Optional[float]
+    total_gbp: Optional[float]
+    flags: Dict[str, Any]
 
 
 WATCHLIST_TEMPLATE = [
@@ -158,90 +166,37 @@ def scan_watchlist(
                     cfg,
                 )
                 flags["currency"] = currency
+                scan_context = ScanContext(
+                    now_iso=now_iso,
+                    query=query,
+                    listing=listing,
+                    comp_stats=comp_stats,
+                    price_gbp=price_gbp,
+                    shipping_gbp=shipping_gbp,
+                    total_gbp=total_gbp,
+                    flags=flags,
+                )
 
                 if total_gbp is None:
-                    passes_rows.append(
-                        _pass_row(
-                            now_iso,
-                            query,
-                            listing,
-                            reason="missing_price",
-                            price_gbp=price_gbp,
-                            shipping_gbp=shipping_gbp,
-                            total_gbp=total_gbp,
-                        )
-                    )
-                    scans_rows.append(_scan_row(now_iso, query, listing, comp_stats, None, None, None, flags))
+                    _record_pass(scans_rows, passes_rows, scan_context, reason="missing_price")
                     continue
 
                 if not _matches_keywords(listing.title, query.keywords_include, query.keywords_exclude):
-                    passes_rows.append(
-                        _pass_row(
-                            now_iso,
-                            query,
-                            listing,
-                            reason="keyword_filter",
-                            price_gbp=price_gbp,
-                            shipping_gbp=shipping_gbp,
-                            total_gbp=total_gbp,
-                        )
-                    )
-                    scans_rows.append(
-                        _scan_row(now_iso, query, listing, comp_stats, price_gbp, shipping_gbp, total_gbp, flags)
-                    )
+                    _record_pass(scans_rows, passes_rows, scan_context, reason="keyword_filter")
                     continue
 
                 max_buy = query.max_buy_gbp
                 if max_buy is not None and total_gbp > max_buy:
-                    passes_rows.append(
-                        _pass_row(
-                            now_iso,
-                            query,
-                            listing,
-                            reason="over_max_buy",
-                            price_gbp=price_gbp,
-                            shipping_gbp=shipping_gbp,
-                            total_gbp=total_gbp,
-                        )
-                    )
-                    scans_rows.append(
-                        _scan_row(now_iso, query, listing, comp_stats, price_gbp, shipping_gbp, total_gbp, flags)
-                    )
+                    _record_pass(scans_rows, passes_rows, scan_context, reason="over_max_buy")
                     continue
 
                 if not comp_stats.median_gbp:
-                    passes_rows.append(
-                        _pass_row(
-                            now_iso,
-                            query,
-                            listing,
-                            reason="no_sold_comps",
-                            price_gbp=price_gbp,
-                            shipping_gbp=shipping_gbp,
-                            total_gbp=total_gbp,
-                        )
-                    )
-                    scans_rows.append(
-                        _scan_row(now_iso, query, listing, comp_stats, price_gbp, shipping_gbp, total_gbp, flags)
-                    )
+                    _record_pass(scans_rows, passes_rows, scan_context, reason="no_sold_comps")
                     continue
 
                 min_comp = query.min_sold_comp_gbp
                 if min_comp is not None and comp_stats.median_gbp < min_comp:
-                    passes_rows.append(
-                        _pass_row(
-                            now_iso,
-                            query,
-                            listing,
-                            reason="below_comp_floor",
-                            price_gbp=price_gbp,
-                            shipping_gbp=shipping_gbp,
-                            total_gbp=total_gbp,
-                        )
-                    )
-                    scans_rows.append(
-                        _scan_row(now_iso, query, listing, comp_stats, price_gbp, shipping_gbp, total_gbp, flags)
-                    )
+                    _record_pass(scans_rows, passes_rows, scan_context, reason="below_comp_floor")
                     continue
 
                 profit, roi = compute_profit(
@@ -254,61 +209,25 @@ def scan_watchlist(
                 score = _compute_score(cfg, profit, roi, listing.start_time, comp_stats)
 
                 scans_rows.append(
-                    _scan_row(
-                        now_iso,
-                        query,
-                        listing,
-                        comp_stats,
-                        price_gbp,
-                        shipping_gbp,
-                        total_gbp,
-                        flags,
-                        profit=profit,
-                        roi=roi,
-                        score=score,
-                    )
+                    _scan_row(scan_context, profit=profit, roi=roi, score=score)
                 )
 
                 min_profit = query.min_profit_gbp
                 min_roi = query.min_roi
                 if profit < (min_profit or cfg.min_profit_gbp):
                     passes_rows.append(
-                        _pass_row(
-                            now_iso,
-                            query,
-                            listing,
-                            reason="min_profit",
-                            price_gbp=price_gbp,
-                            shipping_gbp=shipping_gbp,
-                            total_gbp=total_gbp,
-                        )
+                        _pass_row(scan_context, reason="min_profit")
                     )
                     continue
                 if roi < (min_roi or cfg.min_roi):
                     passes_rows.append(
-                        _pass_row(
-                            now_iso,
-                            query,
-                            listing,
-                            reason="min_roi",
-                            price_gbp=price_gbp,
-                            shipping_gbp=shipping_gbp,
-                            total_gbp=total_gbp,
-                        )
+                        _pass_row(scan_context, reason="min_roi")
                     )
                     continue
 
                 if cache.is_recent(_listing_cache_key(listing), cfg.alert_cooldown_days):
                     passes_rows.append(
-                        _pass_row(
-                            now_iso,
-                            query,
-                            listing,
-                            reason="duplicate_listing",
-                            price_gbp=price_gbp,
-                            shipping_gbp=shipping_gbp,
-                            total_gbp=total_gbp,
-                        )
+                        _pass_row(scan_context, reason="duplicate_listing")
                     )
                     continue
 
@@ -457,16 +376,12 @@ def _normalize_prices(
     if price is None:
         return None, None, None, currency
     shipping_cost = shipping or 0.0
-    cur = (currency or "GBP").upper()
-    if cur != "GBP":
-        if not cfg.allow_non_gbp:
-            return None, None, None, cur
-        rate = cfg.rate_to_gbp(cur)
-        if not rate:
-            return None, None, None, cur
-        price = price * rate
-        shipping_cost = shipping_cost * rate
-        cur = "GBP"
+    price, cur = _convert_to_gbp(price, currency, cfg)
+    if price is None:
+        return None, None, None, cur
+    shipping_cost, _ = _convert_to_gbp(shipping_cost, cur, cfg)
+    if shipping_cost is None:
+        return None, None, None, cur
     total = price + shipping_cost
     return price, shipping_cost, total, cur
 
@@ -476,14 +391,9 @@ def _prices_to_gbp(items: Iterable[tuple[Optional[float], Optional[str]]], cfg: 
     for value, currency in items:
         if value is None:
             continue
-        cur = (currency or "GBP").upper()
-        if cur != "GBP":
-            if not cfg.allow_non_gbp:
-                continue
-            rate = cfg.rate_to_gbp(cur)
-            if not rate:
-                continue
-            value = value * rate
+        value, cur = _convert_to_gbp(value, currency, cfg)
+        if value is None:
+            continue
         prices.append(float(value))
     return prices
 
@@ -515,59 +425,70 @@ def _freshness_score(start_time: Optional[str], half_life_hours: float) -> float
 
 
 def _scan_row(
-    now_iso: str,
-    query: WatchlistQuery,
-    listing: Any,
-    comp_stats: SoldCompStats,
-    price_gbp: Optional[float],
-    shipping_gbp: Optional[float],
-    total_gbp: Optional[float],
-    flags: Dict[str, Any],
+    context: ScanContext,
     *,
     profit: Optional[float] = None,
     roi: Optional[float] = None,
     score: Optional[float] = None,
 ) -> Dict[str, Any]:
     return {
-        "scanned_at_iso": now_iso,
-        "query_id": query.query_id,
-        "title": listing.title,
-        "listing_url": listing.listing_url,
-        "price_gbp": price_gbp,
-        "shipping_gbp": shipping_gbp,
-        "total_gbp": total_gbp,
-        "condition": listing.condition,
-        "end_time_iso": listing.end_time,
-        "seller_feedback": listing.seller_feedback,
-        "location": listing.location,
-        "sold_comp_median_gbp": comp_stats.median_gbp,
+        "scanned_at_iso": context.now_iso,
+        "query_id": context.query.query_id,
+        "title": context.listing.title,
+        "listing_url": context.listing.listing_url,
+        "price_gbp": context.price_gbp,
+        "shipping_gbp": context.shipping_gbp,
+        "total_gbp": context.total_gbp,
+        "condition": context.listing.condition,
+        "end_time_iso": context.listing.end_time,
+        "seller_feedback": context.listing.seller_feedback,
+        "location": context.listing.location,
+        "sold_comp_median_gbp": context.comp_stats.median_gbp,
         "est_profit_gbp": profit,
         "est_roi": roi,
         "score": score,
-        "flags_json": json.dumps(flags),
+        "flags_json": json.dumps(context.flags),
     }
 
 
 def _pass_row(
-    now_iso: str,
-    query: WatchlistQuery,
-    listing: Any,
+    context: ScanContext,
     *,
     reason: str,
-    price_gbp: Optional[float] = None,
-    shipping_gbp: Optional[float] = None,
-    total_gbp: Optional[float] = None,
 ) -> Dict[str, Any]:
     return {
-        "scanned_at_iso": now_iso,
-        "query_id": query.query_id,
-        "title": listing.title,
-        "listing_url": listing.listing_url,
-        "price_gbp": price_gbp,
-        "shipping_gbp": shipping_gbp,
-        "total_gbp": total_gbp,
+        "scanned_at_iso": context.now_iso,
+        "query_id": context.query.query_id,
+        "title": context.listing.title,
+        "listing_url": context.listing.listing_url,
+        "price_gbp": context.price_gbp,
+        "shipping_gbp": context.shipping_gbp,
+        "total_gbp": context.total_gbp,
         "reason": reason,
     }
+
+
+def _record_pass(
+    scans_rows: list[Dict[str, Any]],
+    passes_rows: list[Dict[str, Any]],
+    context: ScanContext,
+    *,
+    reason: str,
+) -> None:
+    passes_rows.append(_pass_row(context, reason=reason))
+    scans_rows.append(_scan_row(context))
+
+
+def _convert_to_gbp(value: float, currency: Optional[str], cfg: RunConfig) -> tuple[Optional[float], str]:
+    cur = (currency or "GBP").upper()
+    if cur == "GBP":
+        return value, "GBP"
+    if not cfg.allow_non_gbp:
+        return None, cur
+    rate = cfg.rate_to_gbp(cur)
+    if not rate:
+        return None, cur
+    return value * rate, "GBP"
 
 
 def _listing_cache_key(listing: Any) -> str:
