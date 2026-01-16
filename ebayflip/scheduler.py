@@ -32,6 +32,16 @@ class ScanSummary:
     evaluated: int
     deals: int
     last_scan: str
+    scanned_listings: list["ScannedListing"]
+
+
+@dataclass(slots=True)
+class ScannedListing:
+    title: str
+    url: str
+    target_name: str
+    total_buy_gbp: float
+    condition: Optional[str] = None
 
 
 def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
@@ -41,6 +51,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
     evaluated = 0
     deals = 0
     stop_scan = False
+    scanned_listings: list[ScannedListing] = []
 
     for target in targets:
         if stop_scan:
@@ -70,6 +81,15 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             evaluation = evaluate_listing(listing, comps, config.run)
             insert_evaluation(config.db_path, listing_id, evaluation)
             evaluated += 1
+            scanned_listings.append(
+                ScannedListing(
+                    title=listing.title or "Untitled listing",
+                    url=listing.url,
+                    target_name=target.name,
+                    total_buy_gbp=listing.total_buy_gbp,
+                    condition=listing.condition,
+                )
+            )
             if evaluation.decision == "deal":
                 deals += 1
                 _send_alert_if_needed(config, listing_id, listing, evaluation)
@@ -80,6 +100,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
         evaluated=evaluated,
         deals=deals,
         last_scan=datetime.utcnow().isoformat(),
+        scanned_listings=scanned_listings,
     )
 
 
