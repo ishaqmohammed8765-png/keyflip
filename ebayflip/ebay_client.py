@@ -20,11 +20,16 @@ FINDING_ENDPOINT = "https://svcs.ebay.com/services/search/FindingService/v1"
 HTML_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
 
 
+class RequestLimitError(RuntimeError):
+    pass
+
+
 class EbayClient:
     def __init__(self, settings: RunSettings, app_id: Optional[str] = None) -> None:
         self.settings = settings
         self.app_id = app_id
         self.request_count = 0
+        self.request_cap_reached = False
         self.cache = CacheStore(".cache/ebayflip_cache.sqlite", ttl_seconds=600)
         self.session = requests.Session()
         self.session.headers.update(
@@ -41,6 +46,9 @@ class EbayClient:
         cached = self.cache.get(cache_key)
         if cached:
             return _cached_to_response(cached)
+        if self.request_count >= self.settings.request_cap:
+            self.request_cap_reached = True
+            raise RequestLimitError("Request cap reached.")
         delay = random.uniform(0.6, 1.4)
         time.sleep(delay)
         response = self.session.get(url, params=params, timeout=20)
@@ -54,9 +62,15 @@ class EbayClient:
             if self.app_id:
                 try:
                     return self._search_active_api(target)
+                except RequestLimitError as exc:
+                    LOGGER.info("Request cap reached during API listing search: %s", exc)
+                    return []
                 except Exception as exc:
                     LOGGER.warning("API search failed, falling back to HTML: %s", exc)
             return self._search_active_html(target)
+        except RequestLimitError as exc:
+            LOGGER.info("Request cap reached during HTML listing search: %s", exc)
+            return []
         except requests.RequestException as exc:
             LOGGER.warning("Active listing search failed: %s", exc)
             return []
@@ -69,9 +83,15 @@ class EbayClient:
             if self.app_id:
                 try:
                     return self._search_sold_api(comp_query)
+                except RequestLimitError as exc:
+                    LOGGER.info("Request cap reached during API comps search: %s", exc)
+                    return []
                 except Exception as exc:
                     LOGGER.warning("API comps failed, falling back to HTML: %s", exc)
             return self._search_sold_html(comp_query)
+        except RequestLimitError as exc:
+            LOGGER.info("Request cap reached during HTML comps search: %s", exc)
+            return []
         except requests.RequestException as exc:
             LOGGER.warning("Sold comps search failed: %s", exc)
             return []
