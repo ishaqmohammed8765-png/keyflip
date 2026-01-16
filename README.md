@@ -10,6 +10,7 @@ Streamlit app that scans eBay listings for underpriced items, estimates resale v
 - Discord webhook alerts for new deals.
 - SQLite persistence for targets, listings, comps, evaluations, and alerts.
 - HTML fallback when eBay API credentials are not available.
+- Hierarchical category selection (Category → Subcategory → Sub-subcategory) with cached taxonomy.
 
 ## Quick start
 ```bash
@@ -22,6 +23,7 @@ The app uses the eBay Finding API when `EBAY_APP_ID` is available. Without crede
 
 ```bash
 export EBAY_APP_ID=your_app_id_here
+export EBAY_OAUTH_TOKEN=your_taxonomy_oauth_token
 export DISCORD_WEBHOOK_URL=your_discord_webhook
 ```
 
@@ -34,6 +36,13 @@ export DISCORD_WEBHOOK_URL=your_discord_webhook
 - Requests are rate limited with randomized delays.
 - Total request cap per scan defaults to 40 and is configurable in Settings.
 - Responses are cached in a local SQLite HTTP cache (10 minute TTL) to avoid re-fetching.
+- eBay categories are cached in SQLite after the first successful taxonomy load.
+
+## Category selection
+- The Targets form uses a dropdown-driven category tree (up to 3 levels deep).
+- Category IDs are stored internally; users select human-readable category names only.
+- If taxonomy credentials are missing, the app loads a small bundled fallback list.
+- If taxonomy loading fails, category selection is hidden and scans run with keywords only.
 
 ## Limitations
 - HTML fallback parsing is best-effort and can miss some data.
@@ -55,4 +64,7 @@ ebayflip/
   alerts.py
   scheduler.py
   models.py
+  taxonomy.py
+  data/
+    ebay_categories_fallback.json
 ```
