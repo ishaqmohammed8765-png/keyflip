@@ -41,6 +41,7 @@ class ScannedListing:
     url: str
     target_name: str
     total_buy_gbp: float
+    decision: str
     condition: Optional[str] = None
 
 
@@ -87,6 +88,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
                     url=listing.url,
                     target_name=target.name,
                     total_buy_gbp=listing.total_buy_gbp,
+                    decision=evaluation.decision,
                     condition=listing.condition,
                 )
             )
