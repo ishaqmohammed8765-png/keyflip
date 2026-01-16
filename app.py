@@ -51,6 +51,8 @@ if "auto_scan" not in st.session_state:
     st.session_state.auto_scan = False
 if "auto_scan_interval" not in st.session_state:
     st.session_state.auto_scan_interval = DEFAULT_SCAN_INTERVAL_MIN
+if "last_scan_listings" not in st.session_state:
+    st.session_state.last_scan_listings = []
 
 if "settings" not in st.session_state:
     st.session_state.settings = RunSettings()
@@ -180,6 +182,7 @@ if run_scan_now:
     with st.spinner("Scanning eBay..."):
         summary = run_scan(config, client)
     st.session_state.last_scan = summary.last_scan
+    st.session_state.last_scan_listings = summary.scanned_listings
     _load_evaluations.clear()
     _load_comps.clear()
     st.success(
@@ -198,6 +201,7 @@ if st.session_state.auto_scan:
             with st.spinner("Auto-scan running..."):
                 summary = run_scan(config, client)
             st.session_state.last_scan = summary.last_scan
+            st.session_state.last_scan_listings = summary.scanned_listings
             _load_evaluations.clear()
             _load_comps.clear()
     else:
@@ -222,6 +226,20 @@ with Tabs[0]:
     col1.metric("Enabled targets", sum(1 for t in targets if t.enabled))
     col2.metric("Deals today", deals_today)
     col3.metric("Last scan", st.session_state.last_scan or "-")
+
+    st.subheader("Last Scan Listings")
+    scan_listings = st.session_state.get("last_scan_listings", [])
+    if scan_listings:
+        scan_df = pd.DataFrame([dataclasses.asdict(listing) for listing in scan_listings])
+        display_scan = scan_df[["title", "target_name", "total_buy_gbp", "condition", "url"]].rename(
+            columns={
+                "target_name": "target",
+                "total_buy_gbp": "total_buy_gbp",
+            }
+        )
+        st.dataframe(display_scan, use_container_width=True, height=260)
+    else:
+        st.info("Run a scan to see which listings were evaluated.")
 
     st.subheader("Recent Deals")
     if eval_df.empty:
