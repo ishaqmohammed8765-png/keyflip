@@ -69,7 +69,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             if is_new:
                 new_listings += 1
             comps = get_latest_comps(config.db_path, listing_id)
-            if comps is None:
+            if comps is None or _comps_stale(comps.computed_at, config.run.comps_ttl_hours):
                 if client.request_count >= config.run.request_cap:
                     LOGGER.info("Request cap reached before comps search.")
                     stop_scan = True
@@ -126,3 +126,14 @@ def _comp_query_for_listing(listing: Listing, target: Target) -> str:
     if listing.title:
         return listing.title.strip() or target.query
     return target.query
+
+
+def _comps_stale(computed_at: Optional[str], ttl_hours: int) -> bool:
+    if not computed_at:
+        return True
+    try:
+        computed_time = datetime.fromisoformat(computed_at)
+    except ValueError:
+        return True
+    age = datetime.utcnow() - computed_time
+    return age.total_seconds() >= ttl_hours * 3600
