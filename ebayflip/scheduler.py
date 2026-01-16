@@ -63,8 +63,9 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
                     LOGGER.info("Request cap reached before comps search.")
                     stop_scan = True
                     break
-                comps_list = client.search_sold_comps(target.query)
-                comps = compute_comp_stats(target.query, comps_list)
+                comp_query = _comp_query_for_listing(listing, target)
+                comps_list = client.search_sold_comps(comp_query)
+                comps = compute_comp_stats(comp_query, comps_list)
                 insert_comps(config.db_path, listing_id, comps)
             evaluation = evaluate_listing(listing, comps, config.run)
             insert_evaluation(config.db_path, listing_id, evaluation)
@@ -98,3 +99,9 @@ def _send_alert_if_needed(config: AppConfig, listing_id: int, listing: Listing, 
     )
     if sent:
         mark_alert_sent(config.db_path, listing_id, "discord")
+
+
+def _comp_query_for_listing(listing: Listing, target: Target) -> str:
+    if listing.title:
+        return listing.title.strip() or target.query
+    return target.query
