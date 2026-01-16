@@ -66,6 +66,10 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             break
         scanned_targets += 1
         listings = client.search_active_listings(target)
+        if client.request_cap_reached:
+            request_cap_reached = True
+            stop_scan = True
+            break
         for listing in listings:
             listing_id, is_new = upsert_listing(config.db_path, listing)
             if is_new:
@@ -100,6 +104,10 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             if evaluation.decision == "deal":
                 deals += 1
                 _send_alert_if_needed(config, listing_id, listing, evaluation)
+            if client.request_cap_reached:
+                request_cap_reached = True
+                stop_scan = True
+                break
 
     return ScanSummary(
         scanned_targets=scanned_targets,
