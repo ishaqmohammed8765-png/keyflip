@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from datetime import datetime
@@ -146,7 +147,7 @@ with Tabs[0]:
 with Tabs[1]:
     st.subheader("Targets")
     targets = list_targets(DB_PATH)
-    target_df = pd.DataFrame([t.__dict__ for t in targets]) if targets else pd.DataFrame()
+    target_df = pd.DataFrame([dataclasses.asdict(t) for t in targets]) if targets else pd.DataFrame()
     if target_df.empty:
         st.info("No targets yet. Add one below.")
     else:
