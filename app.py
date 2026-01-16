@@ -276,7 +276,7 @@ if st.session_state.auto_scan:
         st.info("Auto-scan enabled. A scan will run on the next refresh.")
 
 
-Tabs = st.tabs(["Dashboard", "Targets", "Deals Feed", "Settings"])
+Tabs = st.tabs(["Dashboard", "Targets", "Deals Feed", "Scan Misses", "Settings"])
 
 with Tabs[0]:
     targets = _load_targets(DB_PATH)
@@ -299,7 +299,11 @@ with Tabs[0]:
     scan_listings = st.session_state.get("last_scan_listings", [])
     if scan_listings:
         scan_df = pd.DataFrame([dataclasses.asdict(listing) for listing in scan_listings])
-        display_scan = scan_df[["title", "target_name", "total_buy_gbp", "condition", "url"]].rename(
+        if "decision" not in scan_df.columns:
+            scan_df["decision"] = "-"
+        display_scan = scan_df[
+            ["title", "target_name", "decision", "total_buy_gbp", "condition", "url"]
+        ].rename(
             columns={
                 "target_name": "target",
                 "total_buy_gbp": "total_buy_gbp",
@@ -520,6 +524,29 @@ with Tabs[2]:
                     st.info("No comps stored.")
 
 with Tabs[3]:
+    st.subheader("Scan Misses")
+    scan_listings = st.session_state.get("last_scan_listings", [])
+    if scan_listings:
+        scan_df = pd.DataFrame([dataclasses.asdict(listing) for listing in scan_listings])
+        if "decision" not in scan_df.columns:
+            scan_df["decision"] = "-"
+        misses = scan_df[scan_df["decision"] != "deal"].copy()
+        if misses.empty:
+            st.info("All scanned listings were marked as deals.")
+        else:
+            display_misses = misses[
+                ["title", "target_name", "decision", "total_buy_gbp", "condition", "url"]
+            ].rename(
+                columns={
+                    "target_name": "target",
+                    "total_buy_gbp": "total_buy_gbp",
+                }
+            )
+            st.dataframe(display_misses, use_container_width=True, height=320)
+    else:
+        st.info("Run a scan to see which listings were evaluated.")
+
+with Tabs[4]:
     st.subheader("Settings")
     settings = st.session_state.settings
     alert_settings = st.session_state.alerts
