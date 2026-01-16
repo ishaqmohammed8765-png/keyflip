@@ -1,243 +1,347 @@
 from __future__ import annotations
 
-import time
+import json
+import os
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-from keyflip.config import (
-    DEFAULT_PASSES_COLUMNS,
-    DEFAULT_SCANS_COLUMNS,
-    DEFAULT_WATCHLIST_COLUMNS,
-    RunConfig,
+from ebayflip import get_logger
+from ebayflip.config import (
+    AlertSettings,
+    AppConfig,
+    RunSettings,
+    DEFAULT_SCAN_INTERVAL_MIN,
+    MIN_CONFIDENCE,
+    MIN_PROFIT_GBP,
+    MIN_ROI,
 )
-from keyflip.core import build_watchlist, scan_watchlist
+from ebayflip.db import (
+    delete_target,
+    init_db,
+    list_comps_by_listing,
+    list_evaluations_with_listings,
+    list_targets,
+)
+from ebayflip.ebay_client import EbayClient
+from ebayflip.models import Target
+from ebayflip.scheduler import run_scan
 
-ROOT_DIR = Path(__file__).parent.resolve()
-WATCHLIST_CSV = ROOT_DIR / "watchlist.csv"
-SCANS_CSV = ROOT_DIR / "scans.csv"
-PASSES_CSV = ROOT_DIR / "passes.csv"
-DB_PATH = ROOT_DIR / "price_cache.sqlite"
+LOGGER = get_logger()
+ROOT_DIR = Path(__file__).parent
+DB_PATH = str(ROOT_DIR / "ebayflip.sqlite")
 
+st.set_page_config(page_title="eBay Flip Scanner", layout="wide")
 
-def read_csv_if_present(path: Path) -> Optional[pd.DataFrame]:
-    try:
-        if not path.exists() or path.stat().st_size == 0:
-            return None
-        df = pd.read_csv(path)
-        obj_cols = df.select_dtypes(include=["object"]).columns
-        if len(obj_cols) > 0:
-            df[obj_cols] = df[obj_cols].fillna("")
-        return df
-    except Exception as e:
-        st.error(f"Failed to read `{path.name}`: {type(e).__name__}: {e}")
-        return None
-
-
-def write_watchlist(df: pd.DataFrame) -> None:
-    WATCHLIST_CSV.parent.mkdir(parents=True, exist_ok=True)
-    df.reindex(columns=DEFAULT_WATCHLIST_COLUMNS).to_csv(WATCHLIST_CSV, index=False)
-
-
-def build_config(
-    *,
-    allow_non_gbp: bool,
-    scan_limit: int,
-    rate_limit_per_min: int,
-    min_profit_gbp: float,
-    min_roi: float,
-) -> RunConfig:
-    return RunConfig.from_kwargs(
-        root=ROOT_DIR,
-        allow_non_gbp=allow_non_gbp,
-        scan_limit=scan_limit,
-        rate_limit_per_min=rate_limit_per_min,
-        min_profit_gbp=min_profit_gbp,
-        min_roi=min_roi,
-    )
-
-
-st.set_page_config(page_title="Keyflip", layout="wide")
-
+if "last_scan" not in st.session_state:
+    st.session_state.last_scan = None
 if "auto_scan" not in st.session_state:
     st.session_state.auto_scan = False
-if "last_auto_scan" not in st.session_state:
-    st.session_state.last_auto_scan = 0.0
+if "auto_scan_interval" not in st.session_state:
+    st.session_state.auto_scan_interval = DEFAULT_SCAN_INTERVAL_MIN
 
-st.markdown("## Keyflip — eBay Mispricing Radar")
-st.caption("Manual arbitrage assistant: no auto-buying or auto-selling.")
+if "settings" not in st.session_state:
+    st.session_state.settings = RunSettings()
+if "alerts" not in st.session_state:
+    st.session_state.alerts = AlertSettings(discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL"))
 
-with st.sidebar:
-    st.markdown("### Scan Settings")
-    allow_non_gbp = st.toggle("Convert non-GBP listings", value=False)
-    rate_limit_per_min = st.slider("Rate limit (req/min)", 10, 120, 60, 5)
-    scan_limit = st.slider("Queries per scan", 1, 200, 50, 5)
+init_db(DB_PATH)
 
-    st.markdown("### Deal Thresholds")
-    min_profit_gbp = st.number_input("Min profit (£)", min_value=0.0, max_value=200.0, value=20.0, step=1.0)
-    min_roi = st.number_input("Min ROI", min_value=0.0, max_value=2.0, value=0.2, step=0.05)
-
-    st.markdown("### Watchlist")
-    if st.button("Create watchlist template", use_container_width=True):
-        build_watchlist(build_config(
-            allow_non_gbp=allow_non_gbp,
-            scan_limit=scan_limit,
-            rate_limit_per_min=rate_limit_per_min,
-            min_profit_gbp=min_profit_gbp,
-            min_roi=min_roi,
-        ), WATCHLIST_CSV, overwrite=True)
-        st.success("watchlist.csv template created.")
+st.title("eBay Flip Scanner")
+st.caption("Scan eBay listings for underpriced flips, estimate resale, and alert on deals.")
 
 
-col1, col2, col3 = st.columns([1.1, 1.1, 1.5])
-with col1:
-    run_scan = st.button("Run scan now", use_container_width=True)
-with col2:
-    st.session_state.auto_scan = st.toggle("Auto-scan", value=st.session_state.auto_scan)
-with col3:
-    auto_interval_min = st.number_input("Auto-scan interval (min)", min_value=1, max_value=120, value=10, step=1)
+st.sidebar.header("Scan Controls")
+run_scan_now = st.sidebar.button("Scan now", use_container_width=True)
 
-if run_scan:
-    cfg = build_config(
-        allow_non_gbp=allow_non_gbp,
-        scan_limit=scan_limit,
-        rate_limit_per_min=rate_limit_per_min,
-        min_profit_gbp=min_profit_gbp,
-        min_roi=min_roi,
+st.sidebar.toggle("Auto-scan", key="auto_scan")
+interval_min = st.sidebar.number_input(
+    "Auto-scan interval (minutes)",
+    min_value=1,
+    max_value=120,
+    value=st.session_state.auto_scan_interval,
+    step=1,
+)
+st.session_state.auto_scan_interval = interval_min
+
+if run_scan_now:
+    config = AppConfig(
+        db_path=DB_PATH,
+        run=st.session_state.settings,
+        alerts=st.session_state.alerts,
     )
-    with st.spinner("Scanning eBay listings..."):
-        scan_watchlist(cfg, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH)
-    st.success("Scan complete. Results saved to scans.csv.")
+    client = EbayClient(st.session_state.settings, app_id=os.getenv("EBAY_APP_ID"))
+    with st.spinner("Scanning eBay..."):
+        summary = run_scan(config, client)
+    st.session_state.last_scan = summary.last_scan
+    st.success(
+        f"Scan complete: {summary.scanned_targets} targets, {summary.evaluated} listings evaluated, {summary.deals} deals."
+    )
 
 if st.session_state.auto_scan:
-    now = time.time()
-    interval_s = max(60, int(auto_interval_min * 60))
-    if now - st.session_state.last_auto_scan >= interval_s:
-        cfg = build_config(
-            allow_non_gbp=allow_non_gbp,
-            scan_limit=scan_limit,
-            rate_limit_per_min=rate_limit_per_min,
-            min_profit_gbp=min_profit_gbp,
-            min_roi=min_roi,
-        )
-        with st.spinner("Auto-scan running..."):
-            scan_watchlist(cfg, WATCHLIST_CSV, SCANS_CSV, PASSES_CSV, DB_PATH)
-        st.session_state.last_auto_scan = now
-    st.caption("Auto-scan runs when the page refreshes. Streamlit Cloud may restrict background loops.")
+    interval_s = int(st.session_state.auto_scan_interval * 60)
     st_autorefresh(interval=interval_s * 1000, key="auto_scan_refresh")
-
-st.divider()
-
-watch_df = read_csv_if_present(WATCHLIST_CSV)
-scans_df = read_csv_if_present(SCANS_CSV)
-passes_df = read_csv_if_present(PASSES_CSV)
-
-left, right = st.columns([1.5, 1])
-with left:
-    st.markdown("### Top Deals")
-    if scans_df is None or scans_df.empty:
-        st.info("No scan results yet.")
-    else:
-        deals = scans_df.copy()
-        for col in ["est_profit_gbp", "est_roi", "score"]:
-            if col not in deals.columns:
-                deals[col] = pd.NA
-            deals[col] = pd.to_numeric(deals[col], errors="coerce")
-        deals = deals[(deals["est_profit_gbp"] >= min_profit_gbp) & (deals["est_roi"] >= min_roi)]
-        if deals.empty:
-            st.info("No listings meet the current thresholds.")
-        else:
-            deals = deals.sort_values(by=["score", "est_profit_gbp"], ascending=False)
-            st.dataframe(
-                deals.head(50)[
-                    [
-                        "scanned_at_iso",
-                        "query_id",
-                        "title",
-                        "listing_url",
-                        "total_gbp",
-                        "sold_comp_median_gbp",
-                        "est_profit_gbp",
-                        "est_roi",
-                        "score",
-                    ]
-                ],
-                use_container_width=True,
-                height=420,
+    if st.session_state.last_scan:
+        last_scan_time = datetime.fromisoformat(st.session_state.last_scan)
+        elapsed = (datetime.utcnow() - last_scan_time).total_seconds()
+        if elapsed >= interval_s:
+            config = AppConfig(
+                db_path=DB_PATH,
+                run=st.session_state.settings,
+                alerts=st.session_state.alerts,
             )
+            client = EbayClient(st.session_state.settings, app_id=os.getenv("EBAY_APP_ID"))
+            with st.spinner("Auto-scan running..."):
+                summary = run_scan(config, client)
+            st.session_state.last_scan = summary.last_scan
+    else:
+        st.info("Auto-scan enabled. A scan will run on the next refresh.")
 
-with right:
-    st.markdown("### Quick Add Query")
-    with st.form("add_query"):
-        query_id = st.text_input("Query ID", value="q3")
-        query_text = st.text_input("Query text", value="Apple AirPods Pro")
-        category_id = st.text_input("Category ID (optional)", value="")
-        condition = st.text_input("Condition ID (optional)", value="")
-        max_buy_gbp = st.text_input("Max buy (£, optional)", value="")
-        keywords_include = st.text_input("Keywords include (comma)", value="")
-        keywords_exclude = st.text_input("Keywords exclude (comma)", value="")
-        min_sold_comp_gbp = st.text_input("Min sold comp (£, optional)", value="")
-        min_roi_override = st.text_input("Min ROI (optional)", value="")
-        min_profit_override = st.text_input("Min profit (£, optional)", value="")
-        submitted = st.form_submit_button("Add to watchlist")
 
-    if submitted:
-        new_row = {
-            "query_id": query_id.strip(),
-            "query_text": query_text.strip(),
-            "category_id": category_id.strip(),
-            "condition": condition.strip(),
-            "max_buy_gbp": max_buy_gbp.strip(),
-            "keywords_include": keywords_include.strip(),
-            "keywords_exclude": keywords_exclude.strip(),
-            "min_sold_comp_gbp": min_sold_comp_gbp.strip(),
-            "min_roi": min_roi_override.strip(),
-            "min_profit_gbp": min_profit_override.strip(),
-        }
-        if watch_df is None:
-            watch_df = pd.DataFrame(columns=DEFAULT_WATCHLIST_COLUMNS)
-        watch_df = pd.concat([watch_df, pd.DataFrame([new_row])], ignore_index=True)
-        write_watchlist(watch_df)
-        st.success("Added query to watchlist.csv")
+Tabs = st.tabs(["Dashboard", "Targets", "Deals Feed", "Settings"])
 
-st.divider()
+with Tabs[0]:
+    targets = list_targets(DB_PATH)
+    evaluations = list_evaluations_with_listings(DB_PATH)
+    eval_df = pd.DataFrame(evaluations)
+    deals_today = 0
+    if not eval_df.empty:
+        eval_df["evaluated_at"] = pd.to_datetime(eval_df["evaluated_at"], errors="coerce")
+        today = pd.Timestamp.utcnow().date()
+        deals_today = eval_df[
+            (eval_df["decision"] == "deal") & (eval_df["evaluated_at"].dt.date == today)
+        ].shape[0]
 
-st.markdown("### Latest Scans")
-if scans_df is None or scans_df.empty:
-    st.info("No scan results yet.")
-else:
-    st.dataframe(scans_df.tail(200), use_container_width=True, height=360)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Enabled targets", sum(1 for t in targets if t.enabled))
+    col2.metric("Deals today", deals_today)
+    col3.metric("Last scan", st.session_state.last_scan or "-")
 
-st.markdown("### Watchlist")
-if watch_df is None or watch_df.empty:
-    st.info("No watchlist yet. Create a template or add a query.")
-else:
-    editable = st.data_editor(watch_df, num_rows="dynamic", use_container_width=True, height=360)
-    if st.button("Save watchlist edits"):
-        write_watchlist(editable)
-        st.success("watchlist.csv saved.")
+    st.subheader("Recent Deals")
+    if eval_df.empty:
+        st.info("No evaluations yet. Run a scan to populate results.")
+    else:
+        deals_df = eval_df[eval_df["decision"] == "deal"].copy()
+        if deals_df.empty:
+            st.info("No deals flagged yet.")
+        else:
+            display = deals_df[[
+                "title",
+                "expected_profit_gbp",
+                "roi",
+                "confidence",
+                "deal_score",
+                "url",
+                "evaluated_at",
+            ]].sort_values(by=["deal_score"], ascending=False)
+            st.dataframe(display, use_container_width=True, height=320)
 
-st.markdown("### Passes")
-if passes_df is None or passes_df.empty:
-    st.info("No passes yet.")
-else:
-    st.dataframe(passes_df.tail(200), use_container_width=True, height=300)
+with Tabs[1]:
+    st.subheader("Targets")
+    targets = list_targets(DB_PATH)
+    target_df = pd.DataFrame([t.__dict__ for t in targets]) if targets else pd.DataFrame()
+    if target_df.empty:
+        st.info("No targets yet. Add one below.")
+    else:
+        st.dataframe(
+            target_df[[
+                "id",
+                "name",
+                "query",
+                "category_id",
+                "condition",
+                "max_buy_gbp",
+                "shipping_max_gbp",
+                "listing_type",
+                "country",
+                "enabled",
+            ]],
+            use_container_width=True,
+            height=260,
+        )
 
-st.divider()
+    with st.expander("Add target", expanded=True):
+        with st.form("add_target_form"):
+            name = st.text_input("Name")
+            query = st.text_input("Keywords")
+            category_id = st.text_input("Category ID (optional)")
+            condition = st.text_input("Condition (optional)")
+            max_buy_gbp = st.number_input("Max buy (£)", min_value=0.0, value=0.0, step=1.0)
+            shipping_max_gbp = st.number_input("Max shipping (£)", min_value=0.0, value=0.0, step=1.0)
+            listing_type = st.selectbox("Listing type", ["any", "auction", "bin"])
+            enabled = st.toggle("Enabled", value=True)
+            submitted = st.form_submit_button("Add target")
+        if submitted:
+            target = Target(
+                id=None,
+                name=name,
+                query=query,
+                category_id=category_id or None,
+                condition=condition or None,
+                max_buy_gbp=max_buy_gbp or None,
+                shipping_max_gbp=shipping_max_gbp or None,
+                listing_type=listing_type,
+                enabled=enabled,
+            )
+            from ebayflip.db import add_target
 
-st.markdown("### Environment")
-st.code(
-    "\n".join(
-        [
-            "Required env vars:",
-            "- EBAY_APP_ID=...  # eBay Finding API App ID",
-            "Optional:",
-            "- EBAY_GLOBAL_ID=EBAY-GB",
-        ]
+            add_target(DB_PATH, target)
+            st.success("Target added. Refresh to see it in the table.")
+
+    if targets:
+        st.subheader("Edit or delete target")
+        selected = st.selectbox("Select target", targets, format_func=lambda t: f"{t.id}: {t.name}")
+        if selected:
+            with st.form("edit_target_form"):
+                name = st.text_input("Name", value=selected.name)
+                query = st.text_input("Keywords", value=selected.query)
+                category_id = st.text_input("Category ID", value=selected.category_id or "")
+                condition = st.text_input("Condition", value=selected.condition or "")
+                max_buy_gbp = st.number_input(
+                    "Max buy (£)",
+                    min_value=0.0,
+                    value=float(selected.max_buy_gbp or 0.0),
+                    step=1.0,
+                )
+                shipping_max_gbp = st.number_input(
+                    "Max shipping (£)",
+                    min_value=0.0,
+                    value=float(selected.shipping_max_gbp or 0.0),
+                    step=1.0,
+                )
+                listing_type = st.selectbox(
+                    "Listing type", ["any", "auction", "bin"], index=["any", "auction", "bin"].index(selected.listing_type)
+                )
+                enabled = st.toggle("Enabled", value=selected.enabled)
+                updated = st.form_submit_button("Save changes")
+            if updated:
+                from ebayflip.db import update_target
+
+                update_target(
+                    DB_PATH,
+                    Target(
+                        id=selected.id,
+                        name=name,
+                        query=query,
+                        category_id=category_id or None,
+                        condition=condition or None,
+                        max_buy_gbp=max_buy_gbp or None,
+                        shipping_max_gbp=shipping_max_gbp or None,
+                        listing_type=listing_type,
+                        enabled=enabled,
+                    ),
+                )
+                st.success("Target updated. Refresh to see changes.")
+        if st.button("Delete selected target"):
+            delete_target(DB_PATH, selected.id)
+            st.warning("Target deleted. Refresh to update list.")
+
+with Tabs[2]:
+    st.subheader("Deals Feed")
+    evaluations = list_evaluations_with_listings(DB_PATH)
+    eval_df = pd.DataFrame(evaluations)
+    if eval_df.empty:
+        st.info("No evaluations yet.")
+    else:
+        targets = list_targets(DB_PATH)
+        target_map = {t.id: t.name for t in targets}
+        eval_df["target_name"] = eval_df["target_id"].map(target_map)
+        eval_df["expected_profit_gbp"] = pd.to_numeric(eval_df["expected_profit_gbp"], errors="coerce")
+        eval_df["roi"] = pd.to_numeric(eval_df["roi"], errors="coerce")
+        eval_df["confidence"] = pd.to_numeric(eval_df["confidence"], errors="coerce")
+
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+        with filter_col1:
+            decision_filter = st.selectbox("Decision", ["deal", "maybe", "ignore"], index=0)
+        with filter_col2:
+            min_profit = st.number_input("Min profit (£)", value=MIN_PROFIT_GBP, step=1.0)
+        with filter_col3:
+            min_roi = st.number_input("Min ROI", value=MIN_ROI, step=0.05)
+        with filter_col4:
+            min_confidence = st.number_input("Min confidence", value=MIN_CONFIDENCE, step=0.05)
+
+        filtered = eval_df[
+            (eval_df["decision"] == decision_filter)
+            & (eval_df["expected_profit_gbp"] >= min_profit)
+            & (eval_df["roi"] >= min_roi)
+            & (eval_df["confidence"] >= min_confidence)
+        ].copy()
+        if filtered.empty:
+            st.info("No listings match the current filters.")
+        else:
+            display = filtered[[
+                "title",
+                "target_name",
+                "expected_profit_gbp",
+                "roi",
+                "confidence",
+                "deal_score",
+                "url",
+                "evaluated_at",
+            ]].sort_values(by=["deal_score"], ascending=False)
+            st.dataframe(display, use_container_width=True, height=320)
+
+            selection = st.selectbox("View details", filtered["listing_id"].unique())
+            if selection:
+                listing_row = filtered[filtered["listing_id"] == selection].iloc[0]
+                st.markdown(f"**{listing_row['title']}**")
+                st.markdown(f"[Open listing]({listing_row['url']})")
+                st.markdown("**Why flagged**")
+                reasons = listing_row.get("reasons_json", "[]")
+                try:
+                    reasons_list = json.loads(reasons)
+                except json.JSONDecodeError:
+                    reasons_list = []
+                for reason in reasons_list:
+                    st.write(f"- {reason}")
+                st.markdown("**Comps**")
+                comps_rows = list_comps_by_listing(DB_PATH, int(selection))
+                if comps_rows:
+                    comps_df = pd.DataFrame([c.__dict__ for c in comps_rows])
+                    st.dataframe(comps_df, use_container_width=True)
+                else:
+                    st.info("No comps stored.")
+
+with Tabs[3]:
+    st.subheader("Settings")
+    settings = st.session_state.settings
+    alert_settings = st.session_state.alerts
+
+    col1, col2 = st.columns(2)
+    with col1:
+        settings.min_profit_gbp = st.number_input("Min profit (£)", value=settings.min_profit_gbp, step=1.0)
+        settings.min_roi = st.number_input("Min ROI", value=settings.min_roi, step=0.05)
+        settings.min_confidence = st.number_input("Min confidence", value=settings.min_confidence, step=0.05)
+        settings.ebay_fee_pct = st.number_input("eBay fee %", value=settings.ebay_fee_pct, step=0.001, format="%.3f")
+        settings.shipping_out_gbp = st.number_input(
+            "Shipping out (£)", value=settings.shipping_out_gbp, step=0.5
+        )
+        settings.buffer_fixed_gbp = st.number_input("Buffer fixed (£)", value=settings.buffer_fixed_gbp, step=0.5)
+        settings.buffer_pct_of_buy = st.number_input(
+            "Buffer % of buy", value=settings.buffer_pct_of_buy, step=0.01, format="%.2f"
+        )
+
+    with col2:
+        settings.request_cap = st.number_input("Request cap per scan", value=settings.request_cap, step=5)
+        settings.comps_limit = st.number_input("Comps per listing", value=settings.comps_limit, step=5)
+        settings.scan_limit_per_target = st.number_input(
+            "Listings per target", value=settings.scan_limit_per_target, step=5
+        )
+        settings.allow_non_gbp = st.toggle("Allow non-GBP listings", value=settings.allow_non_gbp)
+        settings.gbp_exchange_rate = st.number_input(
+            "GBP exchange rate", value=settings.gbp_exchange_rate, step=0.01
+        )
+
+    st.markdown("### Alerts")
+    alert_settings.discord_webhook_url = st.text_input(
+        "Discord webhook URL",
+        value=alert_settings.discord_webhook_url or "",
+        type="password",
     )
-)
+    st.caption("Discord alerts trigger when a new DEAL is found.")
 
-st.caption("Keyflip is alert-only: no auto-buying or auto-selling.")
+    st.markdown("### API Keys")
+    st.code("EBAY_APP_ID=...\nDISCORD_WEBHOOK_URL=...")
