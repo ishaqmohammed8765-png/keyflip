@@ -33,6 +33,7 @@ class ScanSummary:
     deals: int
     last_scan: str
     scanned_listings: list["ScannedListing"]
+    request_cap_reached: bool
 
 
 @dataclass(slots=True)
@@ -52,6 +53,8 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
     evaluated = 0
     deals = 0
     stop_scan = False
+    scanned_targets = 0
+    request_cap_reached = False
     scanned_listings: list[ScannedListing] = []
 
     for target in targets:
@@ -59,7 +62,9 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             break
         if client.request_count >= config.run.request_cap:
             LOGGER.info("Request cap reached, stopping scan.")
+            request_cap_reached = True
             break
+        scanned_targets += 1
         listings = client.search_active_listings(target)
         for listing in listings:
             listing_id, is_new = upsert_listing(config.db_path, listing)
@@ -97,12 +102,13 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
                 _send_alert_if_needed(config, listing_id, listing, evaluation)
 
     return ScanSummary(
-        scanned_targets=len(targets),
+        scanned_targets=scanned_targets,
         new_listings=new_listings,
         evaluated=evaluated,
         deals=deals,
         last_scan=datetime.utcnow().isoformat(),
         scanned_listings=scanned_listings,
+        request_cap_reached=request_cap_reached,
     )
 
 

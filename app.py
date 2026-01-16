@@ -264,7 +264,10 @@ def _run_scan_with_feedback() -> None:
     if summary.scanned_targets == 0:
         st.warning("No enabled targets found. Add or enable a target to scan.")
     elif summary.evaluated == 0:
-        st.warning("No listings were returned. Try broader keywords or check request limits.")
+        if summary.request_cap_reached:
+            st.warning("Request cap reached before listings were returned. Increase the cap or try again later.")
+        else:
+            st.warning("No listings were returned. Try broader keywords or check request limits.")
 
 
 if run_scan_now:
