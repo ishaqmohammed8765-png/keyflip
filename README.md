@@ -11,6 +11,7 @@ Streamlit app that scans eBay listings for underpriced items, estimates resale v
 - SQLite persistence for targets, listings, comps, evaluations, and alerts.
 - HTML fallback when eBay API credentials are not available.
 - Hierarchical category selection (Category → Subcategory → Sub-subcategory) with cached taxonomy.
+- Fail-open retries when a target returns zero results, plus a “Why no results?” debug panel.
 
 ## Quick start
 ```bash
@@ -33,10 +34,17 @@ export DISCORD_WEBHOOK_URL=your_discord_webhook
 - Sony WH-1000XM5
 
 ## Notes on rate limiting & caching
-- Requests are rate limited with randomized delays.
+- Requests are rate limited with randomized delays (HTML mode) and exponential backoff on 429/5xx.
 - Total request cap per scan defaults to 40 and is configurable in Settings.
-- Responses are cached in a local SQLite HTTP cache (10 minute TTL) to avoid re-fetching.
+- Responses are cached in a local SQLite HTTP cache (5 minute TTL) to avoid re-fetching.
 - eBay categories are cached in SQLite after the first successful taxonomy load.
+
+## Zero-results diagnostics & retries
+- Each target records the request mode, query, filters, status code, and raw vs filtered counts.
+- When a target yields zero listings, the app retries by removing category, condition, price filters,
+  and finally broadening keywords (removing quotes, capacity, and color terms).
+- The Dashboard includes a “Why no results?” panel that shows retry steps, rejection reasons,
+  and the last request URL to help troubleshoot filters.
 
 ## Category selection
 - The Targets form uses a dropdown-driven category tree (up to 3 levels deep).

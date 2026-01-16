@@ -53,6 +53,8 @@ if "auto_scan_interval" not in st.session_state:
     st.session_state.auto_scan_interval = DEFAULT_SCAN_INTERVAL_MIN
 if "last_scan_listings" not in st.session_state:
     st.session_state.last_scan_listings = []
+if "last_scan_debug" not in st.session_state:
+    st.session_state.last_scan_debug = []
 
 if "settings" not in st.session_state:
     st.session_state.settings = RunSettings()
@@ -256,6 +258,7 @@ def _run_scan_with_feedback() -> None:
         return
     st.session_state.last_scan = summary.last_scan
     st.session_state.last_scan_listings = summary.scanned_listings
+    st.session_state.last_scan_debug = summary.zero_result_debug
     _load_evaluations.clear()
     _load_comps.clear()
     st.success(
@@ -266,8 +269,10 @@ def _run_scan_with_feedback() -> None:
     elif summary.evaluated == 0:
         if summary.request_cap_reached:
             st.warning("Request cap reached before listings were returned. Increase the cap or try again later.")
+        elif summary.zero_result_debug:
+            st.warning("No results from eBay for one or more targets. See the “Why no results?” panel for details.")
         else:
-            st.warning("No listings were returned. Try broader keywords or check request limits.")
+            st.warning("No results from eBay for this scan. Try broader keywords or remove filters and retry.")
 
 
 if run_scan_now:
@@ -321,6 +326,48 @@ with Tabs[0]:
         st.dataframe(display_scan, use_container_width=True, height=260)
     else:
         st.info("Run a scan to see which listings were evaluated.")
+
+    st.subheader("Why no results?")
+    scan_debug = st.session_state.get("last_scan_debug", [])
+    if scan_debug:
+        for entry in scan_debug:
+            entry_data = dataclasses.asdict(entry)
+            last_diag = entry_data["diagnostics"][-1] if entry_data.get("diagnostics") else None
+            with st.expander(f"{entry_data['target_name']} — {entry_data['target_query']}"):
+                if entry_data["raw_count"] == 0:
+                    st.write("0 results from eBay.")
+                else:
+                    st.write(
+                        f"Results were filtered out locally (raw {entry_data['raw_count']}, kept {entry_data['filtered_count']})."
+                    )
+                if entry_data.get("retry_report"):
+                    st.markdown("**Retries applied:**")
+                    for step in entry_data["retry_report"]:
+                        st.write(f"- {step}")
+                if entry_data.get("rejection_counts"):
+                    reasons = {
+                        key: value
+                        for key, value in entry_data["rejection_counts"].items()
+                        if value
+                    }
+                    if reasons:
+                        st.markdown("**Top rejection reasons:**")
+                        for reason, count in sorted(reasons.items(), key=lambda item: item[1], reverse=True):
+                            st.write(f"- {reason} ({count})")
+                if last_diag:
+                    st.markdown("**Last request details:**")
+                    st.write(f"Mode: {last_diag['mode']}")
+                    st.write(f"Query: {last_diag['query']}")
+                    st.write(f"Category: {last_diag['category_id'] or '-'}")
+                    st.write(f"Condition: {last_diag['condition'] or '-'}")
+                    st.write(f"Page: {last_diag['pagination']['page']}")
+                    st.write(f"Limit: {last_diag['pagination']['limit']}")
+                    st.write(f"HTTP status: {last_diag['http_status']}")
+                    st.write(f"Price filters: {json.dumps(last_diag['price_filters'], indent=2)}")
+                    if entry_data.get("last_request_url"):
+                        st.code(entry_data["last_request_url"])
+    else:
+        st.caption("No zero-result scans in the most recent run.")
 
     st.subheader("Recent Deals")
     if eval_df.empty:
