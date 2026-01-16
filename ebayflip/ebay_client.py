@@ -50,20 +50,34 @@ class EbayClient:
         return response
 
     def search_active_listings(self, target: Target) -> list[Listing]:
-        if self.app_id:
-            try:
-                return self._search_active_api(target)
-            except Exception as exc:
-                LOGGER.warning("API search failed, falling back to HTML: %s", exc)
-        return self._search_active_html(target)
+        try:
+            if self.app_id:
+                try:
+                    return self._search_active_api(target)
+                except Exception as exc:
+                    LOGGER.warning("API search failed, falling back to HTML: %s", exc)
+            return self._search_active_html(target)
+        except requests.RequestException as exc:
+            LOGGER.warning("Active listing search failed: %s", exc)
+            return []
+        except Exception:
+            LOGGER.exception("Unexpected error while searching active listings.")
+            return []
 
     def search_sold_comps(self, comp_query: str) -> list[SoldComp]:
-        if self.app_id:
-            try:
-                return self._search_sold_api(comp_query)
-            except Exception as exc:
-                LOGGER.warning("API comps failed, falling back to HTML: %s", exc)
-        return self._search_sold_html(comp_query)
+        try:
+            if self.app_id:
+                try:
+                    return self._search_sold_api(comp_query)
+                except Exception as exc:
+                    LOGGER.warning("API comps failed, falling back to HTML: %s", exc)
+            return self._search_sold_html(comp_query)
+        except requests.RequestException as exc:
+            LOGGER.warning("Sold comps search failed: %s", exc)
+            return []
+        except Exception:
+            LOGGER.exception("Unexpected error while searching sold comps.")
+            return []
 
     def _search_active_api(self, target: Target) -> list[Listing]:
         params = {

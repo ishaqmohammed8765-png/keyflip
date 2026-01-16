@@ -244,11 +244,16 @@ interval_min = st.sidebar.number_input(
 )
 st.session_state.auto_scan_interval = interval_min
 
-if run_scan_now:
+def _run_scan_with_feedback() -> None:
     config = build_config()
     client = build_client()
-    with st.spinner("Scanning eBay..."):
-        summary = run_scan(config, client)
+    try:
+        with st.spinner("Scanning eBay..."):
+            summary = run_scan(config, client)
+    except Exception as exc:
+        LOGGER.exception("Scan failed: %s", exc)
+        st.error("Scan failed. Check logs or try again in a moment.")
+        return
     st.session_state.last_scan = summary.last_scan
     st.session_state.last_scan_listings = summary.scanned_listings
     _load_evaluations.clear()
@@ -256,6 +261,14 @@ if run_scan_now:
     st.success(
         f"Scan complete: {summary.scanned_targets} targets, {summary.evaluated} listings evaluated, {summary.deals} deals."
     )
+    if summary.scanned_targets == 0:
+        st.warning("No enabled targets found. Add or enable a target to scan.")
+    elif summary.evaluated == 0:
+        st.warning("No listings were returned. Try broader keywords or check request limits.")
+
+
+if run_scan_now:
+    _run_scan_with_feedback()
 
 if st.session_state.auto_scan:
     interval_s = int(st.session_state.auto_scan_interval * 60)
@@ -264,14 +277,7 @@ if st.session_state.auto_scan:
         last_scan_time = datetime.fromisoformat(st.session_state.last_scan)
         elapsed = (datetime.utcnow() - last_scan_time).total_seconds()
         if elapsed >= interval_s:
-            config = build_config()
-            client = build_client()
-            with st.spinner("Auto-scan running..."):
-                summary = run_scan(config, client)
-            st.session_state.last_scan = summary.last_scan
-            st.session_state.last_scan_listings = summary.scanned_listings
-            _load_evaluations.clear()
-            _load_comps.clear()
+            _run_scan_with_feedback()
     else:
         st.info("Auto-scan enabled. A scan will run on the next refresh.")
 
