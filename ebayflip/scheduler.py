@@ -62,23 +62,23 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             break
         listings = client.search_active_listings(target)
         for listing in listings:
-            if client.request_count >= config.run.request_cap:
-                LOGGER.info("Request cap reached mid-target, stopping scan.")
-                stop_scan = True
-                break
             listing_id, is_new = upsert_listing(config.db_path, listing)
             if is_new:
                 new_listings += 1
             comps = get_latest_comps(config.db_path, listing_id)
             if comps is None or _comps_stale(comps.computed_at, config.run.comps_ttl_hours):
-                if client.request_count >= config.run.request_cap:
-                    LOGGER.info("Request cap reached before comps search.")
-                    stop_scan = True
-                    break
                 comp_query = _comp_query_for_listing(listing, target)
-                comps_list = client.search_sold_comps(comp_query)
-                comps = compute_comp_stats(comp_query, comps_list)
-                insert_comps(config.db_path, listing_id, comps)
+                if client.request_count >= config.run.request_cap:
+                    if comps is None:
+                        LOGGER.info("Request cap reached before comps search; using empty comps.")
+                        comps = compute_comp_stats(comp_query, [])
+                        insert_comps(config.db_path, listing_id, comps)
+                    else:
+                        LOGGER.info("Request cap reached before comps refresh; using stale comps.")
+                else:
+                    comps_list = client.search_sold_comps(comp_query)
+                    comps = compute_comp_stats(comp_query, comps_list)
+                    insert_comps(config.db_path, listing_id, comps)
             evaluation = evaluate_listing(listing, comps, config.run)
             insert_evaluation(config.db_path, listing_id, evaluation)
             evaluated += 1
