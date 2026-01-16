@@ -63,6 +63,21 @@ st.title("eBay Flip Scanner")
 st.caption("Scan eBay listings for underpriced flips, estimate resale, and alert on deals.")
 
 
+@st.cache_data(show_spinner=False)
+def _load_targets(db_path: str) -> list[Target]:
+    return list_targets(db_path)
+
+
+@st.cache_data(show_spinner=False)
+def _load_evaluations(db_path: str) -> list[dict]:
+    return list_evaluations_with_listings(db_path)
+
+
+@st.cache_data(show_spinner=False)
+def _load_comps(db_path: str, listing_id: int) -> list:
+    return list_comps_by_listing(db_path, listing_id)
+
+
 def build_config() -> AppConfig:
     return AppConfig(
         db_path=DB_PATH,
@@ -165,6 +180,8 @@ if run_scan_now:
     with st.spinner("Scanning eBay..."):
         summary = run_scan(config, client)
     st.session_state.last_scan = summary.last_scan
+    _load_evaluations.clear()
+    _load_comps.clear()
     st.success(
         f"Scan complete: {summary.scanned_targets} targets, {summary.evaluated} listings evaluated, {summary.deals} deals."
     )
@@ -181,6 +198,8 @@ if st.session_state.auto_scan:
             with st.spinner("Auto-scan running..."):
                 summary = run_scan(config, client)
             st.session_state.last_scan = summary.last_scan
+            _load_evaluations.clear()
+            _load_comps.clear()
     else:
         st.info("Auto-scan enabled. A scan will run on the next refresh.")
 
@@ -188,8 +207,8 @@ if st.session_state.auto_scan:
 Tabs = st.tabs(["Dashboard", "Targets", "Deals Feed", "Settings"])
 
 with Tabs[0]:
-    targets = list_targets(DB_PATH)
-    evaluations = list_evaluations_with_listings(DB_PATH)
+    targets = _load_targets(DB_PATH)
+    evaluations = _load_evaluations(DB_PATH)
     eval_df = pd.DataFrame(evaluations)
     deals_today = 0
     if not eval_df.empty:
@@ -225,7 +244,7 @@ with Tabs[0]:
 
 with Tabs[1]:
     st.subheader("Targets")
-    targets = list_targets(DB_PATH)
+    targets = _load_targets(DB_PATH)
     categories_ready = ensure_categories_loaded(DB_PATH)
     target_df = pd.DataFrame([dataclasses.asdict(t) for t in targets]) if targets else pd.DataFrame()
     if target_df.empty:
@@ -282,6 +301,7 @@ with Tabs[1]:
             from ebayflip.db import add_target
 
             add_target(DB_PATH, target)
+            _load_targets.clear()
             st.success("Target added. Refresh to see it in the table.")
 
     if targets:
@@ -337,19 +357,21 @@ with Tabs[1]:
                         enabled=enabled,
                     ),
                 )
+                _load_targets.clear()
                 st.success("Target updated. Refresh to see changes.")
         if st.button("Delete selected target"):
             delete_target(DB_PATH, selected.id)
+            _load_targets.clear()
             st.warning("Target deleted. Refresh to update list.")
 
 with Tabs[2]:
     st.subheader("Deals Feed")
-    evaluations = list_evaluations_with_listings(DB_PATH)
+    evaluations = _load_evaluations(DB_PATH)
     eval_df = pd.DataFrame(evaluations)
     if eval_df.empty:
         st.info("No evaluations yet.")
     else:
-        targets = list_targets(DB_PATH)
+        targets = _load_targets(DB_PATH)
         target_map = {t.id: t.name for t in targets}
         eval_df["target_name"] = eval_df["target_id"].map(target_map)
         eval_df["expected_profit_gbp"] = pd.to_numeric(eval_df["expected_profit_gbp"], errors="coerce")
@@ -401,7 +423,7 @@ with Tabs[2]:
                 for reason in reasons_list:
                     st.write(f"- {reason}")
                 st.markdown("**Comps**")
-                comps_rows = list_comps_by_listing(DB_PATH, int(selection))
+                comps_rows = _load_comps(DB_PATH, int(selection))
                 if comps_rows:
                     comps_df = pd.DataFrame([c.__dict__ for c in comps_rows])
                     st.dataframe(comps_df, use_container_width=True)
