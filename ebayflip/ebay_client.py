@@ -35,14 +35,14 @@ class EbayClient:
         )
 
     def _request(self, url: str, params: Optional[dict[str, Any]] = None) -> requests.Response:
-        delay = random.uniform(0.6, 1.4)
-        time.sleep(delay)
         cache_key = url
         if params:
             cache_key = f"{url}?{urlencode(params, doseq=True)}"
         cached = self.cache.get(cache_key)
         if cached:
             return _cached_to_response(cached)
+        delay = random.uniform(0.6, 1.4)
+        time.sleep(delay)
         response = self.session.get(url, params=params, timeout=20)
         response.raise_for_status()
         self.cache.set(cache_key, response)

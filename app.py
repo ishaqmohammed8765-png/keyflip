@@ -64,6 +64,14 @@ init_db(DB_PATH)
 st.title("eBay Flip Scanner")
 st.caption("Scan eBay listings for underpriced flips, estimate resale, and alert on deals.")
 
+CONDITION_OPTIONS = {
+    "Any": None,
+    "New": "1000",
+    "Open box": "1500",
+    "Used": "3000",
+    "For parts or not working": "7000",
+}
+
 
 @st.cache_data(show_spinner=False)
 def _load_targets(db_path: str) -> list[Target]:
@@ -163,6 +171,15 @@ def _format_category_path(category_id: Optional[str]) -> str:
     return " \u203a ".join(category.name for category in path)
 
 
+def _format_condition(condition_id: Optional[str]) -> str:
+    if not condition_id:
+        return "-"
+    for label, value in CONDITION_OPTIONS.items():
+        if value == condition_id:
+            return label
+    return condition_id
+
+
 def _build_auto_keywords(name: str, category_id: Optional[str]) -> str:
     parts = []
     if name:
@@ -185,6 +202,15 @@ def _maybe_autofill_keywords(prefix: str, name: str, category_id: Optional[str])
     if not current or current == previous_auto:
         st.session_state[query_key] = auto_value
         st.session_state[auto_key] = auto_value
+
+
+def _condition_selectbox(label: str, key: str, selected_condition_id: Optional[str]) -> Optional[str]:
+    options = list(CONDITION_OPTIONS.keys())
+    condition_map = {value: name for name, value in CONDITION_OPTIONS.items()}
+    selected_name = condition_map.get(selected_condition_id, "Any")
+    selected_index = options.index(selected_name) if selected_name in options else 0
+    choice = st.selectbox(label, options, index=selected_index, key=key)
+    return CONDITION_OPTIONS.get(choice)
 
 
 st.sidebar.header("Scan Controls")
@@ -296,17 +322,20 @@ with Tabs[1]:
             target_df["category"] = target_df["category_id"].apply(_format_category_path)
         else:
             target_df["category"] = target_df["category_id"].fillna("-")
+        target_df["condition_display"] = target_df["condition"].apply(_format_condition)
         st.dataframe(
-            target_df[[
-                "id",
-                "name",
-                "query",
-                "category",
-                "condition",
-                "listing_type",
-                "country",
-                "enabled",
-            ]],
+            target_df[
+                [
+                    "id",
+                    "name",
+                    "query",
+                    "category",
+                    "condition_display",
+                    "listing_type",
+                    "country",
+                    "enabled",
+                ]
+            ].rename(columns={"condition_display": "condition"}),
             use_container_width=True,
             height=260,
         )
@@ -321,7 +350,7 @@ with Tabs[1]:
         st.session_state["add_category_id"] = category_id
         _maybe_autofill_keywords("add", st.session_state.get("add_name", ""), category_id)
         query = st.text_input("Keywords", key="add_query")
-        condition = st.text_input("Condition (optional)", key="add_condition")
+        condition = _condition_selectbox("Condition", key="add_condition", selected_condition_id=None)
         listing_type = st.selectbox("Listing type", ["any", "auction", "bin"], key="add_listing_type")
         enabled = st.toggle("Enabled", value=True, key="add_enabled")
         submitted = st.button("Add target", use_container_width=True)
@@ -331,7 +360,7 @@ with Tabs[1]:
                 name=name,
                 query=query,
                 category_id=category_id or None,
-                condition=condition or None,
+                condition=condition,
                 max_buy_gbp=None,
                 shipping_max_gbp=None,
                 listing_type=listing_type,
@@ -352,7 +381,7 @@ with Tabs[1]:
                 st.session_state["edit_name"] = selected.name
                 st.session_state["edit_query"] = selected.query
                 st.session_state["edit_query_autofill"] = ""
-                st.session_state["edit_condition"] = selected.condition or ""
+                st.session_state["edit_condition"] = selected.condition
                 st.session_state["edit_listing_type"] = selected.listing_type
                 st.session_state["edit_enabled"] = selected.enabled
                 st.session_state["edit_category_id"] = selected.category_id
@@ -366,7 +395,11 @@ with Tabs[1]:
             st.session_state["edit_category_id"] = category_id
             _maybe_autofill_keywords("edit", st.session_state.get("edit_name", ""), category_id)
             query = st.text_input("Keywords", key="edit_query")
-            condition = st.text_input("Condition", key="edit_condition")
+            condition = _condition_selectbox(
+                "Condition",
+                key="edit_condition",
+                selected_condition_id=st.session_state.get("edit_condition"),
+            )
             listing_type_options = ["any", "auction", "bin"]
             listing_type_index = (
                 listing_type_options.index(st.session_state.get("edit_listing_type", selected.listing_type))
@@ -492,6 +525,9 @@ with Tabs[3]:
         settings.comps_limit = st.number_input("Comps per listing", value=settings.comps_limit, step=5)
         settings.scan_limit_per_target = st.number_input(
             "Listings per target", value=settings.scan_limit_per_target, step=5
+        )
+        settings.comps_ttl_hours = st.number_input(
+            "Comps refresh (hours)", value=settings.comps_ttl_hours, min_value=1, step=1
         )
         settings.allow_non_gbp = st.toggle("Allow non-GBP listings", value=settings.allow_non_gbp)
         settings.gbp_exchange_rate = st.number_input(
