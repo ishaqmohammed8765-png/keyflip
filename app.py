@@ -59,6 +59,24 @@ if "settings" not in st.session_state:
 if "alerts" not in st.session_state:
     st.session_state.alerts = AlertSettings(discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL"))
 
+
+def _coerce_settings(value: object) -> RunSettings:
+    defaults = RunSettings()
+    fields = dataclasses.fields(RunSettings)
+    if isinstance(value, RunSettings):
+        data = {
+            field.name: getattr(value, field.name, getattr(defaults, field.name))
+            for field in fields
+        }
+        return RunSettings(**data)
+    if isinstance(value, dict):
+        data = {field.name: value.get(field.name, getattr(defaults, field.name)) for field in fields}
+        return RunSettings(**data)
+    return defaults
+
+
+st.session_state.settings = _coerce_settings(st.session_state.settings)
+
 init_db(DB_PATH)
 
 st.title("eBay Flip Scanner")
