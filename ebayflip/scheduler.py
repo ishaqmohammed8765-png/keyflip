@@ -40,13 +40,20 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
     new_listings = 0
     evaluated = 0
     deals = 0
+    stop_scan = False
 
     for target in targets:
+        if stop_scan:
+            break
         if client.request_count >= config.run.request_cap:
             LOGGER.info("Request cap reached, stopping scan.")
             break
         listings = client.search_active_listings(target)
         for listing in listings:
+            if client.request_count >= config.run.request_cap:
+                LOGGER.info("Request cap reached mid-target, stopping scan.")
+                stop_scan = True
+                break
             listing_id, is_new = upsert_listing(config.db_path, listing)
             if is_new:
                 new_listings += 1
@@ -54,6 +61,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             if comps is None:
                 if client.request_count >= config.run.request_cap:
                     LOGGER.info("Request cap reached before comps search.")
+                    stop_scan = True
                     break
                 comps_list = client.search_sold_comps(target.query)
                 comps = compute_comp_stats(target.query, comps_list)

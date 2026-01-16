@@ -54,6 +54,18 @@ st.title("eBay Flip Scanner")
 st.caption("Scan eBay listings for underpriced flips, estimate resale, and alert on deals.")
 
 
+def build_config() -> AppConfig:
+    return AppConfig(
+        db_path=DB_PATH,
+        run=st.session_state.settings,
+        alerts=st.session_state.alerts,
+    )
+
+
+def build_client() -> EbayClient:
+    return EbayClient(st.session_state.settings, app_id=os.getenv("EBAY_APP_ID"))
+
+
 st.sidebar.header("Scan Controls")
 run_scan_now = st.sidebar.button("Scan now", use_container_width=True)
 
@@ -68,12 +80,8 @@ interval_min = st.sidebar.number_input(
 st.session_state.auto_scan_interval = interval_min
 
 if run_scan_now:
-    config = AppConfig(
-        db_path=DB_PATH,
-        run=st.session_state.settings,
-        alerts=st.session_state.alerts,
-    )
-    client = EbayClient(st.session_state.settings, app_id=os.getenv("EBAY_APP_ID"))
+    config = build_config()
+    client = build_client()
     with st.spinner("Scanning eBay..."):
         summary = run_scan(config, client)
     st.session_state.last_scan = summary.last_scan
@@ -88,12 +96,8 @@ if st.session_state.auto_scan:
         last_scan_time = datetime.fromisoformat(st.session_state.last_scan)
         elapsed = (datetime.utcnow() - last_scan_time).total_seconds()
         if elapsed >= interval_s:
-            config = AppConfig(
-                db_path=DB_PATH,
-                run=st.session_state.settings,
-                alerts=st.session_state.alerts,
-            )
-            client = EbayClient(st.session_state.settings, app_id=os.getenv("EBAY_APP_ID"))
+            config = build_config()
+            client = build_client()
             with st.spinner("Auto-scan running..."):
                 summary = run_scan(config, client)
             st.session_state.last_scan = summary.last_scan
@@ -212,8 +216,14 @@ with Tabs[1]:
                     value=float(selected.shipping_max_gbp or 0.0),
                     step=1.0,
                 )
+                listing_type_options = ["any", "auction", "bin"]
+                listing_type_index = (
+                    listing_type_options.index(selected.listing_type)
+                    if selected.listing_type in listing_type_options
+                    else 0
+                )
                 listing_type = st.selectbox(
-                    "Listing type", ["any", "auction", "bin"], index=["any", "auction", "bin"].index(selected.listing_type)
+                    "Listing type", listing_type_options, index=listing_type_index
                 )
                 enabled = st.toggle("Enabled", value=selected.enabled)
                 updated = st.form_submit_button("Save changes")

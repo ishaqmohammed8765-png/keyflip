@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 from typing import Any, Optional
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -229,7 +230,7 @@ class EbayClient:
                 total_buy_gbp=total,
                 listing_type=_infer_listing_type(item),
                 location=_get_text(item.select_one("span.s-item__location")),
-                image_url=item.select_one("img") and item.select_one("img").get("src"),
+                image_url=_get_image_url(item),
                 raw_json={"source": "html"},
             )
             listings.append(listing)
@@ -338,11 +339,22 @@ def _parse_price(text: str) -> tuple[float, str]:
 def _extract_item_id(url: str) -> str:
     if not url:
         return ""
-    parts = url.split("/")
-    for part in parts[::-1]:
-        if part.isdigit():
-            return part
-    return url.split("?")[-1]
+    match = re.search(r"/(\d{9,})", url)
+    if match:
+        return match.group(1)
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    for key in ("item", "itm", "itemId"):
+        if key in query and query[key]:
+            return query[key][0]
+    return ""
+
+
+def _get_image_url(item: Any) -> Optional[str]:
+    image_el = item.select_one("img")
+    if not image_el:
+        return None
+    return image_el.get("src") or image_el.get("data-src")
 
 
 def _cached_to_response(cached: CachedResponse) -> requests.Response:
