@@ -163,6 +163,30 @@ def _format_category_path(category_id: Optional[str]) -> str:
     return " \u203a ".join(category.name for category in path)
 
 
+def _build_auto_keywords(name: str, category_id: Optional[str]) -> str:
+    parts = []
+    if name:
+        parts.append(name.strip())
+    if category_id:
+        category_path = _format_category_path(category_id)
+        if category_path and category_path != "-":
+            parts.append(category_path)
+    return " ".join(part for part in parts if part).strip()
+
+
+def _maybe_autofill_keywords(prefix: str, name: str, category_id: Optional[str]) -> None:
+    auto_value = _build_auto_keywords(name, category_id)
+    if not auto_value:
+        return
+    query_key = f"{prefix}_query"
+    auto_key = f"{prefix}_query_autofill"
+    current = st.session_state.get(query_key, "")
+    previous_auto = st.session_state.get(auto_key, "")
+    if not current or current == previous_auto:
+        st.session_state[query_key] = auto_value
+        st.session_state[auto_key] = auto_value
+
+
 st.sidebar.header("Scan Controls")
 run_scan_now = st.sidebar.button("Scan now", use_container_width=True)
 
@@ -279,8 +303,6 @@ with Tabs[1]:
                 "query",
                 "category",
                 "condition",
-                "max_buy_gbp",
-                "shipping_max_gbp",
                 "listing_type",
                 "country",
                 "enabled",
@@ -290,20 +312,19 @@ with Tabs[1]:
         )
 
     with st.expander("Add target", expanded=True):
-        with st.form("add_target_form"):
-            name = st.text_input("Name")
-            query = st.text_input("Keywords")
-            if categories_ready:
-                category_id = _render_category_picker("add", None)
-            else:
-                st.warning("Category list unavailable. Category filters are disabled for now.")
-                category_id = None
-            condition = st.text_input("Condition (optional)")
-            max_buy_gbp = st.number_input("Max buy (£)", min_value=0.0, value=0.0, step=1.0)
-            shipping_max_gbp = st.number_input("Max shipping (£)", min_value=0.0, value=0.0, step=1.0)
-            listing_type = st.selectbox("Listing type", ["any", "auction", "bin"])
-            enabled = st.toggle("Enabled", value=True)
-            submitted = st.form_submit_button("Add target")
+        name = st.text_input("Name", key="add_name")
+        if categories_ready:
+            category_id = _render_category_picker("add", None)
+        else:
+            st.warning("Category list unavailable. Category filters are disabled for now.")
+            category_id = None
+        st.session_state["add_category_id"] = category_id
+        _maybe_autofill_keywords("add", st.session_state.get("add_name", ""), category_id)
+        query = st.text_input("Keywords", key="add_query")
+        condition = st.text_input("Condition (optional)", key="add_condition")
+        listing_type = st.selectbox("Listing type", ["any", "auction", "bin"], key="add_listing_type")
+        enabled = st.toggle("Enabled", value=True, key="add_enabled")
+        submitted = st.button("Add target", use_container_width=True)
         if submitted:
             target = Target(
                 id=None,
@@ -311,8 +332,8 @@ with Tabs[1]:
                 query=query,
                 category_id=category_id or None,
                 condition=condition or None,
-                max_buy_gbp=max_buy_gbp or None,
-                shipping_max_gbp=shipping_max_gbp or None,
+                max_buy_gbp=None,
+                shipping_max_gbp=None,
                 listing_type=listing_type,
                 enabled=enabled,
             )
@@ -326,38 +347,37 @@ with Tabs[1]:
         st.subheader("Edit or delete target")
         selected = st.selectbox("Select target", targets, format_func=lambda t: f"{t.id}: {t.name}")
         if selected:
-            with st.form("edit_target_form"):
-                name = st.text_input("Name", value=selected.name)
-                query = st.text_input("Keywords", value=selected.query)
-                if categories_ready:
-                    category_id = _render_category_picker("edit", selected.category_id)
-                else:
-                    st.warning("Category list unavailable. Keeping existing category filter.")
-                    category_id = selected.category_id
-                condition = st.text_input("Condition", value=selected.condition or "")
-                max_buy_gbp = st.number_input(
-                    "Max buy (£)",
-                    min_value=0.0,
-                    value=float(selected.max_buy_gbp or 0.0),
-                    step=1.0,
-                )
-                shipping_max_gbp = st.number_input(
-                    "Max shipping (£)",
-                    min_value=0.0,
-                    value=float(selected.shipping_max_gbp or 0.0),
-                    step=1.0,
-                )
-                listing_type_options = ["any", "auction", "bin"]
-                listing_type_index = (
-                    listing_type_options.index(selected.listing_type)
-                    if selected.listing_type in listing_type_options
-                    else 0
-                )
-                listing_type = st.selectbox(
-                    "Listing type", listing_type_options, index=listing_type_index
-                )
-                enabled = st.toggle("Enabled", value=selected.enabled)
-                updated = st.form_submit_button("Save changes")
+            if st.session_state.get("edit_target_id") != selected.id:
+                st.session_state["edit_target_id"] = selected.id
+                st.session_state["edit_name"] = selected.name
+                st.session_state["edit_query"] = selected.query
+                st.session_state["edit_query_autofill"] = ""
+                st.session_state["edit_condition"] = selected.condition or ""
+                st.session_state["edit_listing_type"] = selected.listing_type
+                st.session_state["edit_enabled"] = selected.enabled
+                st.session_state["edit_category_id"] = selected.category_id
+
+            name = st.text_input("Name", key="edit_name")
+            if categories_ready:
+                category_id = _render_category_picker("edit", selected.category_id)
+            else:
+                st.warning("Category list unavailable. Keeping existing category filter.")
+                category_id = selected.category_id
+            st.session_state["edit_category_id"] = category_id
+            _maybe_autofill_keywords("edit", st.session_state.get("edit_name", ""), category_id)
+            query = st.text_input("Keywords", key="edit_query")
+            condition = st.text_input("Condition", key="edit_condition")
+            listing_type_options = ["any", "auction", "bin"]
+            listing_type_index = (
+                listing_type_options.index(st.session_state.get("edit_listing_type", selected.listing_type))
+                if st.session_state.get("edit_listing_type", selected.listing_type) in listing_type_options
+                else 0
+            )
+            listing_type = st.selectbox(
+                "Listing type", listing_type_options, index=listing_type_index, key="edit_listing_type"
+            )
+            enabled = st.toggle("Enabled", key="edit_enabled")
+            updated = st.button("Save changes", use_container_width=True)
             if updated:
                 from ebayflip.db import update_target
 
@@ -369,8 +389,8 @@ with Tabs[1]:
                         query=query,
                         category_id=category_id or None,
                         condition=condition or None,
-                        max_buy_gbp=max_buy_gbp or None,
-                        shipping_max_gbp=shipping_max_gbp or None,
+                        max_buy_gbp=None,
+                        shipping_max_gbp=None,
                         listing_type=listing_type,
                         enabled=enabled,
                     ),
