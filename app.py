@@ -143,8 +143,9 @@ with left:
     else:
         deals = scans_df.copy()
         for col in ["est_profit_gbp", "est_roi", "score"]:
-            if col in deals.columns:
-                deals[col] = pd.to_numeric(deals[col], errors="coerce")
+            if col not in deals.columns:
+                deals[col] = pd.NA
+            deals[col] = pd.to_numeric(deals[col], errors="coerce")
         deals = deals[(deals["est_profit_gbp"] >= min_profit_gbp) & (deals["est_roi"] >= min_roi)]
         if deals.empty:
             st.info("No listings meet the current thresholds.")

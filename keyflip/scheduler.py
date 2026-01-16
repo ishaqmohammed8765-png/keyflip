@@ -475,7 +475,6 @@ def run_cycle(
         config.scans_path,
         config.passes_path,
         config.price_cache_path,
-        config.fail_ttl_s,
     )
 
     _merge_watchlist_updates(config.watchlist_path, config.temp_watchlist_path)

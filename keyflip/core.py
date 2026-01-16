@@ -428,7 +428,7 @@ def _row_to_query(row: Dict[str, Any], cfg: RunConfig) -> WatchlistQuery:
         query_text=_to_str(row.get("query_text")),
         category_id=_to_optional(row.get("category_id")),
         condition=_to_optional(row.get("condition")),
-        max_buy_gbp=_to_float_optional(row.get("max_buy_gbp")) or None,
+        max_buy_gbp=_to_float_optional(row.get("max_buy_gbp")),
         keywords_include=_split_keywords(row.get("keywords_include")),
         keywords_exclude=_split_keywords(row.get("keywords_exclude")),
         min_sold_comp_gbp=min_sold,
