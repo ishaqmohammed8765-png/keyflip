@@ -85,8 +85,6 @@ class EbayClient:
             item_filters.append(("Condition", target.condition))
         if target.listing_type and target.listing_type != "any":
             item_filters.append(("ListingType", "Auction" if target.listing_type == "auction" else "FixedPrice"))
-        if target.max_buy_gbp:
-            item_filters.append(("MaxPrice", str(target.max_buy_gbp)))
         if item_filters:
             for idx, (name, value) in enumerate(item_filters):
                 params[f"itemFilter({idx}).name"] = name
@@ -117,10 +115,6 @@ class EbayClient:
             return None
         price_gbp, shipping_gbp = self._normalize_currency(price, shipping, currency)
         total = price_gbp + shipping_gbp
-        if target.max_buy_gbp and total > target.max_buy_gbp:
-            return None
-        if target.shipping_max_gbp and shipping_gbp > target.shipping_max_gbp:
-            return None
         ebay_item_id = str(item.get("itemId", [""])[0])
         if not ebay_item_id:
             return None
@@ -216,10 +210,6 @@ class EbayClient:
                 shipping_value = 0.0
             price_gbp, shipping_gbp = self._normalize_currency(price_value, shipping_value, currency)
             total = price_gbp + shipping_gbp
-            if target.max_buy_gbp and total > target.max_buy_gbp:
-                continue
-            if target.shipping_max_gbp and shipping_gbp > target.shipping_max_gbp:
-                continue
             listing = Listing(
                 ebay_item_id=ebay_item_id,
                 target_id=target.id or 0,
