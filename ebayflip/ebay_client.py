@@ -304,6 +304,7 @@ class EbayClient:
         shipping = float(ship_price_info.get("__value__", 0.0)) if ship_price_info else 0.0
         if not self._currency_allowed(currency):
             return None
+        shipping, assumed_shipping = self._apply_missing_shipping(shipping, shipping_missing)
         price_gbp, shipping_gbp = self._normalize_currency(price, shipping, currency)
         total = price_gbp + shipping_gbp
         ebay_item_id = str(item.get("itemId", [""])[0])
@@ -326,7 +327,12 @@ class EbayClient:
             end_time=str(item.get("listingInfo", [{}])[0].get("endTime", [None])[0]),
             location=str(item.get("location", [None])[0]),
             image_url=str(item.get("galleryURL", [None])[0]),
-            raw_json={**item, "source": "api", "shipping_missing": shipping_missing},
+            raw_json={
+                **item,
+                "source": "api",
+                "shipping_missing": shipping_missing,
+                "assumed_shipping_gbp": assumed_shipping,
+            },
         )
         return listing
 
@@ -508,6 +514,12 @@ class EbayClient:
             return price, shipping
         rate = self.settings.gbp_exchange_rate
         return price * rate, shipping * rate
+
+    def _apply_missing_shipping(self, shipping_value: float, shipping_missing: bool) -> tuple[float, Optional[float]]:
+        if shipping_missing and self.settings.allow_missing_shipping_price:
+            assumed = self.settings.assumed_inbound_shipping_gbp
+            return assumed, assumed
+        return shipping_value, None
 
     def _build_api_params(self, criteria: SearchCriteria, page: int, limit: int) -> dict[str, Any]:
         params = {
@@ -936,6 +948,7 @@ def _parse_html_listings(
         if shipping_text and "free" in shipping_text.lower():
             shipping_missing = False
 
+        shipping_value, assumed_shipping = client._apply_missing_shipping(shipping_value, shipping_missing)
         price_gbp, shipping_gbp = client._normalize_currency(price_value, shipping_value, currency or "GBP")
         total = price_gbp + shipping_gbp
         condition = _extract_listing_condition(card)
@@ -958,6 +971,7 @@ def _parse_html_listings(
             raw_json={
                 "source": "html",
                 "shipping_missing": shipping_missing,
+                "assumed_shipping_gbp": assumed_shipping,
                 "price_text": price_text,
                 "shipping_text": shipping_text,
             },
@@ -1076,6 +1090,7 @@ def _parse_json_ld_listings(
         if not ebay_item_id or ebay_item_id in seen_ids:
             continue
         seen_ids.add(ebay_item_id)
+        shipping_value, assumed_shipping = client._apply_missing_shipping(0.0, True)
         listings.append(
             Listing(
                 ebay_item_id=ebay_item_id,
@@ -1083,12 +1098,16 @@ def _parse_json_ld_listings(
                 title=item.title,
                 url=item.url,
                 price_gbp=item.price_gbp,
-                shipping_gbp=0.0,
-                total_buy_gbp=item.price_gbp,
+                shipping_gbp=shipping_value,
+                total_buy_gbp=item.price_gbp + shipping_value,
                 listing_type=None,
                 location=None,
                 image_url=item.image_url,
-                raw_json={"source": "html-jsonld", "shipping_missing": True},
+                raw_json={
+                    "source": "html-jsonld",
+                    "shipping_missing": True,
+                    "assumed_shipping_gbp": assumed_shipping,
+                },
             )
         )
     return listings
@@ -1118,6 +1137,7 @@ def _parse_initial_state_listings(
         if not url:
             url = f"https://www.ebay.co.uk/itm/{ebay_item_id}"
         image_url = _get_state_text(item, ["imageUrl", "image", "thumbnailUrl"])
+        shipping_value, assumed_shipping = client._apply_missing_shipping(0.0, True)
         listings.append(
             Listing(
                 ebay_item_id=ebay_item_id,
@@ -1125,12 +1145,16 @@ def _parse_initial_state_listings(
                 title=title,
                 url=url,
                 price_gbp=price_gbp,
-                shipping_gbp=0.0,
-                total_buy_gbp=price_gbp,
+                shipping_gbp=shipping_value,
+                total_buy_gbp=price_gbp + shipping_value,
                 listing_type=None,
                 location=None,
                 image_url=image_url,
-                raw_json={"source": "html-initial-state"},
+                raw_json={
+                    "source": "html-initial-state",
+                    "shipping_missing": True,
+                    "assumed_shipping_gbp": assumed_shipping,
+                },
             )
         )
         seen_ids.add(ebay_item_id)
