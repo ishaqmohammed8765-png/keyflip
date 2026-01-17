@@ -338,8 +338,8 @@ with Tabs[0]:
                     )
                 if entry_data.get("retry_report"):
                     st.markdown("**Retries applied:**")
-                    for step in entry_data["retry_report"]:
-                        st.write(f"- {step}")
+                    retry_steps = "\n".join(f"- {step}" for step in entry_data["retry_report"])
+                    st.markdown(retry_steps)
                 if entry_data.get("rejection_counts"):
                     reasons = {
                         key: value
@@ -359,7 +359,16 @@ with Tabs[0]:
                     st.write(f"Page: {last_diag['pagination']['page']}")
                     st.write(f"Limit: {last_diag['pagination']['limit']}")
                     st.write(f"HTTP status: {last_diag['http_status']}")
-                    st.write(f"Price filters: {json.dumps(last_diag['price_filters'], indent=2)}")
+                    active_price_filters = {
+                        key: value
+                        for key, value in last_diag["price_filters"].items()
+                        if value is not None
+                    }
+                    if active_price_filters:
+                        st.markdown("**Price filters:**")
+                        st.json(active_price_filters)
+                    else:
+                        st.write("Price filters: -")
                     if entry_data.get("last_request_url"):
                         st.code(entry_data["last_request_url"])
     else:
