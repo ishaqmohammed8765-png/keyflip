@@ -363,6 +363,15 @@ class EbayClient:
             "_sop": "10",
             "_pgn": 1,
         }
+        if criteria.category_id:
+            params["_sacat"] = criteria.category_id
+        if criteria.condition:
+            params["LH_ItemCondition"] = criteria.condition
+        if criteria.listing_type and criteria.listing_type != "any":
+            if criteria.listing_type == "auction":
+                params["LH_Auction"] = "1"
+            else:
+                params["LH_BIN"] = "1"
         response, _ = self._request(HTML_SEARCH_URL, params=params, delay=True)
         soup = BeautifulSoup(response.text, "lxml")
         items = soup.select("li.s-item")

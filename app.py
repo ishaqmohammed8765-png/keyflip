@@ -204,10 +204,6 @@ def _build_auto_keywords(name: str, category_id: Optional[str]) -> str:
     parts = []
     if name:
         parts.append(name.strip())
-    if category_id:
-        category_path = _format_category_path(category_id)
-        if category_path and category_path != "-":
-            parts.append(category_path)
     return " ".join(part for part in parts if part).strip()
 
 
