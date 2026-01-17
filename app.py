@@ -55,6 +55,12 @@ if "last_scan_listings" not in st.session_state:
     st.session_state.last_scan_listings = []
 if "last_scan_debug" not in st.session_state:
     st.session_state.last_scan_debug = []
+if "last_scan_summary" not in st.session_state:
+    st.session_state.last_scan_summary = None
+if "last_scan_error" not in st.session_state:
+    st.session_state.last_scan_error = None
+if "last_scan_error_at" not in st.session_state:
+    st.session_state.last_scan_error_at = None
 
 if "settings" not in st.session_state:
     st.session_state.settings = RunSettings()
@@ -200,6 +206,47 @@ def _format_condition(condition_id: Optional[str]) -> str:
     return condition_id
 
 
+def _classify_scan_issue(entry: dict, last_diag: Optional[dict]) -> tuple[str, str]:
+    if entry.get("retry_report"):
+        for report in entry["retry_report"]:
+            if report.startswith("skipped:"):
+                return "Skipped target", "Add keywords or enable the target to scan."
+    raw_count = entry.get("raw_count", 0)
+    filtered_count = entry.get("filtered_count", 0)
+    if raw_count == 0:
+        if last_diag and last_diag.get("failure_mode"):
+            mode = last_diag["failure_mode"]
+            return f"Blocked ({mode})", "Retry later, slow scans, or use an API key."
+        if last_diag and last_diag.get("item_count") and (last_diag.get("parsed_count") or 0) == 0:
+            return "Parser mismatch", "eBay layout changed; update parsing or use API mode."
+        return "No results", "Broaden keywords or remove restrictive filters."
+    if filtered_count == 0:
+        return "Filtered out", "Relax filters or adjust pricing/condition limits."
+    return "Partial results", "Review filters if listings are missing."
+
+
+def _build_diagnostic_rows(scan_debug: list) -> list[dict]:
+    rows: list[dict] = []
+    for entry in scan_debug:
+        entry_data = dataclasses.asdict(entry)
+        last_diag = entry_data["diagnostics"][-1] if entry_data.get("diagnostics") else None
+        status, action = _classify_scan_issue(entry_data, last_diag)
+        rows.append(
+            {
+                "target": entry_data["target_name"],
+                "query": entry_data["target_query"],
+                "mode": last_diag.get("mode") if last_diag else "-",
+                "status": status,
+                "action": action,
+                "raw": entry_data.get("raw_count", 0),
+                "filtered": entry_data.get("filtered_count", 0),
+                "failure_mode": last_diag.get("failure_mode") if last_diag else "-",
+                "http_status": last_diag.get("http_status") if last_diag else "-",
+            }
+        )
+    return rows
+
+
 def _build_auto_keywords(name: str, category_id: Optional[str]) -> str:
     parts = []
     if name:
@@ -258,10 +305,21 @@ def _run_scan_with_feedback() -> None:
     except Exception as exc:
         LOGGER.exception("Scan failed: %s", exc)
         st.error("Scan failed. Check logs or try again in a moment.")
+        st.session_state.last_scan_error = str(exc)
+        st.session_state.last_scan_error_at = datetime.utcnow().isoformat()
         return
     st.session_state.last_scan = summary.last_scan
     st.session_state.last_scan_listings = summary.scanned_listings
     st.session_state.last_scan_debug = summary.zero_result_debug
+    st.session_state.last_scan_summary = {
+        "scanned_targets": summary.scanned_targets,
+        "new_listings": summary.new_listings,
+        "evaluated": summary.evaluated,
+        "deals": summary.deals,
+        "request_cap_reached": summary.request_cap_reached,
+    }
+    st.session_state.last_scan_error = None
+    st.session_state.last_scan_error_at = None
     _load_evaluations.clear()
     _load_comps.clear()
     st.success(
@@ -395,6 +453,44 @@ with Tabs[0]:
                         st.code(entry_data["last_request_url"])
     else:
         st.caption("No zero-result scans in the most recent run.")
+
+    st.subheader("Advanced Diagnostics")
+    last_error = st.session_state.get("last_scan_error")
+    if last_error:
+        st.error("Last scan failed to complete.")
+        st.write(f"Error: {last_error}")
+        if st.session_state.get("last_scan_error_at"):
+            st.write(f"Time: {st.session_state['last_scan_error_at']}")
+
+    summary = st.session_state.get("last_scan_summary")
+    if summary:
+        diag_col1, diag_col2, diag_col3, diag_col4, diag_col5 = st.columns(5)
+        diag_col1.metric("Targets scanned", summary.get("scanned_targets", 0))
+        diag_col2.metric("New listings", summary.get("new_listings", 0))
+        diag_col3.metric("Evaluated", summary.get("evaluated", 0))
+        diag_col4.metric("Deals", summary.get("deals", 0))
+        diag_col5.metric(
+            "Request cap hit",
+            "Yes" if summary.get("request_cap_reached") else "No",
+        )
+        if summary.get("scanned_targets", 0) == 0:
+            st.warning("No enabled targets were scanned. Add or enable targets in the Targets tab.")
+        if summary.get("request_cap_reached"):
+            st.warning("Request cap reached. Increase it in Settings or reduce scan frequency.")
+    else:
+        st.info("Run a scan to populate advanced diagnostics.")
+
+    diagnostic_rows = _build_diagnostic_rows(scan_debug)
+    if diagnostic_rows:
+        st.markdown("**Target diagnostics summary**")
+        st.dataframe(pd.DataFrame(diagnostic_rows), use_container_width=True, height=240)
+        recommended_actions = sorted({row["action"] for row in diagnostic_rows if row.get("action")})
+        if recommended_actions:
+            st.markdown("**Suggested fixes**")
+            for action in recommended_actions:
+                st.write(f"- {action}")
+    else:
+        st.caption("No target-level diagnostics to display yet.")
 
     st.subheader("Recent Deals")
     if eval_df.empty:
