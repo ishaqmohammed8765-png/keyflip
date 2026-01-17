@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -248,10 +249,82 @@ def _build_diagnostic_rows(scan_debug: list) -> list[dict]:
 
 
 def _build_auto_keywords(name: str, category_id: Optional[str]) -> str:
-    parts = []
-    if name:
-        parts.append(name.strip())
-    return " ".join(part for part in parts if part).strip()
+    def normalize(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip()
+
+    def broaden(value: str) -> str:
+        if not value:
+            return value
+        cleaned = re.sub(r'(["\'])(.*?)\1', r"\2", value)
+        cleaned = re.sub(r"(?<=\D)(?=\d)|(?<=\d)(?=\D)", " ", cleaned)
+        cleaned = re.sub(r"\b\d+\s?(gb|tb)\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b\d+\s?(gig|gigabyte|terabyte)s?\b", "", cleaned, flags=re.IGNORECASE)
+        colors = (
+            "black",
+            "white",
+            "silver",
+            "gray",
+            "grey",
+            "blue",
+            "red",
+            "green",
+            "graphite",
+            "gold",
+            "pink",
+            "purple",
+            "midnight",
+            "starlight",
+        )
+        pattern = r"\b(" + "|".join(colors) + r")\b"
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+        return normalize(cleaned)
+
+    def add_variant(value: str) -> None:
+        normalized = normalize(value)
+        if normalized and normalized not in variants:
+            variants.append(normalized)
+
+    base = normalize(name or "")
+    if not base:
+        return ""
+
+    stop_words = {
+        "and",
+        "or",
+        "with",
+        "for",
+        "the",
+        "a",
+        "an",
+        "of",
+        "in",
+        "on",
+        "by",
+        "to",
+    }
+    variants: list[str] = []
+    add_variant(base)
+
+    widened = broaden(base)
+    if widened and widened != base:
+        add_variant(widened)
+
+    tokens = [token for token in re.split(r"[^\w]+", base) if token]
+    core_tokens = [token for token in tokens if token.lower() not in stop_words]
+    if len(core_tokens) >= 2:
+        add_variant(" ".join(core_tokens))
+        add_variant(" ".join(core_tokens[:2]))
+        add_variant(" ".join(core_tokens[-2:]))
+
+    if len(variants) == 1:
+        return variants[0]
+
+    def format_variant(value: str) -> str:
+        if " " in value:
+            return f'"{value}"'
+        return value
+
+    return " OR ".join(format_variant(value) for value in variants)
 
 
 def _normalize_query(query: str, name: str) -> str:
