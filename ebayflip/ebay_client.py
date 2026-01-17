@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import random
 import re
 import time
@@ -404,6 +405,9 @@ class EbayClient:
             )
             raw_listings.append(listing)
 
+        if not raw_listings:
+            raw_listings = _parse_json_ld_listings(soup, target, self)
+
         filtered = filter_listings(raw_listings, _criteria_to_target(criteria, target), self.settings)
         listings = filtered.listings[:limit]
         diagnostics.append(
@@ -458,6 +462,8 @@ class EbayClient:
                     url=link_el.get("href") if link_el else None,
                 )
             )
+        if not comps:
+            comps = _parse_json_ld_comps(soup, self)
         return comps
 
     def _currency_allowed(self, currency: str) -> bool:
@@ -620,6 +626,164 @@ def _get_image_url(item: Any) -> Optional[str]:
     if not image_el:
         return None
     return image_el.get("src") or image_el.get("data-src")
+
+
+def _parse_json_ld_listings(
+    soup: BeautifulSoup, target: Target, client: EbayClient
+) -> list[Listing]:
+    listings: list[Listing] = []
+    seen_ids: set[str] = set()
+    for item in _iter_json_ld_items(soup, client):
+        if not item.url or not item.title:
+            continue
+        ebay_item_id = _extract_item_id(item.url)
+        if not ebay_item_id or ebay_item_id in seen_ids:
+            continue
+        seen_ids.add(ebay_item_id)
+        listings.append(
+            Listing(
+                ebay_item_id=ebay_item_id,
+                target_id=target.id or 0,
+                title=item.title,
+                url=item.url,
+                price_gbp=item.price_gbp,
+                shipping_gbp=0.0,
+                total_buy_gbp=item.price_gbp,
+                listing_type=None,
+                location=None,
+                image_url=item.image_url,
+                raw_json={"source": "html-jsonld", "shipping_missing": True},
+            )
+        )
+    return listings
+
+
+def _parse_json_ld_comps(soup: BeautifulSoup, client: EbayClient) -> list[SoldComp]:
+    comps: list[SoldComp] = []
+    seen_urls: set[str] = set()
+    for item in _iter_json_ld_items(soup, client):
+        if not item.title:
+            continue
+        if item.url and item.url in seen_urls:
+            continue
+        if item.url:
+            seen_urls.add(item.url)
+        comps.append(
+            SoldComp(
+                price_gbp=item.price_gbp,
+                title=item.title,
+                url=item.url,
+            )
+        )
+    return comps
+
+
+@dataclass(frozen=True, slots=True)
+class JsonLdItem:
+    title: str
+    url: Optional[str]
+    price_gbp: float
+    image_url: Optional[str]
+
+
+def _iter_json_ld_items(soup: BeautifulSoup, client: EbayClient) -> list[JsonLdItem]:
+    entries = _extract_json_ld_entries(soup)
+    items: list[JsonLdItem] = []
+    for entry in entries:
+        payload, offers = _extract_json_ld_payload(entry)
+        if not payload:
+            continue
+        title = _get_json_ld_text(payload, entry, "name")
+        url = _get_json_ld_text(payload, entry, "url")
+        price = _get_json_ld_text(offers, None, "price") or _get_json_ld_text(offers, None, "lowPrice")
+        currency = _get_json_ld_text(offers, None, "priceCurrency") or "GBP"
+        if price is None:
+            continue
+        price_value = _safe_float(price) or 0.0
+        if not client._currency_allowed(currency):
+            continue
+        price_gbp, _ = client._normalize_currency(price_value, 0.0, currency)
+        items.append(
+            JsonLdItem(
+                title=str(title) if title is not None else "",
+                url=str(url) if url else None,
+                price_gbp=price_gbp,
+                image_url=_get_json_ld_image(payload) or _get_json_ld_image(entry),
+            )
+        )
+    return items
+
+
+def _extract_json_ld_entries(soup: BeautifulSoup) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for script in soup.select('script[type="application/ld+json"]'):
+        payload = script.string or script.get_text(strip=True)
+        if not payload:
+            continue
+        try:
+            data = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        entries.extend(_walk_json_ld_entries(data))
+    return entries
+
+
+def _walk_json_ld_entries(data: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    if isinstance(data, list):
+        for item in data:
+            found.extend(_walk_json_ld_entries(item))
+        return found
+    if not isinstance(data, dict):
+        return found
+    item_list = data.get("itemListElement")
+    if isinstance(item_list, list):
+        for entry in item_list:
+            if isinstance(entry, dict):
+                found.append(entry)
+            elif isinstance(entry, str):
+                found.append({"url": entry})
+    for value in data.values():
+        if isinstance(value, (dict, list)):
+            found.extend(_walk_json_ld_entries(value))
+    return found
+
+
+def _extract_json_ld_payload(entry: dict[str, Any]) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
+    payload: Optional[dict[str, Any]] = None
+    if isinstance(entry, dict):
+        item = entry.get("item")
+        if isinstance(item, dict):
+            payload = item
+        else:
+            payload = entry
+    offers = payload.get("offers") if isinstance(payload, dict) else None
+    if isinstance(offers, list):
+        offers = offers[0] if offers else {}
+    if not isinstance(offers, dict):
+        offers = {}
+    return payload if isinstance(payload, dict) else None, offers
+
+
+def _get_json_ld_text(payload: Optional[dict[str, Any]], fallback: Optional[dict[str, Any]], key: str) -> Any:
+    if isinstance(payload, dict) and key in payload:
+        return payload.get(key)
+    if isinstance(fallback, dict):
+        return fallback.get(key)
+    return None
+
+
+def _get_json_ld_image(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+    image = payload.get("image")
+    if isinstance(image, list):
+        return image[0] if image else None
+    if isinstance(image, str):
+        return image
+    if isinstance(image, dict):
+        return image.get("url")
+    return None
 
 
 def _cached_to_response(cached: CachedResponse, url: str) -> requests.Response:
