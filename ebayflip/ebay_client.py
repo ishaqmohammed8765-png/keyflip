@@ -407,6 +407,8 @@ class EbayClient:
 
         if not raw_listings:
             raw_listings = _parse_json_ld_listings(soup, target, self)
+        if not raw_listings:
+            raw_listings = _parse_initial_state_listings(soup, target, self)
 
         filtered = filter_listings(raw_listings, _criteria_to_target(criteria, target), self.settings)
         listings = filtered.listings[:limit]
@@ -658,6 +660,49 @@ def _parse_json_ld_listings(
     return listings
 
 
+def _parse_initial_state_listings(
+    soup: BeautifulSoup, target: Target, client: EbayClient
+) -> list[Listing]:
+    state = _extract_initial_state(soup)
+    if not state:
+        return []
+    items = _iter_initial_state_items(state)
+    listings: list[Listing] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        ebay_item_id = _get_state_text(item, ["itemId", "item_id", "id"])
+        if not ebay_item_id or ebay_item_id in seen_ids:
+            continue
+        title = _get_state_text(item, ["title", "itemTitle", "titleText", "name"])
+        if not title:
+            continue
+        price_value, currency = _get_state_price(item)
+        if price_value is None or not client._currency_allowed(currency):
+            continue
+        price_gbp, _ = client._normalize_currency(price_value, 0.0, currency)
+        url = _get_state_text(item, ["itemUrl", "viewItemUrl", "url"])
+        if not url:
+            url = f"https://www.ebay.co.uk/itm/{ebay_item_id}"
+        image_url = _get_state_text(item, ["imageUrl", "image", "thumbnailUrl"])
+        listings.append(
+            Listing(
+                ebay_item_id=ebay_item_id,
+                target_id=target.id or 0,
+                title=title,
+                url=url,
+                price_gbp=price_gbp,
+                shipping_gbp=0.0,
+                total_buy_gbp=price_gbp,
+                listing_type=None,
+                location=None,
+                image_url=image_url,
+                raw_json={"source": "html-initial-state"},
+            )
+        )
+        seen_ids.add(ebay_item_id)
+    return listings
+
+
 def _parse_json_ld_comps(soup: BeautifulSoup, client: EbayClient) -> list[SoldComp]:
     comps: list[SoldComp] = []
     seen_urls: set[str] = set()
@@ -728,6 +773,53 @@ def _extract_json_ld_entries(soup: BeautifulSoup) -> list[dict[str, Any]]:
     return entries
 
 
+def _extract_initial_state(soup: BeautifulSoup) -> Optional[dict[str, Any]]:
+    for script in soup.find_all("script"):
+        payload = script.string or script.get_text(strip=True)
+        if not payload or "__INITIAL_STATE__" not in payload:
+            continue
+        state = _extract_json_payload(payload, "__INITIAL_STATE__")
+        if state:
+            return state
+    return None
+
+
+def _extract_json_payload(text: str, marker: str) -> Optional[dict[str, Any]]:
+    marker_index = text.find(marker)
+    if marker_index == -1:
+        return None
+    brace_start = text.find("{", marker_index)
+    if brace_start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(brace_start, len(text)):
+        char = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[brace_start : idx + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 def _walk_json_ld_entries(data: Any) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     if isinstance(data, list):
@@ -747,6 +839,84 @@ def _walk_json_ld_entries(data: Any) -> list[dict[str, Any]]:
         if isinstance(value, (dict, list)):
             found.extend(_walk_json_ld_entries(value))
     return found
+
+
+def _iter_initial_state_items(state: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for key in ("items", "itemList", "itemListElement", "searchResults", "results"):
+        value = state.get(key)
+        if isinstance(value, list):
+            candidates.extend([item for item in value if isinstance(item, dict)])
+    if candidates:
+        return candidates
+    return [item for item in _walk_state_entries(state) if _looks_like_listing(item)]
+
+
+def _walk_state_entries(data: Any) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if isinstance(data, dict):
+        entries.append(data)
+        for value in data.values():
+            entries.extend(_walk_state_entries(value))
+    elif isinstance(data, list):
+        for item in data:
+            entries.extend(_walk_state_entries(item))
+    return entries
+
+
+def _looks_like_listing(item: dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if any(key in item for key in ("itemId", "item_id", "id")) and any(
+        key in item for key in ("title", "itemTitle", "titleText", "name")
+    ):
+        return True
+    return False
+
+
+def _get_state_text(item: dict[str, Any], keys: list[str]) -> Optional[str]:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for sub_key in ("value", "text", "string"):
+                sub_value = value.get(sub_key)
+                if isinstance(sub_value, str) and sub_value.strip():
+                    return sub_value.strip()
+    return None
+
+
+def _get_state_price(item: dict[str, Any]) -> tuple[Optional[float], str]:
+    price_fields = [
+        "price",
+        "priceValue",
+        "currentPrice",
+        "buyNowPrice",
+        "priceWithCurrency",
+        "priceText",
+        "displayPrice",
+        "amount",
+    ]
+    currency_fields = ["currency", "currencyCode", "currencyId"]
+    for key in price_fields:
+        value = item.get(key)
+        if isinstance(value, dict):
+            amount = value.get("value") or value.get("amount") or value.get("price")
+            currency = value.get("currency") or value.get("currencyCode") or "GBP"
+            amount_value = _safe_float(amount)
+            if amount_value is not None:
+                return amount_value, str(currency)
+            if isinstance(value.get("text"), str):
+                return _parse_price(value["text"])
+        if isinstance(value, (int, float)):
+            currency = _get_state_text(item, currency_fields) or "GBP"
+            return float(value), currency
+        if isinstance(value, str):
+            amount_value, currency = _parse_price(value)
+            if amount_value:
+                return amount_value, currency
+    return None, "GBP"
 
 
 def _extract_json_ld_payload(entry: dict[str, Any]) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
