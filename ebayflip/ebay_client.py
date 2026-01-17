@@ -1014,6 +1014,7 @@ def _broaden_query(query: str) -> str:
     if not query:
         return query
     cleaned = re.sub(r'(["\']).*?\1', "", query)
+    cleaned = re.sub(r"(?<=\D)(?=\d)|(?<=\d)(?=\D)", " ", cleaned)
     cleaned = re.sub(r"\b\d+\s?(gb|tb)\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b\d+\s?(gig|gigabyte|terabyte)s?\b", "", cleaned, flags=re.IGNORECASE)
     colors = (
