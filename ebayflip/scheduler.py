@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
@@ -74,12 +75,28 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
     for target in targets:
         if stop_scan:
             break
+        normalized_target, skip_reason = _normalize_target_query(target)
+        if skip_reason:
+            LOGGER.warning("Skipping target %s: %s", target.name, skip_reason)
+            zero_result_debug.append(
+                TargetSearchDebug(
+                    target_name=target.name,
+                    target_query=target.query or target.name,
+                    retry_report=[skip_reason],
+                    diagnostics=[],
+                    rejection_counts={},
+                    raw_count=0,
+                    filtered_count=0,
+                    last_request_url=None,
+                )
+            )
+            continue
         if client.request_count >= config.run.request_cap:
             LOGGER.info("Request cap reached, stopping scan.")
             request_cap_reached = True
             break
         scanned_targets += 1
-        search_result: SearchResult = client.search_active_listings(target)
+        search_result: SearchResult = client.search_active_listings(normalized_target)
         listings = search_result.listings
         if client.request_cap_reached:
             request_cap_reached = True
@@ -165,6 +182,17 @@ def _send_alert_if_needed(config: AppConfig, listing_id: int, listing: Listing, 
     )
     if sent:
         mark_alert_sent(config.db_path, listing_id, "discord")
+
+
+def _normalize_target_query(target: Target) -> tuple[Target, Optional[str]]:
+    query = (target.query or "").strip()
+    if not query:
+        query = (target.name or "").strip()
+    if not query:
+        return target, "skipped: empty keywords and target name"
+    if query != target.query:
+        return dataclasses.replace(target, query=query), None
+    return target, None
 
 
 def _comp_query_for_listing(listing: Listing, target: Target) -> str:

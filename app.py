@@ -207,6 +207,13 @@ def _build_auto_keywords(name: str, category_id: Optional[str]) -> str:
     return " ".join(part for part in parts if part).strip()
 
 
+def _normalize_query(query: str, name: str) -> str:
+    cleaned_query = (query or "").strip()
+    if cleaned_query:
+        return cleaned_query
+    return (name or "").strip()
+
+
 def _maybe_autofill_keywords(prefix: str, name: str, category_id: Optional[str]) -> None:
     auto_value = _build_auto_keywords(name, category_id)
     if not auto_value:
@@ -448,6 +455,7 @@ with Tabs[1]:
         st.session_state["add_category_id"] = category_id
         _maybe_autofill_keywords("add", st.session_state.get("add_name", ""), category_id)
         query = st.text_input("Keywords", key="add_query")
+        query_value = _normalize_query(query, name)
         condition = _condition_selectbox("Condition", key="add_condition", selected_condition_id=None)
         listing_type = st.selectbox("Listing type", ["any", "auction", "bin"], key="add_listing_type")
         enabled = st.toggle("Enabled", value=True, key="add_enabled")
@@ -456,7 +464,7 @@ with Tabs[1]:
             target = Target(
                 id=None,
                 name=name,
-                query=query,
+                query=query_value,
                 category_id=category_id or None,
                 condition=condition,
                 max_buy_gbp=None,
@@ -493,6 +501,7 @@ with Tabs[1]:
             st.session_state["edit_category_id"] = category_id
             _maybe_autofill_keywords("edit", st.session_state.get("edit_name", ""), category_id)
             query = st.text_input("Keywords", key="edit_query")
+            query_value = _normalize_query(query, name)
             condition = _condition_selectbox(
                 "Condition",
                 key="edit_condition",
@@ -517,7 +526,7 @@ with Tabs[1]:
                     Target(
                         id=selected.id,
                         name=name,
-                        query=query,
+                        query=query_value,
                         category_id=category_id or None,
                         condition=condition or None,
                         max_buy_gbp=None,
@@ -653,6 +662,15 @@ with Tabs[4]:
         settings.allow_non_gbp = st.toggle("Allow non-GBP listings", value=settings.allow_non_gbp)
         settings.gbp_exchange_rate = st.number_input(
             "GBP exchange rate", value=settings.gbp_exchange_rate, step=0.01
+        )
+        settings.allow_missing_shipping_price = st.toggle(
+            "Allow missing shipping prices",
+            value=settings.allow_missing_shipping_price,
+        )
+        settings.assumed_inbound_shipping_gbp = st.number_input(
+            "Assumed inbound shipping (£)",
+            value=settings.assumed_inbound_shipping_gbp,
+            step=0.5,
         )
 
     st.markdown("### Alerts")

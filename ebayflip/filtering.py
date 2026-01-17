@@ -61,7 +61,7 @@ def filter_listings(
                 reasons.append("blocked keywords")
         if _seller_fails_thresholds(listing, settings):
             reasons.append("seller risk thresholds")
-        if listing.raw_json and listing.raw_json.get("shipping_missing"):
+        if listing.raw_json and listing.raw_json.get("shipping_missing") and not settings.allow_missing_shipping_price:
             reasons.append("missing shipping price")
 
         if reasons:
