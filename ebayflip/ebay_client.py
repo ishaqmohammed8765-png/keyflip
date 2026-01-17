@@ -46,6 +46,8 @@ class SearchAttemptLog:
     request_url: Optional[str]
     item_count: Optional[int] = None
     parsed_count: Optional[int] = None
+    failure_mode: Optional[str] = None
+    response_length: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -448,6 +450,8 @@ class EbayClient:
                 request_url=response.url,
                 item_count=item_count,
                 parsed_count=len(raw_listings),
+                failure_mode=failure_mode,
+                response_length=response_length,
             )
         )
         return SearchResult(
@@ -546,6 +550,8 @@ class EbayClient:
         request_url: Optional[str],
         item_count: Optional[int] = None,
         parsed_count: Optional[int] = None,
+        failure_mode: Optional[str] = None,
+        response_length: Optional[int] = None,
     ) -> SearchAttemptLog:
         price_filters = {
             "max_buy_gbp": criteria.max_buy_gbp,
@@ -565,6 +571,8 @@ class EbayClient:
             request_url=request_url,
             item_count=item_count,
             parsed_count=parsed_count,
+            failure_mode=failure_mode,
+            response_length=response_length,
         )
         LOGGER.info(
             "eBay search [%s] query=%s category=%s condition=%s price_filters=%s page=%s limit=%s status=%s raw=%s filtered=%s url=%s",
@@ -749,9 +757,16 @@ def _detect_failure_mode(text: str) -> Optional[str]:
             "perimeterx",
             "blocked",
             "forbidden",
+            "request blocked",
+            "temporarily unavailable",
         ],
         "consent wall": ["consent", "cookie", "privacy choices"],
-        "js required": ["enable javascript", "please enable javascript", "javascript required"],
+        "js required": [
+            "enable javascript",
+            "please enable javascript",
+            "javascript required",
+            "please enable cookies",
+        ],
     }
     for label, tokens in patterns.items():
         if any(token in lowered for token in tokens):
@@ -1193,14 +1208,51 @@ def _extract_json_ld_entries(soup: BeautifulSoup) -> list[dict[str, Any]]:
 
 
 def _extract_initial_state(soup: BeautifulSoup) -> Optional[dict[str, Any]]:
+    state = _extract_script_json_by_id(soup, "__NEXT_DATA__")
+    if state:
+        return state
     for script in soup.find_all("script"):
         payload = script.string or script.get_text(strip=True)
-        if not payload or "__INITIAL_STATE__" not in payload:
+        if not payload:
             continue
-        state = _extract_json_payload(payload, "__INITIAL_STATE__")
-        if state:
-            return state
+        parsed = _extract_state_from_payload(payload)
+        if parsed:
+            return parsed
     return None
+
+
+def _extract_script_json_by_id(soup: BeautifulSoup, script_id: str) -> Optional[dict[str, Any]]:
+    script = soup.find("script", id=script_id)
+    if not script:
+        return None
+    payload = script.string or script.get_text(strip=True)
+    if not payload:
+        return None
+    return _load_json_payload(payload)
+
+
+def _extract_state_from_payload(payload: str) -> Optional[dict[str, Any]]:
+    markers = [
+        "__INITIAL_STATE__",
+        "__PRELOADED_STATE__",
+        "__APOLLO_STATE__",
+    ]
+    for marker in markers:
+        if marker in payload:
+            state = _extract_json_payload(payload, marker)
+            if state:
+                return state
+    if payload.lstrip().startswith("{") and payload.rstrip().endswith("}"):
+        return _load_json_payload(payload)
+    return None
+
+
+def _load_json_payload(payload: str) -> Optional[dict[str, Any]]:
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _extract_json_payload(text: str, marker: str) -> Optional[dict[str, Any]]:
@@ -1262,7 +1314,14 @@ def _walk_json_ld_entries(data: Any) -> list[dict[str, Any]]:
 
 def _iter_initial_state_items(state: dict[str, Any]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    for key in ("items", "itemList", "itemListElement", "searchResults", "results"):
+    for key in (
+        "items",
+        "itemList",
+        "itemListElement",
+        "searchResults",
+        "results",
+        "itemSummaries",
+    ):
         value = state.get(key)
         if isinstance(value, list):
             candidates.extend([item for item in value if isinstance(item, dict)])

@@ -366,6 +366,10 @@ with Tabs[0]:
                     st.write(f"Page: {last_diag['pagination']['page']}")
                     st.write(f"Limit: {last_diag['pagination']['limit']}")
                     st.write(f"HTTP status: {last_diag['http_status']}")
+                    if last_diag.get("failure_mode"):
+                        st.warning(f"Failure mode: {last_diag['failure_mode']}")
+                    if last_diag.get("response_length") is not None:
+                        st.write(f"Response length: {last_diag['response_length']}")
                     if last_diag.get("item_count") is not None:
                         st.write(f"Items detected in response: {last_diag['item_count']}")
                     if last_diag.get("parsed_count") is not None:
