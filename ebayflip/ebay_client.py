@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import json
 import random
 import re
 import time
 from collections import Counter
+from datetime import datetime
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -76,8 +79,16 @@ class EbayClient:
         self.session = requests.Session()
         self.session.headers.update(
             {
-                "User-Agent": "Mozilla/5.0 (compatible; EbayFlipScanner/1.0; +https://www.ebay.co.uk)",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-GB,en;q=0.9",
+                "Accept-Encoding": _accept_encoding_header(),
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
             }
         )
 
@@ -360,66 +371,65 @@ class EbayClient:
         criteria: SearchCriteria,
         target: Target,
         diagnostics: list[SearchAttemptLog],
+        *,
+        page: int = 1,
     ) -> SearchResult:
         limit = self.settings.scan_limit_per_target
-        params = {
-            "_nkw": criteria.query,
-            "_sop": "10",
-            "_pgn": 1,
-        }
-        if criteria.category_id:
-            params["_sacat"] = criteria.category_id
-        if criteria.condition:
-            params["LH_ItemCondition"] = criteria.condition
-        if criteria.listing_type and criteria.listing_type != "any":
-            if criteria.listing_type == "auction":
-                params["LH_Auction"] = "1"
-            else:
-                params["LH_BIN"] = "1"
-        response, _ = self._request(HTML_SEARCH_URL, params=params, delay=True)
-        soup = BeautifulSoup(response.text, "lxml")
-        items = soup.select("li.s-item")
-        item_count = len(items)
-        raw_listings: list[Listing] = []
-        for item in items:
-            title_el = item.select_one("h3.s-item__title")
-            link_el = item.select_one("a.s-item__link")
-            price_el = item.select_one("span.s-item__price")
-            if not title_el or not link_el or not price_el:
-                continue
-            title = title_el.get_text(strip=True)
-            if title.lower() == "shop on ebay":
-                continue
-            url = link_el.get("href") or ""
-            ebay_item_id = _extract_item_id(url)
-            if not ebay_item_id:
-                continue
-            price_value, currency = _parse_price(price_el.get_text())
-            if not self._currency_allowed(currency):
-                continue
-            shipping_el = item.select_one("span.s-item__shipping")
-            shipping_missing = shipping_el is None
-            shipping_value, shipping_currency = _parse_price(shipping_el.get_text()) if shipping_el else (0.0, "GBP")
-            if shipping_currency != currency and shipping_currency:
-                shipping_value = 0.0
-            price_gbp, shipping_gbp = self._normalize_currency(price_value, shipping_value, currency)
-            total = price_gbp + shipping_gbp
-            listing = Listing(
-                ebay_item_id=ebay_item_id,
-                target_id=target.id or 0,
-                title=title,
-                url=url,
-                price_gbp=price_gbp,
-                shipping_gbp=shipping_gbp,
-                total_buy_gbp=total,
-                listing_type=_infer_listing_type(item),
-                location=_get_text(item.select_one("span.s-item__location")),
-                image_url=_get_image_url(item),
-                raw_json={"source": "html", "shipping_missing": shipping_missing},
-            )
-            raw_listings.append(listing)
+        params = _build_html_params(criteria, page)
+        response, cached = fetch_html(self, HTML_SEARCH_URL, params=params, delay=True)
+        response_text = response.text
+        debug_path = _save_debug_html(response_text, prefix="ebay_search")
+        failure_mode = _detect_failure_mode(response_text)
+        response_length = len(response_text)
+        redirect_chain = [resp.url for resp in response.history] if response.history else []
+        LOGGER.info(
+            "eBay HTML response status=%s url=%s cached=%s length=%s redirects=%s debug_html=%s",
+            response.status_code,
+            response.url,
+            cached,
+            response_length,
+            redirect_chain,
+            debug_path,
+        )
+        request_headers = dict(response.request.headers) if response.request else dict(self.session.headers)
+        LOGGER.info("eBay HTML request headers=%s", request_headers)
+        LOGGER.info("eBay HTML response headers=%s", _filter_headers(response.headers))
+        if response_text:
+            LOGGER.info("eBay HTML response snippet=%s", response_text[:2000])
+        if failure_mode:
+            LOGGER.warning("eBay HTML failure mode detected: %s", failure_mode)
+
+        raw_listings, parse_metrics = parse_html(response_text, target, self)
+        item_count = parse_metrics["card_count"]
+        LOGGER.info(
+            "eBay HTML parse metrics cards=%s titles=%s links=%s prices=%s",
+            parse_metrics["card_count"],
+            parse_metrics["title_count"],
+            parse_metrics["link_count"],
+            parse_metrics["price_count"],
+        )
+
+        playwright_html: Optional[str] = None
+        if (failure_mode or not raw_listings) and _should_fallback_to_playwright(
+            failure_mode, parse_metrics["card_count"]
+        ):
+            LOGGER.info("Attempting Playwright fallback for eBay search.")
+            playwright_html = fetch_with_playwright(response.url, self.session.headers)
+            if playwright_html:
+                debug_path = _save_debug_html(playwright_html, prefix="ebay_search_playwright")
+                LOGGER.info("Playwright HTML saved to %s", debug_path)
+                raw_listings, parse_metrics = parse_html(playwright_html, target, self)
+                item_count = parse_metrics["card_count"]
+                LOGGER.info(
+                    "Playwright parse metrics cards=%s titles=%s links=%s prices=%s",
+                    parse_metrics["card_count"],
+                    parse_metrics["title_count"],
+                    parse_metrics["link_count"],
+                    parse_metrics["price_count"],
+                )
 
         if not raw_listings:
+            soup = BeautifulSoup(playwright_html or response_text, "lxml")
             raw_listings = _parse_json_ld_listings(soup, target, self)
         if not raw_listings:
             raw_listings = _parse_initial_state_listings(soup, target, self)
@@ -430,7 +440,7 @@ class EbayClient:
             self._build_log(
                 mode="html",
                 criteria=criteria,
-                page=1,
+                page=page,
                 limit=limit,
                 status=response.status_code,
                 raw_count=len(raw_listings),
@@ -573,8 +583,220 @@ class EbayClient:
         return log
 
 
+def build_url(
+    query: str,
+    *,
+    page: int = 1,
+    category: Optional[str] = None,
+    condition: Optional[str] = None,
+    listing_type: str = "any",
+) -> str:
+    params = {
+        "_nkw": query,
+        "_sop": "10",
+        "_pgn": page,
+    }
+    if category:
+        params["_sacat"] = category
+    if condition:
+        params["LH_ItemCondition"] = condition
+    if listing_type and listing_type != "any":
+        if listing_type == "auction":
+            params["LH_Auction"] = "1"
+        else:
+            params["LH_BIN"] = "1"
+    return f"{HTML_SEARCH_URL}?{urlencode(params)}"
+
+
+def normalize_price(text: str) -> tuple[float, str]:
+    if not text:
+        return 0.0, "GBP"
+    cleaned = text.strip()
+    if "free" in cleaned.lower():
+        return 0.0, "GBP"
+    return _parse_price(cleaned)
+
+
+def fetch_ebay_search(
+    query: str,
+    *,
+    page: int = 1,
+    category: Optional[str] = None,
+    condition: Optional[str] = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    settings = RunSettings(scan_limit_per_target=limit)
+    client = EbayClient(settings)
+    criteria = SearchCriteria(
+        query=query,
+        category_id=category,
+        condition=condition,
+        max_buy_gbp=None,
+        shipping_max_gbp=None,
+        listing_type="any",
+    )
+    target = Target(id=0, name=query, query=query, category_id=category, condition=condition)
+    params = _build_html_params(criteria, page)
+    response, _ = fetch_html(client, HTML_SEARCH_URL, params=params, delay=True)
+    html = response.text
+    failure_mode = _detect_failure_mode(html)
+    listings, metrics = parse_html(html, target, client)
+    playwright_html: Optional[str] = None
+    if (failure_mode or not listings) and _should_fallback_to_playwright(failure_mode, metrics["card_count"]):
+        playwright_html = fetch_with_playwright(response.url, client.session.headers)
+        if playwright_html:
+            listings, metrics = parse_html(playwright_html, target, client)
+    if not listings:
+        soup = BeautifulSoup(playwright_html or html, "lxml")
+        listings = _parse_json_ld_listings(soup, target, client)
+    if not listings:
+        listings = _parse_initial_state_listings(soup, target, client)
+    return [
+        {
+            "title": listing.title,
+            "price_gbp": listing.price_gbp,
+            "shipping_gbp": listing.shipping_gbp,
+            "url": listing.url,
+            "condition": listing.condition,
+            "listing_type": listing.listing_type,
+            "location": listing.location,
+            "image_url": listing.image_url,
+        }
+        for listing in listings[:limit]
+    ]
+
+
+def fetch_html(
+    client: EbayClient,
+    url: str,
+    *,
+    params: Optional[dict[str, Any]] = None,
+    delay: bool = False,
+) -> tuple[requests.Response, bool]:
+    return client._request(url, params=params, delay=delay)
+
+
+def parse_html(
+    html: str,
+    target: Target,
+    client: EbayClient,
+) -> tuple[list[Listing], dict[str, int]]:
+    soup = BeautifulSoup(html, "lxml")
+    return _parse_html_listings(soup, target, client)
+
+
 def _get_text(el: Optional[Any]) -> Optional[str]:
     return el.get_text(strip=True) if el else None
+
+
+def _build_html_params(criteria: SearchCriteria, page: int) -> dict[str, Any]:
+    params = {
+        "_nkw": criteria.query,
+        "_sop": "10",
+        "_pgn": page,
+    }
+    if criteria.category_id:
+        params["_sacat"] = criteria.category_id
+    if criteria.condition:
+        params["LH_ItemCondition"] = criteria.condition
+    if criteria.listing_type and criteria.listing_type != "any":
+        if criteria.listing_type == "auction":
+            params["LH_Auction"] = "1"
+        else:
+            params["LH_BIN"] = "1"
+    return params
+
+
+def _filter_headers(headers: dict[str, str]) -> dict[str, str]:
+    keep = {
+        "content-type",
+        "content-encoding",
+        "cache-control",
+        "set-cookie",
+        "location",
+        "server",
+    }
+    return {key: value for key, value in headers.items() if key.lower() in keep}
+
+
+def _accept_encoding_header() -> str:
+    encodings = ["gzip", "deflate"]
+    if importlib.util.find_spec("brotli") or importlib.util.find_spec("brotlicffi"):
+        encodings.append("br")
+    return ", ".join(encodings)
+
+
+def _save_debug_html(text: str, *, prefix: str) -> str:
+    debug_dir = Path(".cache/ebayflip_debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    path = debug_dir / f"{prefix}_{timestamp}.html"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def _detect_failure_mode(text: str) -> Optional[str]:
+    if not text:
+        return "empty response"
+    lowered = text.lower()
+    patterns = {
+        "captcha": ["captcha", "verify you are human", "human verification", "robot check"],
+        "bot protection": [
+            "access denied",
+            "unusual traffic",
+            "pardon our interruption",
+            "akamai",
+            "perimeterx",
+            "blocked",
+            "forbidden",
+        ],
+        "consent wall": ["consent", "cookie", "privacy choices"],
+        "js required": ["enable javascript", "please enable javascript", "javascript required"],
+    }
+    for label, tokens in patterns.items():
+        if any(token in lowered for token in tokens):
+            return label
+    if "s-item" not in lowered and "srp" not in lowered and "search" in lowered:
+        return "empty template"
+    return None
+
+
+def _should_fallback_to_playwright(failure_mode: Optional[str], card_count: int) -> bool:
+    if failure_mode:
+        return True
+    return card_count == 0
+
+
+def fetch_with_playwright(url: str, headers: dict[str, str]) -> Optional[str]:
+    if importlib.util.find_spec("playwright.sync_api") is None:
+        LOGGER.warning("Playwright not installed; skipping browser fallback.")
+        return None
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+
+    user_data_dir = Path(".cache/ebayflip_playwright")
+    user_data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch_persistent_context(
+                user_data_dir=str(user_data_dir),
+                headless=True,
+                viewport={"width": 1280, "height": 800},
+                locale="en-GB",
+            )
+            page = browser.new_page()
+            page.set_extra_http_headers({key: value for key, value in headers.items() if key.lower() != "host"})
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_selector("li.s-item, div.s-item__wrapper, div.s-item", timeout=15000)
+            except PlaywrightTimeoutError:
+                LOGGER.warning("Playwright wait timed out; continuing with captured HTML.")
+            html = page.content()
+            browser.close()
+            return html
+    except Exception:
+        LOGGER.exception("Playwright fallback failed.")
+        return None
 
 
 def _infer_listing_type(item: Any) -> Optional[str]:
@@ -648,6 +870,183 @@ def _get_image_url(item: Any) -> Optional[str]:
     if not image_el:
         return None
     return image_el.get("src") or image_el.get("data-src")
+
+
+def _parse_html_listings(
+    soup: BeautifulSoup, target: Target, client: EbayClient
+) -> tuple[list[Listing], dict[str, int]]:
+    cards = _extract_listing_cards(soup)
+    metrics = {
+        "card_count": len(cards),
+        "title_count": 0,
+        "link_count": 0,
+        "price_count": 0,
+    }
+    listings: list[Listing] = []
+    seen_ids: set[str] = set()
+    for card in cards:
+        title = _extract_listing_title(card)
+        if title:
+            metrics["title_count"] += 1
+        if title and title.lower() == "shop on ebay":
+            continue
+        link = _extract_listing_link(card)
+        if link:
+            metrics["link_count"] += 1
+        ebay_item_id = _extract_item_id(link) if link else ""
+        if not ebay_item_id:
+            ebay_item_id = _extract_item_id_from_card(card)
+        if not ebay_item_id and link:
+            ebay_item_id = _extract_item_id(link)
+        if not link and ebay_item_id:
+            link = f"https://www.ebay.co.uk/itm/{ebay_item_id}"
+        if not ebay_item_id:
+            continue
+        if ebay_item_id in seen_ids:
+            continue
+        seen_ids.add(ebay_item_id)
+
+        price_text = _extract_listing_price_text(card)
+        if price_text:
+            metrics["price_count"] += 1
+        price_value, currency = normalize_price(price_text or "")
+        if price_text and not client._currency_allowed(currency):
+            continue
+
+        shipping_text = _extract_listing_shipping_text(card)
+        shipping_missing = shipping_text is None
+        shipping_value, shipping_currency = normalize_price(shipping_text or "")
+        if shipping_text and shipping_currency and shipping_currency != currency:
+            shipping_value = 0.0
+        if shipping_text and "free" in shipping_text.lower():
+            shipping_missing = False
+
+        price_gbp, shipping_gbp = client._normalize_currency(price_value, shipping_value, currency or "GBP")
+        total = price_gbp + shipping_gbp
+        condition = _extract_listing_condition(card)
+        seller_feedback_pct, seller_feedback_score = _extract_seller_feedback(card)
+
+        listing = Listing(
+            ebay_item_id=ebay_item_id,
+            target_id=target.id or 0,
+            title=title or "Unknown title",
+            url=link or "",
+            price_gbp=price_gbp,
+            shipping_gbp=shipping_gbp,
+            total_buy_gbp=total,
+            condition=condition,
+            seller_feedback_pct=seller_feedback_pct,
+            seller_feedback_score=seller_feedback_score,
+            listing_type=_infer_listing_type(card),
+            location=_get_text(card.select_one("span.s-item__location")),
+            image_url=_get_image_url(card),
+            raw_json={
+                "source": "html",
+                "shipping_missing": shipping_missing,
+                "price_text": price_text,
+                "shipping_text": shipping_text,
+            },
+        )
+        listings.append(listing)
+    return listings, metrics
+
+
+def _extract_listing_cards(soup: BeautifulSoup) -> list[Any]:
+    selectors = ["li.s-item", "div.s-item__wrapper", "div.s-item"]
+    cards: list[Any] = []
+    for selector in selectors:
+        cards.extend(soup.select(selector))
+    if not cards:
+        cards = soup.select("ul.srp-results > li")
+    return cards
+
+
+def _extract_listing_title(card: Any) -> Optional[str]:
+    selectors = [
+        "h3.s-item__title",
+        "span.s-item__title",
+        "div.s-item__title span",
+    ]
+    for selector in selectors:
+        el = card.select_one(selector)
+        if el and el.get_text(strip=True):
+            return el.get_text(strip=True)
+    link_el = card.select_one("a.s-item__link")
+    if link_el:
+        for key in ("title", "aria-label"):
+            value = link_el.get(key)
+            if value:
+                return value.strip()
+    return None
+
+
+def _extract_listing_link(card: Any) -> Optional[str]:
+    link_el = card.select_one("a.s-item__link")
+    if link_el and link_el.get("href"):
+        return link_el.get("href")
+    link_el = card.select_one("a[href*='/itm/']")
+    if link_el and link_el.get("href"):
+        return link_el.get("href")
+    return None
+
+
+def _extract_listing_price_text(card: Any) -> Optional[str]:
+    selectors = [
+        "span.s-item__price",
+        "div.s-item__details span.s-item__price",
+        "span.s-item__price span",
+    ]
+    for selector in selectors:
+        el = card.select_one(selector)
+        if el and el.get_text(strip=True):
+            return el.get_text(strip=True)
+    return None
+
+
+def _extract_listing_shipping_text(card: Any) -> Optional[str]:
+    selectors = [
+        "span.s-item__shipping",
+        "span.s-item__logisticsCost",
+        "span.s-item__shipping.s-item__logisticsCost",
+    ]
+    for selector in selectors:
+        el = card.select_one(selector)
+        if el and el.get_text(strip=True):
+            return el.get_text(strip=True)
+    return None
+
+
+def _extract_listing_condition(card: Any) -> Optional[str]:
+    selectors = [
+        "span.SECONDARY_INFO",
+        "span.s-item__subtitle",
+    ]
+    for selector in selectors:
+        el = card.select_one(selector)
+        if el and el.get_text(strip=True):
+            return el.get_text(strip=True)
+    return None
+
+
+def _extract_seller_feedback(card: Any) -> tuple[Optional[float], Optional[int]]:
+    seller_text = _get_text(card.select_one("span.s-item__seller-info-text"))
+    if not seller_text:
+        return None, None
+    pct_match = re.search(r"([\d.]+)%\s*positive", seller_text)
+    pct = _safe_float(pct_match.group(1)) if pct_match else None
+    score_match = re.search(r"([\d,]+)\s+feedback", seller_text)
+    score = _safe_int(score_match.group(1).replace(",", "")) if score_match else None
+    return pct, score
+
+
+def _extract_item_id_from_card(card: Any) -> str:
+    for attr in ("data-itemid", "data-view", "data-entityid", "data-listingid"):
+        value = card.get(attr)
+        if value and isinstance(value, str):
+            match = re.search(r"(\d{9,})", value)
+            if match:
+                return match.group(1)
+    return ""
 
 
 def _parse_json_ld_listings(
@@ -1083,3 +1482,9 @@ def _empty_search_result() -> SearchResult:
         filtered_count=0,
         last_request_url=None,
     )
+
+
+if __name__ == "__main__":
+    results = fetch_ebay_search("iphone 14")
+    print(f"Found {len(results)} items")
+    print(results[:3])
