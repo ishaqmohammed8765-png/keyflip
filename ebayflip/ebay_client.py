@@ -41,6 +41,8 @@ class SearchAttemptLog:
     raw_count: int
     filtered_count: int
     request_url: Optional[str]
+    item_count: Optional[int] = None
+    parsed_count: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -256,6 +258,8 @@ class EbayClient:
                     raw_count=len(raw_listings),
                     filtered_count=len(filtered.listings),
                     request_url=response.url,
+                    item_count=len(raw_items),
+                    parsed_count=len(raw_listings),
                 )
             )
             if listings and len(listings) >= limit:
@@ -375,6 +379,7 @@ class EbayClient:
         response, _ = self._request(HTML_SEARCH_URL, params=params, delay=True)
         soup = BeautifulSoup(response.text, "lxml")
         items = soup.select("li.s-item")
+        item_count = len(items)
         raw_listings: list[Listing] = []
         for item in items:
             title_el = item.select_one("h3.s-item__title")
@@ -431,6 +436,8 @@ class EbayClient:
                 raw_count=len(raw_listings),
                 filtered_count=len(filtered.listings),
                 request_url=response.url,
+                item_count=item_count,
+                parsed_count=len(raw_listings),
             )
         )
         return SearchResult(
@@ -527,6 +534,8 @@ class EbayClient:
         raw_count: int,
         filtered_count: int,
         request_url: Optional[str],
+        item_count: Optional[int] = None,
+        parsed_count: Optional[int] = None,
     ) -> SearchAttemptLog:
         price_filters = {
             "max_buy_gbp": criteria.max_buy_gbp,
@@ -544,6 +553,8 @@ class EbayClient:
             raw_count=raw_count,
             filtered_count=filtered_count,
             request_url=request_url,
+            item_count=item_count,
+            parsed_count=parsed_count,
         )
         LOGGER.info(
             "eBay search [%s] query=%s category=%s condition=%s price_filters=%s page=%s limit=%s status=%s raw=%s filtered=%s url=%s",

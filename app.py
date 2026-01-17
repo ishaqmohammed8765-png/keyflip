@@ -332,6 +332,13 @@ with Tabs[0]:
             with st.expander(f"{entry_data['target_name']} — {entry_data['target_query']}"):
                 if entry_data["raw_count"] == 0:
                     st.write("0 results from eBay.")
+                    if last_diag and last_diag.get("item_count"):
+                        parsed_count = last_diag.get("parsed_count") or 0
+                        if parsed_count == 0 and last_diag.get("mode") == "html":
+                            st.caption(
+                                f"Items detected in response: {last_diag['item_count']} (none parsed). "
+                                "The eBay page layout may have changed."
+                            )
                 else:
                     st.write(
                         f"Results were filtered out locally (raw {entry_data['raw_count']}, kept {entry_data['filtered_count']})."
@@ -359,6 +366,10 @@ with Tabs[0]:
                     st.write(f"Page: {last_diag['pagination']['page']}")
                     st.write(f"Limit: {last_diag['pagination']['limit']}")
                     st.write(f"HTTP status: {last_diag['http_status']}")
+                    if last_diag.get("item_count") is not None:
+                        st.write(f"Items detected in response: {last_diag['item_count']}")
+                    if last_diag.get("parsed_count") is not None:
+                        st.write(f"Parsed listings: {last_diag['parsed_count']}")
                     active_price_filters = {
                         key: value
                         for key, value in last_diag["price_filters"].items()
