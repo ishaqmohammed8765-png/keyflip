@@ -61,6 +61,7 @@ class SearchAttemptLog:
     query: str
     category_id: Optional[str]
     condition: Optional[str]
+    listing_type: str
     price_filters: dict[str, Optional[float]]
     pagination: dict[str, int]
     http_status: Optional[int]
@@ -629,6 +630,7 @@ class EbayClient:
             query=criteria.query,
             category_id=criteria.category_id,
             condition=criteria.condition,
+            listing_type=criteria.listing_type,
             price_filters=price_filters,
             pagination={"page": page, "limit": limit},
             http_status=status,
@@ -1640,6 +1642,8 @@ def _build_retry_steps(base: SearchCriteria) -> list[tuple[str, SearchCriteria]]
         steps.append(("removed category filter", dataclasses.replace(base, category_id=None)))
     if base.condition:
         steps.append(("removed condition filter", dataclasses.replace(base, condition=None)))
+    if base.listing_type and base.listing_type != "any":
+        steps.append(("removed listing type filter", dataclasses.replace(base, listing_type="any")))
     if base.max_buy_gbp is not None or base.shipping_max_gbp is not None:
         steps.append(
             (
