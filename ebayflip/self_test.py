@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ebayflip.ebay_client import SearchCriteria, _build_retry_steps, _broaden_query
+from ebayflip.ebay_client import SearchCriteria, _build_retry_steps, _broaden_query, _parse_price
 
 
 def run_self_tests() -> None:
@@ -25,6 +25,11 @@ def run_self_tests() -> None:
         "removed condition filter",
         "removed price filters",
     ], f"Unexpected retry order: {step_labels}"
+
+    price, currency = _parse_price("£129.99 (was £159.99)")
+    assert price == 129.99 and currency == "GBP", f"Unexpected price parse: {price} {currency}"
+    price, currency = _parse_price("US $199.50 approx")
+    assert price == 199.50 and currency == "USD", f"Unexpected price parse: {price} {currency}"
 
 
 if __name__ == "__main__":

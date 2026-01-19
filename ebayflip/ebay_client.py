@@ -464,6 +464,7 @@ class EbayClient:
 
         raw_listings, parse_metrics = parse_html(response_text, target, self)
         item_count = parse_metrics["card_count"]
+        no_priced_listings = bool(raw_listings) and all(listing.price_gbp <= 0 for listing in raw_listings)
         LOGGER.info(
             "eBay HTML parse metrics cards=%s titles=%s links=%s prices=%s",
             parse_metrics["card_count"],
@@ -473,7 +474,7 @@ class EbayClient:
         )
 
         playwright_html: Optional[str] = None
-        if (failure_mode or not raw_listings) and _should_fallback_to_playwright(
+        if (failure_mode or not raw_listings or no_priced_listings) and _should_fallback_to_playwright(
             failure_mode, parse_metrics["card_count"]
         ):
             LOGGER.info("Attempting Playwright fallback for eBay search.")
@@ -483,6 +484,9 @@ class EbayClient:
                 LOGGER.info("Playwright HTML saved to %s", debug_path)
                 raw_listings, parse_metrics = parse_html(playwright_html, target, self)
                 item_count = parse_metrics["card_count"]
+                no_priced_listings = bool(raw_listings) and all(
+                    listing.price_gbp <= 0 for listing in raw_listings
+                )
                 LOGGER.info(
                     "Playwright parse metrics cards=%s titles=%s links=%s prices=%s",
                     parse_metrics["card_count"],
@@ -491,10 +495,13 @@ class EbayClient:
                     parse_metrics["price_count"],
                 )
 
-        if not raw_listings:
+        if not raw_listings or no_priced_listings:
             soup = BeautifulSoup(playwright_html or response_text, "lxml")
             raw_listings = _parse_json_ld_listings(soup, target, self)
-        if not raw_listings:
+            no_priced_listings = bool(raw_listings) and all(
+                listing.price_gbp <= 0 for listing in raw_listings
+            )
+        if not raw_listings or no_priced_listings:
             raw_listings = _parse_initial_state_listings(soup, target, self)
 
         filtered = filter_listings(raw_listings, _criteria_to_target(criteria, target), self.settings)
@@ -982,12 +989,10 @@ def _parse_price(text: str) -> tuple[float, str]:
         if token in cleaned:
             cleaned = cleaned.split(token)[0]
     cleaned = cleaned.strip()
-    value = 0.0
-    try:
-        value = float(cleaned)
-    except ValueError:
-        value = 0.0
-    return value, currency
+    match = re.search(r"(\d+(?:\.\d+)?)", cleaned)
+    if not match:
+        return 0.0, currency
+    return float(match.group(1)), currency
 
 
 def _extract_item_id(url: str) -> str:
