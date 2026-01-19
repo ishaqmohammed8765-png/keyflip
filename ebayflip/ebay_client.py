@@ -9,7 +9,6 @@ import re
 import subprocess
 import sys
 import time
-from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from dataclasses import dataclass
@@ -23,11 +22,11 @@ from ebayflip import get_logger
 from ebayflip.cache import CacheStore, CachedResponse
 from ebayflip.config import RunSettings
 from ebayflip.filtering import filter_listings
+from ebayflip.ebay_api_provider import EbayApiProvider
 from ebayflip.models import Listing, SoldComp, Target
 
 LOGGER = get_logger()
 
-FINDING_ENDPOINT = "https://svcs.ebay.com/services/search/FindingService/v1"
 HTML_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
 DEFAULT_PLAYWRIGHT_BROWSERS_PATH = "/tmp/pw-browsers"
 USER_AGENTS = [
@@ -53,10 +52,36 @@ USER_AGENTS = [
     ),
 ]
 BOT_FAILURE_MODES = {"captcha", "bot protection"}
+BLOCKED_TOKENS = [
+    "pardon our interruption",
+    "captcha",
+    "verify you are human",
+    "human verification",
+    "robot check",
+    "robot",
+    "challenge",
+    "splashui",
+]
+CHALLENGE_SELECTORS = [
+    "form#px-captcha",
+    "#px-captcha",
+    "#captcha-container",
+    "iframe[src*='captcha']",
+    "iframe[src*='hcaptcha']",
+    "iframe[src*='recaptcha']",
+    "div[id*='challenge']",
+    "form[action*='captcha']",
+]
 
 
 class RequestLimitError(RuntimeError):
     pass
+
+
+class BlockedError(RuntimeError):
+    def __init__(self, blocked: "BlockedInfo") -> None:
+        super().__init__(blocked.message)
+        self.blocked = blocked
 
 
 @dataclass(slots=True)
@@ -126,6 +151,7 @@ class EbayClient:
         self.request_cap_reached = False
         self.cache = CacheStore(".cache/ebayflip_cache.sqlite", ttl_seconds=300)
         self.session = requests.Session()
+        self.api_provider = EbayApiProvider(self)
         self._apply_session_headers()
 
     def _apply_session_headers(self) -> None:
@@ -133,10 +159,7 @@ class EbayClient:
         self.session.headers.update(_default_headers(user_agent))
 
     def _api_enabled(self) -> bool:
-        raw_value = os.getenv("EBAY_API_ENABLED")
-        if raw_value is None:
-            return False
-        return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"} and bool(self.app_id)
+        return self.api_provider.enabled()
 
     def _refresh_session(self, reason: str) -> None:
         LOGGER.info("Refreshing HTTP session due to %s", reason)
@@ -191,12 +214,26 @@ class EbayClient:
                 except RequestLimitError as exc:
                     LOGGER.info("Request cap reached during API listing search: %s", exc)
                     return _empty_search_result()
+                except BlockedError:
+                    raise
                 except Exception as exc:
                     LOGGER.warning("API search failed, falling back to HTML: %s", exc)
             return self._search_active_with_retry(target, mode="html")
         except RequestLimitError as exc:
             LOGGER.info("Request cap reached during HTML listing search: %s", exc)
             return _empty_search_result()
+        except BlockedError as exc:
+            return SearchResult(
+                listings=[],
+                retry_report=[],
+                diagnostics=[],
+                rejection_counts={},
+                raw_count=0,
+                filtered_count=0,
+                last_request_url=exc.blocked.url,
+                status="blocked",
+                blocked=exc.blocked,
+            )
         except requests.RequestException as exc:
             LOGGER.warning("Active listing search failed: %s", exc)
             return _empty_search_result()
@@ -208,7 +245,7 @@ class EbayClient:
         try:
             if self._api_enabled():
                 try:
-                    return self._search_sold_api(comp_query)
+                    return self.api_provider.search_sold_comps(comp_query)
                 except RequestLimitError as exc:
                     LOGGER.info("Request cap reached during API comps search: %s", exc)
                     return []
@@ -243,7 +280,8 @@ class EbayClient:
         last_filtered_count = 0
         last_request_url: Optional[str] = None
 
-        for idx, (label, criteria) in enumerate(steps):
+        max_attempts = 1
+        for idx, (label, criteria) in enumerate(steps[:max_attempts]):
             if idx > 0:
                 retry_report.append(label)
             if mode == "api":
@@ -299,151 +337,18 @@ class EbayClient:
         target: Target,
         diagnostics: list[SearchAttemptLog],
     ) -> SearchResult:
-        limit = self.settings.scan_limit_per_target
-        page = 1
-        listings: list[Listing] = []
-        rejection_counts: Counter[str] = Counter()
-        total_raw = 0
-        total_filtered = 0
-        last_request_url: Optional[str] = None
-        total_pages = 1
-
-        while True:
-            params = self._build_api_params(criteria, page, limit)
-            response, _ = self._request(FINDING_ENDPOINT, params=params, delay=False)
-            data = response.json()
-            raw_items = (
-                data.get("findItemsByKeywordsResponse", [{}])[0]
-                .get("searchResult", [{}])[0]
-                .get("item", [])
-            )
-            raw_listings: list[Listing] = []
-            for item in raw_items:
-                listing = self._parse_api_item(item, target)
-                if listing:
-                    raw_listings.append(listing)
-            total_raw += len(raw_listings)
-            filtered = filter_listings(raw_listings, _criteria_to_target(criteria, target), self.settings)
-            listings.extend(filtered.listings)
-            total_filtered += len(filtered.listings)
-            for reason, count in filtered.rejection_counts.items():
-                rejection_counts[reason] += count
-            total_pages = _parse_api_total_pages(data) or 1
-            last_request_url = response.url
-            diagnostics.append(
-                self._build_log(
-                    mode="api",
-                    criteria=criteria,
-                    page=page,
-                    limit=limit,
-                    status=response.status_code,
-                    raw_count=len(raw_listings),
-                    filtered_count=len(filtered.listings),
-                    request_url=response.url,
-                    item_count=len(raw_items),
-                    parsed_count=len(raw_listings),
-                )
-            )
-            if listings and len(listings) >= limit:
-                listings = listings[:limit]
-                break
-            if page == 1 and not raw_listings:
-                break
-            if page >= total_pages:
-                break
-            page += 1
-
+        outcome = self.api_provider.search_active_listings(criteria, target, diagnostics)
         return SearchResult(
-            listings=listings,
+            listings=outcome.listings,
             retry_report=[],
             diagnostics=diagnostics,
-            rejection_counts=dict(rejection_counts),
-            raw_count=total_raw,
-            filtered_count=total_filtered,
-            last_request_url=last_request_url,
+            rejection_counts=outcome.rejection_counts,
+            raw_count=outcome.raw_count,
+            filtered_count=outcome.filtered_count,
+            last_request_url=outcome.last_request_url,
             status="ok",
             blocked=None,
         )
-
-    def _parse_api_item(self, item: dict[str, Any], target: Target) -> Optional[Listing]:
-        price_info = item.get("sellingStatus", [{}])[0].get("currentPrice", [{}])[0]
-        currency = price_info.get("@currencyId", "GBP")
-        price = float(price_info.get("__value__", 0.0))
-        shipping_info = item.get("shippingInfo", [{}])[0]
-        ship_price_info = shipping_info.get("shippingServiceCost", [{}])[0]
-        shipping_missing = not ship_price_info
-        shipping = float(ship_price_info.get("__value__", 0.0)) if ship_price_info else 0.0
-        if not self._currency_allowed(currency):
-            return None
-        shipping, assumed_shipping = self._apply_missing_shipping(shipping, shipping_missing)
-        price_gbp, shipping_gbp = self._normalize_currency(price, shipping, currency)
-        total = price_gbp + shipping_gbp
-        ebay_item_id = str(item.get("itemId", [""])[0])
-        if not ebay_item_id:
-            return None
-        listing = Listing(
-            ebay_item_id=ebay_item_id,
-            target_id=target.id or 0,
-            title=str(item.get("title", [""])[0]),
-            url=str(item.get("viewItemURL", [""])[0]),
-            price_gbp=price_gbp,
-            shipping_gbp=shipping_gbp,
-            total_buy_gbp=total,
-            condition=str(item.get("condition", [{}])[0].get("conditionDisplayName", [None])[0]),
-            seller_feedback_pct=_safe_float(item.get("sellerInfo", [{}])[0].get("positiveFeedbackPercent", [None])[0]),
-            seller_feedback_score=_safe_int(item.get("sellerInfo", [{}])[0].get("feedbackScore", [None])[0]),
-            returns_accepted=item.get("returnsAccepted", ["false"])[0] == "true",
-            listing_type=str(item.get("listingInfo", [{}])[0].get("listingType", [None])[0]),
-            start_time=str(item.get("listingInfo", [{}])[0].get("startTime", [None])[0]),
-            end_time=str(item.get("listingInfo", [{}])[0].get("endTime", [None])[0]),
-            location=str(item.get("location", [None])[0]),
-            image_url=str(item.get("galleryURL", [None])[0]),
-            raw_json={
-                **item,
-                "source": "api",
-                "shipping_missing": shipping_missing,
-                "assumed_shipping_gbp": assumed_shipping,
-            },
-        )
-        return listing
-
-    def _search_sold_api(self, comp_query: str) -> list[SoldComp]:
-        params = {
-            "OPERATION-NAME": "findCompletedItems",
-            "SERVICE-VERSION": "1.0.0",
-            "SECURITY-APPNAME": self.app_id,
-            "RESPONSE-DATA-FORMAT": "JSON",
-            "REST-PAYLOAD": "true",
-            "keywords": comp_query,
-            "paginationInput.entriesPerPage": self.settings.comps_limit,
-            "paginationInput.pageNumber": 1,
-            "GLOBAL-ID": "EBAY-GB",
-        }
-        params["itemFilter(0).name"] = "SoldItemsOnly"
-        params["itemFilter(0).value"] = "true"
-        response, _ = self._request(FINDING_ENDPOINT, params=params)
-        data = response.json()
-        items = (
-            data.get("findCompletedItemsResponse", [{}])[0]
-            .get("searchResult", [{}])[0]
-            .get("item", [])
-        )
-        comps: list[SoldComp] = []
-        for item in items:
-            price_info = item.get("sellingStatus", [{}])[0].get("currentPrice", [{}])[0]
-            currency = price_info.get("@currencyId", "GBP")
-            price = float(price_info.get("__value__", 0.0))
-            if not self._currency_allowed(currency):
-                continue
-            price_gbp, _ = self._normalize_currency(price, 0.0, currency)
-            comps.append(
-                SoldComp(
-                    price_gbp=price_gbp,
-                    title=str(item.get("title", [""])[0]),
-                    url=str(item.get("viewItemURL", [""])[0]),
-                )
-            )
-        return comps
 
     def _search_active_html(
         self,
@@ -485,14 +390,17 @@ class EbayClient:
             LOGGER.warning("eBay HTML failure mode detected: %s", failure_mode)
 
         listing_container_present = _has_listing_container(response_text)
+        soup = BeautifulSoup(response_text, "lxml")
+        title = _get_text(soup.title)
         blocked_detail = _detect_blocked_detail(
             response.url,
             response_text,
+            title=title,
             listing_container_present=listing_container_present,
         )
+        if not blocked_detail and failure_mode in BOT_FAILURE_MODES:
+            blocked_detail = "captcha" if failure_mode == "captcha" else "challenge"
         if blocked_detail:
-            soup = BeautifulSoup(response_text, "lxml")
-            title = _get_text(soup.title)
             blocked_artifacts = [
                 debug_path,
                 _save_debug_metadata(
@@ -511,6 +419,7 @@ class EbayClient:
                 response.url,
                 blocked_artifacts,
             )
+            _log_blocked_summary(blocked_info)
             diagnostics.append(
                 self._build_log(
                     mode="html",
@@ -523,7 +432,7 @@ class EbayClient:
                     request_url=response.url,
                     item_count=0,
                     parsed_count=0,
-                    failure_mode="captcha_or_challenge",
+                    failure_mode=blocked_detail,
                     response_length=response_length,
                 )
             )
@@ -624,6 +533,71 @@ class EbayClient:
             )
         if not raw_listings or no_priced_listings:
             raw_listings = _parse_initial_state_listings(soup, target, self)
+
+        final_html = playwright_html or response_text
+        final_container_present = _has_listing_container(final_html)
+        if parse_metrics.get("price_count", 0) == 0 and not final_container_present:
+            blocked_detail = "missing_prices_and_container"
+        elif parse_metrics.get("price_count", 0) == 0 and (
+            parse_metrics.get("title_count", 0) > 0 or parse_metrics.get("link_count", 0) > 0
+        ):
+            blocked_detail = "zero_prices"
+        elif raw_listings and all(listing.price_gbp <= 0 for listing in raw_listings):
+            blocked_detail = "zero_prices"
+        else:
+            blocked_detail = None
+        if blocked_detail:
+            blocked_artifacts = [
+                _save_debug_html(final_html, prefix="ebay_zero_prices"),
+                _save_debug_metadata(
+                    {
+                        "url": response.url,
+                        "detail": blocked_detail,
+                        "failure_mode": failure_mode,
+                        "metrics": parse_metrics,
+                    },
+                    prefix="ebay_search_blocked",
+                ),
+            ]
+            blocked_info = _build_blocked_info(
+                detail=blocked_detail,
+                url=response.url,
+                debug_artifacts=blocked_artifacts,
+            )
+            LOGGER.warning(
+                "eBay HTML blocked detection: detail=%s url=%s artifacts=%s",
+                blocked_detail,
+                response.url,
+                blocked_artifacts,
+            )
+            _log_blocked_summary(blocked_info)
+            diagnostics.append(
+                self._build_log(
+                    mode="html",
+                    criteria=criteria,
+                    page=page,
+                    limit=limit,
+                    status=response.status_code,
+                    raw_count=0,
+                    filtered_count=0,
+                    request_url=response.url,
+                    item_count=item_count,
+                    parsed_count=0,
+                    failure_mode=blocked_detail,
+                    response_length=response_length,
+                )
+            )
+            return SearchResult(
+                listings=[],
+                retry_report=[],
+                diagnostics=diagnostics,
+                rejection_counts={},
+                raw_count=0,
+                filtered_count=0,
+                last_request_url=response.url,
+                status="blocked",
+                blocked=blocked_info,
+            )
 
         filtered = filter_listings(raw_listings, _criteria_to_target(criteria, target), self.settings)
         listings = filtered.listings[:limit]
@@ -904,7 +878,7 @@ def fetch_html(
     delay: bool = False,
     use_cache: bool = True,
     store_cache: bool = True,
-    max_attempts: int = 3,
+        max_attempts: int = 3,
 ) -> tuple[requests.Response, bool]:
     return client._request(
         url,
@@ -1092,6 +1066,25 @@ def _save_debug_screenshot(page: Any, *, prefix: str) -> Optional[str]:
     return str(path)
 
 
+def safe_screenshot(page: Any, path: str) -> Optional[str]:
+    try:
+        if page and not page.is_closed():
+            page.screenshot(path=path, full_page=True)
+            return path
+    except Exception:
+        LOGGER.debug("Safe screenshot failed.", exc_info=True)
+    return None
+
+
+def safe_content(page: Any) -> Optional[str]:
+    try:
+        if page and not page.is_closed():
+            return page.content()
+    except Exception:
+        LOGGER.debug("Safe content failed.", exc_info=True)
+    return None
+
+
 def _safe_page_title(page: Any) -> Optional[str]:
     try:
         if page and not page.is_closed():
@@ -1102,12 +1095,7 @@ def _safe_page_title(page: Any) -> Optional[str]:
 
 
 def _safe_page_content(page: Any) -> Optional[str]:
-    try:
-        if page and not page.is_closed():
-            return page.content()
-    except Exception:
-        LOGGER.exception("Failed to read Playwright page content.")
-    return None
+    return safe_content(page)
 
 
 def _safe_page_url(page: Any) -> Optional[str]:
@@ -1117,6 +1105,34 @@ def _safe_page_url(page: Any) -> Optional[str]:
     except Exception:
         LOGGER.exception("Failed to read Playwright page URL.")
     return None
+
+
+def safe_close(page: Any, context: Any, browser: Any) -> None:
+    try:
+        if page and not page.is_closed():
+            page.close()
+    except Exception:
+        LOGGER.debug("Playwright page already closed or could not close.", exc_info=True)
+    try:
+        if context:
+            context.close()
+    except Exception:
+        LOGGER.debug("Playwright context already closed or could not close.", exc_info=True)
+    try:
+        if browser:
+            browser.close()
+    except Exception:
+        LOGGER.debug("Playwright browser already closed or could not close.", exc_info=True)
+
+
+def _log_blocked_summary(blocked: BlockedInfo) -> None:
+    LOGGER.warning(
+        "eBay blocked summary blocked=%s reason=%s url=%s debug_artifacts=%s",
+        True,
+        blocked.reason,
+        blocked.url,
+        blocked.debug_artifacts,
+    )
 
 
 def _detect_failure_mode(text: str) -> Optional[str]:
@@ -1190,26 +1206,47 @@ def _detect_blocked_detail(
     url: Optional[str],
     html: str,
     *,
+    title: Optional[str] = None,
     listing_container_present: Optional[bool] = None,
+    price_count: Optional[int] = None,
 ) -> Optional[str]:
     if _is_challenge_url(url):
-        return "splashui_challenge_url"
+        return "splashui_challenge"
     lowered = html.lower() if html else ""
-    tokens = [
-        "pardon our interruption",
-        "captcha",
-        "verify you are human",
-        "human verification",
-        "robot check",
-        "recaptcha",
-        "hcaptcha",
-        "splashui",
-        "challenge",
-    ]
-    if any(token in lowered for token in tokens):
-        return "challenge_keywords"
+    title_lowered = title.lower() if title else ""
+    if any(token in lowered for token in BLOCKED_TOKENS) or any(
+        token in title_lowered for token in BLOCKED_TOKENS
+    ):
+        if any(token in lowered for token in ("captcha", "hcaptcha", "recaptcha")) or any(
+            token in title_lowered for token in ("captcha", "hcaptcha", "recaptcha")
+        ):
+            return "captcha"
+        return "challenge"
+    if listing_container_present is False and price_count == 0:
+        return "missing_prices_and_container"
     if listing_container_present is False:
         return "missing_listing_container"
+    return None
+
+
+def _blocked_reason_for_detail(detail: str) -> str:
+    if detail == "captcha":
+        return "captcha"
+    if detail == "splashui_challenge":
+        return "splashui_challenge"
+    if detail in {"challenge", "missing_listing_container", "missing_prices_and_container", "zero_prices"}:
+        return "splashui_challenge"
+    return "splashui_challenge"
+
+
+def _detect_blocked_from_metadata(url: Optional[str], title: Optional[str]) -> Optional[str]:
+    if _is_challenge_url(url):
+        return "splashui_challenge"
+    title_lowered = title.lower() if title else ""
+    if any(token in title_lowered for token in BLOCKED_TOKENS):
+        if any(token in title_lowered for token in ("captcha", "hcaptcha", "recaptcha")):
+            return "captcha"
+        return "challenge"
     return None
 
 
@@ -1219,9 +1256,10 @@ def _build_blocked_info(
     url: Optional[str],
     debug_artifacts: list[str],
 ) -> BlockedInfo:
+    reason = _blocked_reason_for_detail(detail)
     return BlockedInfo(
         status="blocked",
-        reason="captcha_or_challenge",
+        reason=reason,
         url=url,
         debug_artifacts=debug_artifacts,
         message="eBay served a human verification page; automated scraping is currently blocked.",
@@ -1233,12 +1271,15 @@ def _capture_playwright_debug(page: Any, *, prefix: str) -> list[str]:
     artifacts: list[str] = []
     url = _safe_page_url(page)
     title = _safe_page_title(page)
-    html = _safe_page_content(page)
+    html = safe_content(page)
     if html:
         artifacts.append(_save_debug_html(html, prefix=prefix))
     screenshot_path = None
     if page and not page.is_closed():
-        screenshot_path = _save_debug_screenshot(page, prefix=prefix)
+        debug_dir = Path(".cache/ebayflip_debug")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        screenshot_path = safe_screenshot(page, str(debug_dir / f"{prefix}_{timestamp}.png"))
     if screenshot_path:
         artifacts.append(screenshot_path)
     metadata = {"url": url, "title": title}
@@ -1247,21 +1288,7 @@ def _capture_playwright_debug(page: Any, *, prefix: str) -> list[str]:
 
 
 def _safe_close_playwright(page: Any, context: Any, browser: Any) -> None:
-    try:
-        if page and not page.is_closed():
-            page.close()
-    except Exception:
-        LOGGER.debug("Playwright page already closed or could not close.", exc_info=True)
-    try:
-        if context:
-            context.close()
-    except Exception:
-        LOGGER.debug("Playwright context already closed or could not close.", exc_info=True)
-    try:
-        if browser:
-            browser.close()
-    except Exception:
-        LOGGER.debug("Playwright browser already closed or could not close.", exc_info=True)
+    safe_close(page, context, browser)
 
 
 def _should_fallback_to_playwright(
@@ -1288,16 +1315,16 @@ def fetch_with_playwright(url: str, headers: dict[str, str]) -> PlaywrightResult
     page = None
     browser = None
     context = None
+    debug_artifacts: list[str] = []
     try:
         with sync_playwright() as playwright:
             user_agent = headers.get("User-Agent")
             launch_args = [
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
-                "--disable-setuid-sandbox",
             ]
-            if os.getenv("EBAY_PLAYWRIGHT_NO_SANDBOX") == "1":
-                launch_args.append("--no-sandbox")
+            if os.getenv("EBAY_NO_SANDBOX") == "1":
+                launch_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
             browser = playwright.chromium.launch(
                 headless=True,
                 args=launch_args,
@@ -1312,56 +1339,85 @@ def fetch_with_playwright(url: str, headers: dict[str, str]) -> PlaywrightResult
             page.set_extra_http_headers({key: value for key, value in headers.items() if key.lower() != "host"})
             time.sleep(random.uniform(0.2, 0.7))
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            current_url = _safe_page_url(page)
+            current_title = _safe_page_title(page)
+            metadata_blocked = _detect_blocked_from_metadata(current_url, current_title)
+            if metadata_blocked:
+                debug_artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_blocked")
+                blocked_info = _build_blocked_info(
+                    detail=metadata_blocked,
+                    url=current_url,
+                    debug_artifacts=debug_artifacts,
+                )
+                LOGGER.warning(
+                    "Playwright blocked detection: detail=%s url=%s artifacts=%s",
+                    blocked_info.detail,
+                    current_url,
+                    debug_artifacts,
+                )
+                _log_blocked_summary(blocked_info)
+                _safe_close_playwright(page, context, browser)
+                return PlaywrightResult(html=None, blocked=blocked_info, debug_artifacts=debug_artifacts)
+            listing_container_present = False
+            block_selector_hit = False
             try:
+                selector = "li.s-item, div.s-item__wrapper, div.s-item, ul.srp-results"
+                challenge_selector = ",".join(CHALLENGE_SELECTORS)
                 page.wait_for_selector(
-                    "li.s-item, div.s-item__wrapper, div.s-item, ul.srp-results",
+                    f"{selector}, {challenge_selector}",
                     timeout=15000,
                 )
             except PlaywrightTimeoutError:
                 LOGGER.warning("Playwright wait timed out; continuing with captured HTML.")
-                listing_container_present = False
             else:
-                listing_container_present = True
+                if page.query_selector(selector):
+                    listing_container_present = True
+                if challenge_selector and page.query_selector(challenge_selector):
+                    block_selector_hit = True
             html = _safe_page_content(page) or ""
-            current_url = _safe_page_url(page)
-            blocked_detail = _detect_blocked_detail(
-                current_url,
-                html,
-                listing_container_present=listing_container_present,
-            )
+            blocked_detail = None
+            if block_selector_hit:
+                blocked_detail = "captcha"
+            if not blocked_detail:
+                blocked_detail = _detect_blocked_detail(
+                    current_url,
+                    html,
+                    title=current_title,
+                    listing_container_present=listing_container_present,
+                )
             if blocked_detail:
-                artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_blocked")
+                debug_artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_blocked")
                 blocked_info = _build_blocked_info(
                     detail=blocked_detail,
                     url=current_url,
-                    debug_artifacts=artifacts,
+                    debug_artifacts=debug_artifacts,
                 )
                 LOGGER.warning(
                     "Playwright blocked detection: detail=%s url=%s artifacts=%s",
                     blocked_detail,
                     current_url,
-                    artifacts,
+                    debug_artifacts,
                 )
+                _log_blocked_summary(blocked_info)
                 _safe_close_playwright(page, context, browser)
-                return PlaywrightResult(html=html or None, blocked=blocked_info, debug_artifacts=artifacts)
+                return PlaywrightResult(html=html or None, blocked=blocked_info, debug_artifacts=debug_artifacts)
             failure_mode = _detect_failure_mode(html)
             if failure_mode:
-                artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_failure")
+                debug_artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_failure")
                 LOGGER.warning(
                     "Playwright failure mode detected: %s artifacts=%s",
                     failure_mode,
-                    artifacts,
+                    debug_artifacts,
                 )
             _safe_close_playwright(page, context, browser)
-            return PlaywrightResult(html=html or None, blocked=None, debug_artifacts=[])
+            return PlaywrightResult(html=html or None, blocked=None, debug_artifacts=debug_artifacts)
     except Exception:
         LOGGER.exception("Playwright fallback failed.")
-        artifacts: list[str] = []
         if page:
-            artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_error")
-            LOGGER.warning("Playwright failure debug saved artifacts=%s", artifacts)
+            debug_artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_error")
+            LOGGER.warning("Playwright failure debug saved artifacts=%s", debug_artifacts)
         _safe_close_playwright(page, context, browser)
-        return PlaywrightResult(html=None, blocked=None, debug_artifacts=artifacts)
+        return PlaywrightResult(html=None, blocked=None, debug_artifacts=debug_artifacts)
 
 
 def _infer_listing_type(item: Any) -> Optional[str]:
@@ -2048,15 +2104,6 @@ def _cached_to_response(cached: CachedResponse, url: str) -> requests.Response:
     response.headers = cached.headers
     response.url = url
     return response
-
-
-def _parse_api_total_pages(data: dict[str, Any]) -> Optional[int]:
-    pagination = data.get("findItemsByKeywordsResponse", [{}])[0].get("paginationOutput", [{}])[0]
-    total_pages = pagination.get("totalPages", [None])[0]
-    try:
-        return int(total_pages)
-    except (TypeError, ValueError):
-        return None
 
 
 def _criteria_to_target(criteria: SearchCriteria, target: Target) -> Target:
