@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -eux
 
-# Install browsers into the Python package directory (shared), not ~/.cache for a specific user
-export PLAYWRIGHT_BROWSERS_PATH=0
+# Install browsers into a writable shared directory.
+export PLAYWRIGHT_BROWSERS_PATH=/tmp/pw-browsers
 python -m playwright install chromium
