@@ -398,7 +398,7 @@ def _condition_selectbox(label: str, key: str, selected_condition_id: Optional[s
 
 
 st.sidebar.header("Scan Controls")
-run_scan_now = st.sidebar.button("Scan now", use_container_width=True)
+run_scan_now = st.sidebar.button("Scan now", width="stretch")
 
 st.sidebar.toggle("Auto-scan", key="auto_scan")
 interval_min = st.sidebar.number_input(
@@ -498,7 +498,7 @@ with Tabs[0]:
                 "total_buy_gbp": "total_buy_gbp",
             }
         )
-        st.dataframe(display_scan, use_container_width=True, height=260)
+        st.dataframe(display_scan, width="stretch", height=260)
     else:
         st.info("Run a scan to see which listings were evaluated.")
 
@@ -551,7 +551,7 @@ with Tabs[0]:
                                 for reason, count in sorted(reasons.items(), key=lambda item: item[1], reverse=True)
                             ]
                         )
-                        st.dataframe(rejection_df, use_container_width=True, height=160)
+                        st.dataframe(rejection_df, width="stretch", height=160)
                 if last_diag:
                     st.markdown("**Last request details:**")
                     st.write(f"Mode: {last_diag['mode']}")
@@ -614,7 +614,7 @@ with Tabs[0]:
     diagnostic_rows = _build_diagnostic_rows(scan_debug)
     if diagnostic_rows:
         st.markdown("**Target diagnostics summary**")
-        st.dataframe(pd.DataFrame(diagnostic_rows), use_container_width=True, height=240)
+        st.dataframe(pd.DataFrame(diagnostic_rows), width="stretch", height=240)
         recommended_actions = sorted({row["action"] for row in diagnostic_rows if row.get("action")})
         if recommended_actions:
             st.markdown("**Suggested fixes**")
@@ -640,7 +640,7 @@ with Tabs[0]:
                 "url",
                 "evaluated_at",
             ]].sort_values(by=["deal_score"], ascending=False)
-            st.dataframe(display, use_container_width=True, height=320)
+            st.dataframe(display, width="stretch", height=320)
 
 with Tabs[1]:
     st.subheader("Targets")
@@ -668,7 +668,7 @@ with Tabs[1]:
                     "enabled",
                 ]
             ].rename(columns={"condition_display": "condition"}),
-            use_container_width=True,
+            width="stretch",
             height=260,
         )
 
@@ -686,7 +686,7 @@ with Tabs[1]:
         condition = _condition_selectbox("Condition", key="add_condition", selected_condition_id=None)
         listing_type = st.selectbox("Listing type", ["any", "auction", "bin"], key="add_listing_type")
         enabled = st.toggle("Enabled", value=True, key="add_enabled")
-        submitted = st.button("Add target", use_container_width=True)
+        submitted = st.button("Add target", width="stretch")
         if submitted:
             target = Target(
                 id=None,
@@ -744,7 +744,7 @@ with Tabs[1]:
                 "Listing type", listing_type_options, index=listing_type_index, key="edit_listing_type"
             )
             enabled = st.toggle("Enabled", key="edit_enabled")
-            updated = st.button("Save changes", use_container_width=True)
+            updated = st.button("Save changes", width="stretch")
             if updated:
                 from ebayflip.db import update_target
 
@@ -812,7 +812,7 @@ with Tabs[2]:
                 "url",
                 "evaluated_at",
             ]].sort_values(by=["deal_score"], ascending=False)
-            st.dataframe(display, use_container_width=True, height=320)
+            st.dataframe(display, width="stretch", height=320)
 
             selection = st.selectbox("View details", filtered["listing_id"].unique())
             if selection:
@@ -831,7 +831,7 @@ with Tabs[2]:
                 comps_rows = _load_comps(DB_PATH, int(selection))
                 if comps_rows:
                     comps_df = pd.DataFrame([c.__dict__ for c in comps_rows])
-                    st.dataframe(comps_df, use_container_width=True)
+                    st.dataframe(comps_df, width="stretch")
                 else:
                     st.info("No comps stored.")
 
@@ -854,7 +854,7 @@ with Tabs[3]:
                     "total_buy_gbp": "total_buy_gbp",
                 }
             )
-            st.dataframe(display_misses, use_container_width=True, height=320)
+            st.dataframe(display_misses, width="stretch", height=320)
     else:
         st.info("Run a scan to see which listings were evaluated.")
 
