@@ -847,6 +847,13 @@ def _accept_encoding_header() -> str:
     return ", ".join(encodings)
 
 
+def _playwright_available() -> bool:
+    try:
+        return importlib.util.find_spec("playwright.sync_api") is not None
+    except ModuleNotFoundError:
+        return False
+
+
 def _save_debug_html(text: str, *, prefix: str) -> str:
     debug_dir = Path(".cache/ebayflip_debug")
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -898,7 +905,7 @@ def _should_fallback_to_playwright(failure_mode: Optional[str], card_count: int)
 
 
 def fetch_with_playwright(url: str, headers: dict[str, str]) -> Optional[str]:
-    if importlib.util.find_spec("playwright.sync_api") is None:
+    if not _playwright_available():
         LOGGER.warning("Playwright not installed; skipping browser fallback.")
         return None
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
