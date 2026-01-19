@@ -1003,9 +1003,14 @@ def _extract_item_id(url: str) -> str:
         return match.group(1)
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
-    for key in ("item", "itm", "itemId"):
+    for key in ("item", "itm", "itemId", "itemid", "iid", "listingId", "listing_id"):
         if key in query and query[key]:
-            return query[key][0]
+            for value in query[key]:
+                if not value:
+                    continue
+                match = re.search(r"(\d{9,})", value)
+                if match:
+                    return match.group(1)
     return ""
 
 
@@ -1112,6 +1117,11 @@ def _extract_listing_title(card: Any) -> Optional[str]:
         "h3.s-item__title",
         "span.s-item__title",
         "div.s-item__title span",
+        "span[role='heading']",
+        "h3[role='heading']",
+        "div[role='heading']",
+        "*[data-testid='s-item__title']",
+        "*[class*='s-item__title']",
     ]
     for selector in selectors:
         el = card.select_one(selector)
@@ -1141,6 +1151,11 @@ def _extract_listing_price_text(card: Any) -> Optional[str]:
         "span.s-item__price",
         "div.s-item__details span.s-item__price",
         "span.s-item__price span",
+        "*[data-testid='s-item__price']",
+        "*[class*='s-item__price']",
+        "span[aria-label*='£']",
+        "span[aria-label*='$']",
+        "span[aria-label*='EUR']",
     ]
     for selector in selectors:
         el = card.select_one(selector)
@@ -1186,10 +1201,35 @@ def _extract_seller_feedback(card: Any) -> tuple[Optional[float], Optional[int]]
 
 
 def _extract_item_id_from_card(card: Any) -> str:
-    for attr in ("data-itemid", "data-view", "data-entityid", "data-listingid"):
+    attrs = {
+        "data-itemid",
+        "data-item-id",
+        "data-view",
+        "data-entityid",
+        "data-entity-id",
+        "data-listingid",
+        "data-listing-id",
+        "data-id",
+    }
+    for attr in attrs:
         value = card.get(attr)
-        if value and isinstance(value, str):
+        if not value:
+            continue
+        if isinstance(value, list):
+            value = " ".join(str(part) for part in value)
+        if isinstance(value, str):
             match = re.search(r"(\d{9,})", value)
+            if match:
+                return match.group(1)
+    for attr, value in getattr(card, "attrs", {}).items():
+        if attr in attrs:
+            continue
+        if not any(token in attr for token in ("item", "listing", "entity", "view", "id")):
+            continue
+        if isinstance(value, list):
+            value = " ".join(str(part) for part in value)
+        if isinstance(value, str):
+            match = re.search(r"\b(\d{9,})\b", value)
             if match:
                 return match.group(1)
     return ""
