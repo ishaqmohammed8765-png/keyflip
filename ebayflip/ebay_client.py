@@ -87,6 +87,25 @@ class SearchResult:
     raw_count: int
     filtered_count: int
     last_request_url: Optional[str]
+    status: str = "ok"
+    blocked: Optional["BlockedInfo"] = None
+
+
+@dataclass(frozen=True, slots=True)
+class BlockedInfo:
+    status: str
+    reason: str
+    url: Optional[str]
+    debug_artifacts: list[str]
+    message: str
+    detail: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class PlaywrightResult:
+    html: Optional[str]
+    blocked: Optional[BlockedInfo]
+    debug_artifacts: list[str]
 
 
 @dataclass(slots=True)
@@ -112,6 +131,12 @@ class EbayClient:
     def _apply_session_headers(self) -> None:
         user_agent = random.choice(USER_AGENTS)
         self.session.headers.update(_default_headers(user_agent))
+
+    def _api_enabled(self) -> bool:
+        raw_value = os.getenv("EBAY_API_ENABLED")
+        if raw_value is None:
+            return False
+        return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"} and bool(self.app_id)
 
     def _refresh_session(self, reason: str) -> None:
         LOGGER.info("Refreshing HTTP session due to %s", reason)
@@ -160,7 +185,7 @@ class EbayClient:
 
     def search_active_listings(self, target: Target) -> SearchResult:
         try:
-            if self.app_id:
+            if self._api_enabled():
                 try:
                     return self._search_active_with_retry(target, mode="api")
                 except RequestLimitError as exc:
@@ -181,7 +206,7 @@ class EbayClient:
 
     def search_sold_comps(self, comp_query: str) -> list[SoldComp]:
         try:
-            if self.app_id:
+            if self._api_enabled():
                 try:
                     return self._search_sold_api(comp_query)
                 except RequestLimitError as exc:
@@ -229,6 +254,18 @@ class EbayClient:
             last_raw_count = outcome.raw_count
             last_filtered_count = outcome.filtered_count
             last_request_url = outcome.last_request_url
+            if outcome.status == "blocked":
+                return SearchResult(
+                    listings=[],
+                    retry_report=retry_report,
+                    diagnostics=diagnostics,
+                    rejection_counts=last_rejections,
+                    raw_count=last_raw_count,
+                    filtered_count=last_filtered_count,
+                    last_request_url=last_request_url,
+                    status=outcome.status,
+                    blocked=outcome.blocked,
+                )
             if outcome.listings:
                 return SearchResult(
                     listings=outcome.listings,
@@ -238,6 +275,8 @@ class EbayClient:
                     raw_count=last_raw_count,
                     filtered_count=last_filtered_count,
                     last_request_url=last_request_url,
+                    status=outcome.status,
+                    blocked=outcome.blocked,
                 )
             if self.request_cap_reached:
                 break
@@ -250,6 +289,8 @@ class EbayClient:
             raw_count=last_raw_count,
             filtered_count=last_filtered_count,
             last_request_url=last_request_url,
+            status="ok",
+            blocked=None,
         )
 
     def _search_active_api(
@@ -320,6 +361,8 @@ class EbayClient:
             raw_count=total_raw,
             filtered_count=total_filtered,
             last_request_url=last_request_url,
+            status="ok",
+            blocked=None,
         )
 
     def _parse_api_item(self, item: dict[str, Any], target: Target) -> Optional[Listing]:
@@ -441,6 +484,61 @@ class EbayClient:
         if failure_mode:
             LOGGER.warning("eBay HTML failure mode detected: %s", failure_mode)
 
+        listing_container_present = _has_listing_container(response_text)
+        blocked_detail = _detect_blocked_detail(
+            response.url,
+            response_text,
+            listing_container_present=listing_container_present,
+        )
+        if blocked_detail:
+            soup = BeautifulSoup(response_text, "lxml")
+            title = _get_text(soup.title)
+            blocked_artifacts = [
+                debug_path,
+                _save_debug_metadata(
+                    {"url": response.url, "title": title, "detail": blocked_detail},
+                    prefix="ebay_search_blocked",
+                ),
+            ]
+            blocked_info = _build_blocked_info(
+                detail=blocked_detail,
+                url=response.url,
+                debug_artifacts=blocked_artifacts,
+            )
+            LOGGER.warning(
+                "eBay HTML blocked detection: detail=%s url=%s artifacts=%s",
+                blocked_detail,
+                response.url,
+                blocked_artifacts,
+            )
+            diagnostics.append(
+                self._build_log(
+                    mode="html",
+                    criteria=criteria,
+                    page=page,
+                    limit=limit,
+                    status=response.status_code,
+                    raw_count=0,
+                    filtered_count=0,
+                    request_url=response.url,
+                    item_count=0,
+                    parsed_count=0,
+                    failure_mode="captcha_or_challenge",
+                    response_length=response_length,
+                )
+            )
+            return SearchResult(
+                listings=[],
+                retry_report=[],
+                diagnostics=diagnostics,
+                rejection_counts={},
+                raw_count=0,
+                filtered_count=0,
+                last_request_url=response.url,
+                status="blocked",
+                blocked=blocked_info,
+            )
+
         raw_listings, parse_metrics = parse_html(response_text, target, self)
         item_count = parse_metrics["card_count"]
         no_priced_listings = bool(raw_listings) and all(listing.price_gbp <= 0 for listing in raw_listings)
@@ -470,7 +568,36 @@ class EbayClient:
         ) or no_priced_listings
         if needs_playwright and _playwright_fallback_enabled(self.settings):
             LOGGER.info("Attempting Playwright fallback for eBay search. reasons=%s", fallback_reasons)
-            playwright_html = fetch_with_playwright(response.url, self.session.headers)
+            playwright_result = fetch_with_playwright(response.url, self.session.headers)
+            if playwright_result.blocked:
+                diagnostics.append(
+                    self._build_log(
+                        mode="playwright",
+                        criteria=criteria,
+                        page=page,
+                        limit=limit,
+                        status=None,
+                        raw_count=0,
+                        filtered_count=0,
+                        request_url=playwright_result.blocked.url or response.url,
+                        item_count=0,
+                        parsed_count=0,
+                        failure_mode="captcha_or_challenge",
+                        response_length=None,
+                    )
+                )
+                return SearchResult(
+                    listings=[],
+                    retry_report=[],
+                    diagnostics=diagnostics,
+                    rejection_counts={},
+                    raw_count=0,
+                    filtered_count=0,
+                    last_request_url=playwright_result.blocked.url or response.url,
+                    status="blocked",
+                    blocked=playwright_result.blocked,
+                )
+            playwright_html = playwright_result.html
             if playwright_html:
                 debug_path = _save_debug_html(playwright_html, prefix="ebay_search_playwright")
                 LOGGER.info("Playwright HTML saved to %s", debug_path)
@@ -524,6 +651,8 @@ class EbayClient:
             raw_count=len(raw_listings),
             filtered_count=len(filtered.listings),
             last_request_url=response.url,
+            status="ok",
+            blocked=None,
         )
 
     def _search_sold_html(self, comp_query: str) -> list[SoldComp]:
@@ -737,7 +866,14 @@ def fetch_ebay_search(
     no_priced_listings = bool(listings) and all(listing.price_gbp <= 0 for listing in listings)
     needs_playwright = _should_fallback_to_playwright(failure_mode, metrics, listings) or no_priced_listings
     if needs_playwright and _playwright_fallback_enabled(client.settings):
-        playwright_html = fetch_with_playwright(response.url, client.session.headers)
+        playwright_result = fetch_with_playwright(response.url, client.session.headers)
+        if playwright_result.blocked:
+            LOGGER.warning(
+                "Playwright blocked detection during fetch_ebay_search: %s",
+                playwright_result.blocked.debug_artifacts,
+            )
+            return []
+        playwright_html = playwright_result.html
         if playwright_html:
             listings, metrics = parse_html(playwright_html, target, client)
     if not listings:
@@ -934,6 +1070,15 @@ def _save_debug_html(text: str, *, prefix: str) -> str:
     return str(path)
 
 
+def _save_debug_metadata(payload: dict[str, Any], *, prefix: str) -> str:
+    debug_dir = Path(".cache/ebayflip_debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    path = debug_dir / f"{prefix}_{timestamp}.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return str(path)
+
+
 def _save_debug_screenshot(page: Any, *, prefix: str) -> Optional[str]:
     debug_dir = Path(".cache/ebayflip_debug")
     debug_dir.mkdir(parents=True, exist_ok=True)
@@ -945,6 +1090,33 @@ def _save_debug_screenshot(page: Any, *, prefix: str) -> Optional[str]:
         LOGGER.exception("Failed to capture Playwright screenshot.")
         return None
     return str(path)
+
+
+def _safe_page_title(page: Any) -> Optional[str]:
+    try:
+        if page and not page.is_closed():
+            return page.title()
+    except Exception:
+        LOGGER.exception("Failed to read Playwright page title.")
+    return None
+
+
+def _safe_page_content(page: Any) -> Optional[str]:
+    try:
+        if page and not page.is_closed():
+            return page.content()
+    except Exception:
+        LOGGER.exception("Failed to read Playwright page content.")
+    return None
+
+
+def _safe_page_url(page: Any) -> Optional[str]:
+    try:
+        if page and not page.is_closed():
+            return page.url
+    except Exception:
+        LOGGER.exception("Failed to read Playwright page URL.")
+    return None
 
 
 def _detect_failure_mode(text: str) -> Optional[str]:
@@ -996,6 +1168,102 @@ def _detect_failure_mode(text: str) -> Optional[str]:
     return None
 
 
+def _is_challenge_url(url: Optional[str]) -> bool:
+    if not url:
+        return False
+    lowered = url.lower()
+    if "/splashui/challenge" in lowered:
+        return True
+    if "splashui" in lowered and "challenge" in lowered:
+        return True
+    return False
+
+
+def _has_listing_container(html: str) -> bool:
+    if not html:
+        return False
+    soup = BeautifulSoup(html, "lxml")
+    return bool(soup.select_one("ul.srp-results, li.s-item, div.s-item__wrapper, div.s-item"))
+
+
+def _detect_blocked_detail(
+    url: Optional[str],
+    html: str,
+    *,
+    listing_container_present: Optional[bool] = None,
+) -> Optional[str]:
+    if _is_challenge_url(url):
+        return "splashui_challenge_url"
+    lowered = html.lower() if html else ""
+    tokens = [
+        "pardon our interruption",
+        "captcha",
+        "verify you are human",
+        "human verification",
+        "robot check",
+        "recaptcha",
+        "hcaptcha",
+        "splashui",
+        "challenge",
+    ]
+    if any(token in lowered for token in tokens):
+        return "challenge_keywords"
+    if listing_container_present is False:
+        return "missing_listing_container"
+    return None
+
+
+def _build_blocked_info(
+    *,
+    detail: str,
+    url: Optional[str],
+    debug_artifacts: list[str],
+) -> BlockedInfo:
+    return BlockedInfo(
+        status="blocked",
+        reason="captcha_or_challenge",
+        url=url,
+        debug_artifacts=debug_artifacts,
+        message="eBay served a human verification page; automated scraping is currently blocked.",
+        detail=detail,
+    )
+
+
+def _capture_playwright_debug(page: Any, *, prefix: str) -> list[str]:
+    artifacts: list[str] = []
+    url = _safe_page_url(page)
+    title = _safe_page_title(page)
+    html = _safe_page_content(page)
+    if html:
+        artifacts.append(_save_debug_html(html, prefix=prefix))
+    screenshot_path = None
+    if page and not page.is_closed():
+        screenshot_path = _save_debug_screenshot(page, prefix=prefix)
+    if screenshot_path:
+        artifacts.append(screenshot_path)
+    metadata = {"url": url, "title": title}
+    artifacts.append(_save_debug_metadata(metadata, prefix=prefix))
+    return artifacts
+
+
+def _safe_close_playwright(page: Any, context: Any, browser: Any) -> None:
+    try:
+        if page and not page.is_closed():
+            page.close()
+    except Exception:
+        LOGGER.debug("Playwright page already closed or could not close.", exc_info=True)
+    try:
+        if context:
+            context.close()
+    except Exception:
+        LOGGER.debug("Playwright context already closed or could not close.", exc_info=True)
+    try:
+        if browser:
+            browser.close()
+    except Exception:
+        LOGGER.debug("Playwright browser already closed or could not close.", exc_info=True)
+
+
 def _should_fallback_to_playwright(
     failure_mode: Optional[str],
     parse_metrics: dict[str, int],
@@ -1010,35 +1278,40 @@ def _should_fallback_to_playwright(
     return False
 
 
-def fetch_with_playwright(url: str, headers: dict[str, str]) -> Optional[str]:
+def fetch_with_playwright(url: str, headers: dict[str, str]) -> PlaywrightResult:
     if not _ensure_playwright_browsers_installed():
         LOGGER.error("Playwright browser install missing or failed; skipping browser fallback.")
-        return None
+        return PlaywrightResult(html=None, blocked=None, debug_artifacts=[])
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
-    user_data_dir = Path(".cache/ebayflip_playwright")
-    user_data_dir.mkdir(parents=True, exist_ok=True)
     page = None
     browser = None
+    context = None
     try:
         with sync_playwright() as playwright:
             user_agent = headers.get("User-Agent")
-            browser = playwright.chromium.launch_persistent_context(
-                user_data_dir=str(user_data_dir),
+            launch_args = [
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-setuid-sandbox",
+            ]
+            if os.getenv("EBAY_PLAYWRIGHT_NO_SANDBOX") == "1":
+                launch_args.append("--no-sandbox")
+            browser = playwright.chromium.launch(
                 headless=True,
+                args=launch_args,
+            )
+            context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 locale="en-GB",
+                timezone_id="Europe/London",
                 user_agent=user_agent,
             )
-            page = browser.new_page()
+            page = context.new_page()
             page.set_extra_http_headers({key: value for key, value in headers.items() if key.lower() != "host"})
             time.sleep(random.uniform(0.2, 0.7))
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except PlaywrightTimeoutError:
-                LOGGER.info("Playwright network idle wait timed out; continuing.")
             try:
                 page.wait_for_selector(
                     "li.s-item, div.s-item__wrapper, div.s-item, ul.srp-results",
@@ -1046,42 +1319,49 @@ def fetch_with_playwright(url: str, headers: dict[str, str]) -> Optional[str]:
                 )
             except PlaywrightTimeoutError:
                 LOGGER.warning("Playwright wait timed out; continuing with captured HTML.")
-            html = page.content()
+                listing_container_present = False
+            else:
+                listing_container_present = True
+            html = _safe_page_content(page) or ""
+            current_url = _safe_page_url(page)
+            blocked_detail = _detect_blocked_detail(
+                current_url,
+                html,
+                listing_container_present=listing_container_present,
+            )
+            if blocked_detail:
+                artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_blocked")
+                blocked_info = _build_blocked_info(
+                    detail=blocked_detail,
+                    url=current_url,
+                    debug_artifacts=artifacts,
+                )
+                LOGGER.warning(
+                    "Playwright blocked detection: detail=%s url=%s artifacts=%s",
+                    blocked_detail,
+                    current_url,
+                    artifacts,
+                )
+                _safe_close_playwright(page, context, browser)
+                return PlaywrightResult(html=html or None, blocked=blocked_info, debug_artifacts=artifacts)
             failure_mode = _detect_failure_mode(html)
             if failure_mode:
-                screenshot_path = _save_debug_screenshot(page, prefix="ebay_playwright_failure")
-                debug_path = _save_debug_html(html, prefix="ebay_playwright_failure")
+                artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_failure")
                 LOGGER.warning(
-                    "Playwright failure mode detected: %s screenshot=%s html=%s",
+                    "Playwright failure mode detected: %s artifacts=%s",
                     failure_mode,
-                    screenshot_path,
-                    debug_path,
+                    artifacts,
                 )
-            browser.close()
-            return html
+            _safe_close_playwright(page, context, browser)
+            return PlaywrightResult(html=html or None, blocked=None, debug_artifacts=[])
     except Exception:
         LOGGER.exception("Playwright fallback failed.")
+        artifacts: list[str] = []
         if page:
-            screenshot_path = _save_debug_screenshot(page, prefix="ebay_playwright_error")
-            try:
-                html = page.content()
-            except Exception:
-                html = ""
-            if html:
-                debug_path = _save_debug_html(html, prefix="ebay_playwright_error")
-            else:
-                debug_path = None
-            LOGGER.warning(
-                "Playwright failure debug saved screenshot=%s html=%s",
-                screenshot_path,
-                debug_path,
-            )
-        if browser:
-            try:
-                browser.close()
-            except Exception:
-                LOGGER.exception("Failed to close Playwright browser after error.")
-        return None
+            artifacts = _capture_playwright_debug(page, prefix="ebay_playwright_error")
+            LOGGER.warning("Playwright failure debug saved artifacts=%s", artifacts)
+        _safe_close_playwright(page, context, browser)
+        return PlaywrightResult(html=None, blocked=None, debug_artifacts=artifacts)
 
 
 def _infer_listing_type(item: Any) -> Optional[str]:
@@ -1879,6 +2159,8 @@ def _empty_search_result() -> SearchResult:
         raw_count=0,
         filtered_count=0,
         last_request_url=None,
+        status="ok",
+        blocked=None,
     )
 
 

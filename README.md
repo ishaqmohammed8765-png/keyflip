@@ -20,9 +20,10 @@ streamlit run app.py
 ```
 
 ## API credentials (optional)
-The app uses the eBay Finding API when `EBAY_APP_ID` is available. Without credentials it falls back to HTML parsing with conservative limits.
+The app uses the eBay Finding API when `EBAY_API_ENABLED=1` and `EBAY_APP_ID` are available. Without credentials it falls back to HTML parsing with conservative limits.
 
 ```bash
+export EBAY_API_ENABLED=1
 export EBAY_APP_ID=your_app_id_here
 export EBAY_OAUTH_TOKEN=your_taxonomy_oauth_token
 export DISCORD_WEBHOOK_URL=your_discord_webhook
@@ -45,6 +46,8 @@ export DISCORD_WEBHOOK_URL=your_discord_webhook
   and finally broadening keywords (removing quotes, capacity, and color terms).
 - The Dashboard includes a “Why no results?” panel that shows retry steps, rejection reasons,
   and the last request URL to help troubleshoot filters.
+- When eBay serves a human verification challenge, debug artifacts (HTML, metadata, and screenshots when available)
+  are written to `.cache/ebayflip_debug/` and surfaced in the UI.
 
 ## Category selection
 - The Targets form uses a dropdown-driven category tree (up to 3 levels deep).

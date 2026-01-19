@@ -14,7 +14,8 @@ def test_playwright_search_returns_results() -> None:
     settings = RunSettings()
     client = EbayClient(settings)
     url = build_url("iphone 14")
-    html = fetch_with_playwright(url, client.session.headers)
+    result = fetch_with_playwright(url, client.session.headers)
+    html = result.html
     assert html, "Expected Playwright HTML response"
     target = Target(id=0, name="iphone 14", query="iphone 14")
     listings, _ = parse_html(html, target, client)
