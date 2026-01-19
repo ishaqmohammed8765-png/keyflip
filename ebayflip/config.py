@@ -42,6 +42,7 @@ class RunSettings:
     min_seller_feedback_score: Optional[int] = None
     allow_missing_shipping_price: bool = True
     assumed_inbound_shipping_gbp: float = 0.0
+    use_playwright_fallback: bool = True
 
 
 @dataclass(slots=True)

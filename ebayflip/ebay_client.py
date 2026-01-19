@@ -3,8 +3,11 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import os
 import random
 import re
+import subprocess
+import sys
 import time
 from collections import Counter
 from datetime import datetime
@@ -26,6 +29,7 @@ LOGGER = get_logger()
 
 FINDING_ENDPOINT = "https://svcs.ebay.com/services/search/FindingService/v1"
 HTML_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
+DEFAULT_PLAYWRIGHT_BROWSERS_PATH = "/tmp/pw-browsers"
 USER_AGENTS = [
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -122,6 +126,7 @@ class EbayClient:
         delay: bool = False,
         use_cache: bool = True,
         store_cache: bool = True,
+        max_attempts: int = 3,
     ) -> tuple[requests.Response, bool]:
         cache_key = url
         if params:
@@ -130,7 +135,6 @@ class EbayClient:
             cached = self.cache.get(cache_key)
             if cached:
                 return _cached_to_response(cached, cache_key), True
-        max_attempts = 3
         response: Optional[requests.Response] = None
         for attempt in range(max_attempts):
             if self.request_count >= self.settings.request_cap:
@@ -408,7 +412,13 @@ class EbayClient:
     ) -> SearchResult:
         limit = self.settings.scan_limit_per_target
         params = _build_html_params(criteria, page)
-        response, cached = fetch_html(self, HTML_SEARCH_URL, params=params, delay=True)
+        response, cached = fetch_html(
+            self,
+            HTML_SEARCH_URL,
+            params=params,
+            delay=True,
+            max_attempts=1,
+        )
         response_text = response.text
         debug_path = _save_debug_html(response_text, prefix="ebay_search")
         failure_mode = _detect_failure_mode(response_text)
@@ -430,37 +440,6 @@ class EbayClient:
             LOGGER.info("eBay HTML response snippet=%s", response_text[:2000])
         if failure_mode:
             LOGGER.warning("eBay HTML failure mode detected: %s", failure_mode)
-        if _needs_bot_retry(response, failure_mode):
-            self._refresh_session(failure_mode or f"status {response.status_code}")
-            response, cached = fetch_html(
-                self,
-                HTML_SEARCH_URL,
-                params=params,
-                delay=True,
-                use_cache=False,
-                store_cache=False,
-            )
-            response_text = response.text
-            debug_path = _save_debug_html(response_text, prefix="ebay_search_retry")
-            failure_mode = _detect_failure_mode(response_text)
-            response_length = len(response_text)
-            redirect_chain = [resp.url for resp in response.history] if response.history else []
-            LOGGER.info(
-                "eBay HTML retry status=%s url=%s cached=%s length=%s redirects=%s debug_html=%s",
-                response.status_code,
-                response.url,
-                cached,
-                response_length,
-                redirect_chain,
-                debug_path,
-            )
-            request_headers = dict(response.request.headers) if response.request else dict(self.session.headers)
-            LOGGER.info("eBay HTML retry request headers=%s", request_headers)
-            LOGGER.info("eBay HTML retry response headers=%s", _filter_headers(response.headers))
-            if response_text:
-                LOGGER.info("eBay HTML retry response snippet=%s", response_text[:2000])
-            if failure_mode:
-                LOGGER.warning("eBay HTML retry failure mode detected: %s", failure_mode)
 
         raw_listings, parse_metrics = parse_html(response_text, target, self)
         item_count = parse_metrics["card_count"]
@@ -474,10 +453,23 @@ class EbayClient:
         )
 
         playwright_html: Optional[str] = None
-        if (failure_mode or not raw_listings or no_priced_listings) and _should_fallback_to_playwright(
-            failure_mode, parse_metrics["card_count"]
-        ):
-            LOGGER.info("Attempting Playwright fallback for eBay search.")
+        fallback_reasons: list[str] = []
+        if failure_mode:
+            fallback_reasons.append(f"failure_mode={failure_mode}")
+        if not raw_listings:
+            fallback_reasons.append("no_listings")
+        if parse_metrics.get("price_count", 0) == 0:
+            fallback_reasons.append("no_prices")
+        if no_priced_listings:
+            fallback_reasons.append("zero_prices")
+
+        needs_playwright = _should_fallback_to_playwright(
+            failure_mode,
+            parse_metrics,
+            raw_listings,
+        ) or no_priced_listings
+        if needs_playwright and _playwright_fallback_enabled(self.settings):
+            LOGGER.info("Attempting Playwright fallback for eBay search. reasons=%s", fallback_reasons)
             playwright_html = fetch_with_playwright(response.url, self.session.headers)
             if playwright_html:
                 debug_path = _save_debug_html(playwright_html, prefix="ebay_search_playwright")
@@ -494,6 +486,8 @@ class EbayClient:
                     parse_metrics["link_count"],
                     parse_metrics["price_count"],
                 )
+        elif needs_playwright:
+            LOGGER.warning("Playwright fallback disabled; returning HTML results only.")
 
         if not raw_listings or no_priced_listings:
             soup = BeautifulSoup(playwright_html or response_text, "lxml")
@@ -700,6 +694,21 @@ def normalize_price(text: str) -> tuple[float, str]:
     return _parse_price(cleaned)
 
 
+def _parse_shipping_text(text: Optional[str]) -> tuple[float, str, bool]:
+    if not text:
+        return 0.0, "GBP", True
+    lowered = text.lower()
+    if "not specified" in lowered or "varies" in lowered or "calculate" in lowered:
+        return 0.0, "GBP", True
+    value, currency = normalize_price(text)
+    missing = False
+    if "free" in lowered:
+        missing = False
+    elif value == 0.0 and ("not specified" in lowered or "varies" in lowered):
+        missing = True
+    return value, currency, missing
+
+
 def fetch_ebay_search(
     query: str,
     *,
@@ -720,24 +729,14 @@ def fetch_ebay_search(
     )
     target = Target(id=0, name=query, query=query, category_id=category, condition=condition)
     params = _build_html_params(criteria, page)
-    response, _ = fetch_html(client, HTML_SEARCH_URL, params=params, delay=True)
+    response, _ = fetch_html(client, HTML_SEARCH_URL, params=params, delay=True, max_attempts=1)
     html = response.text
     failure_mode = _detect_failure_mode(html)
-    if _needs_bot_retry(response, failure_mode):
-        client._refresh_session(failure_mode or f"status {response.status_code}")
-        response, _ = fetch_html(
-            client,
-            HTML_SEARCH_URL,
-            params=params,
-            delay=True,
-            use_cache=False,
-            store_cache=False,
-        )
-        html = response.text
-        failure_mode = _detect_failure_mode(html)
     listings, metrics = parse_html(html, target, client)
     playwright_html: Optional[str] = None
-    if (failure_mode or not listings) and _should_fallback_to_playwright(failure_mode, metrics["card_count"]):
+    no_priced_listings = bool(listings) and all(listing.price_gbp <= 0 for listing in listings)
+    needs_playwright = _should_fallback_to_playwright(failure_mode, metrics, listings) or no_priced_listings
+    if needs_playwright and _playwright_fallback_enabled(client.settings):
         playwright_html = fetch_with_playwright(response.url, client.session.headers)
         if playwright_html:
             listings, metrics = parse_html(playwright_html, target, client)
@@ -769,6 +768,7 @@ def fetch_html(
     delay: bool = False,
     use_cache: bool = True,
     store_cache: bool = True,
+    max_attempts: int = 3,
 ) -> tuple[requests.Response, bool]:
     return client._request(
         url,
@@ -776,6 +776,7 @@ def fetch_html(
         delay=delay,
         use_cache=use_cache,
         store_cache=store_cache,
+        max_attempts=max_attempts,
     )
 
 
@@ -854,11 +855,74 @@ def _accept_encoding_header() -> str:
     return ", ".join(encodings)
 
 
+def _set_playwright_env_defaults() -> str:
+    path = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+    if not path:
+        path = DEFAULT_PLAYWRIGHT_BROWSERS_PATH
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = path
+    return path
+
+
+_set_playwright_env_defaults()
+
+
 def _playwright_available() -> bool:
     try:
         return importlib.util.find_spec("playwright.sync_api") is not None
     except ModuleNotFoundError:
         return False
+
+
+def _playwright_fallback_enabled(settings: RunSettings) -> bool:
+    raw_value = os.getenv("EBAY_USE_PLAYWRIGHT")
+    if raw_value is None:
+        return settings.use_playwright_fallback
+    return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _ensure_playwright_browsers_installed() -> bool:
+    if not _playwright_available():
+        LOGGER.warning("Playwright not installed; skipping browser fallback.")
+        return False
+    _set_playwright_env_defaults()
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        LOGGER.warning("Playwright import failed: %s", exc)
+        return False
+    browser_path: Optional[Path] = None
+    try:
+        with sync_playwright() as playwright:
+            browser_path = Path(playwright.chromium.executable_path)
+    except Exception as exc:
+        LOGGER.warning("Playwright browser detection failed: %s", exc)
+    if browser_path and browser_path.exists():
+        return True
+    install_cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+    LOGGER.info("Installing Playwright browsers with %s", " ".join(install_cmd))
+    try:
+        result = subprocess.run(
+            install_cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+        )
+        if result.stdout:
+            LOGGER.info("Playwright install stdout: %s", result.stdout.strip())
+        if result.stderr:
+            LOGGER.info("Playwright install stderr: %s", result.stderr.strip())
+        return True
+    except subprocess.CalledProcessError as exc:
+        LOGGER.error(
+            "Playwright browser install failed (exit=%s). stdout=%s stderr=%s",
+            exc.returncode,
+            (exc.stdout or "").strip(),
+            (exc.stderr or "").strip(),
+        )
+    except Exception:
+        LOGGER.exception("Playwright browser install failed.")
+    return False
 
 
 def _save_debug_html(text: str, *, prefix: str) -> str:
@@ -870,12 +934,32 @@ def _save_debug_html(text: str, *, prefix: str) -> str:
     return str(path)
 
 
+def _save_debug_screenshot(page: Any, *, prefix: str) -> Optional[str]:
+    debug_dir = Path(".cache/ebayflip_debug")
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    path = debug_dir / f"{prefix}_{timestamp}.png"
+    try:
+        page.screenshot(path=str(path), full_page=True)
+    except Exception:
+        LOGGER.exception("Failed to capture Playwright screenshot.")
+        return None
+    return str(path)
+
+
 def _detect_failure_mode(text: str) -> Optional[str]:
     if not text:
         return "empty response"
     lowered = text.lower()
     patterns = {
-        "captcha": ["captcha", "verify you are human", "human verification", "robot check"],
+        "captcha": [
+            "captcha",
+            "verify you are human",
+            "human verification",
+            "robot check",
+            "recaptcha",
+            "hcaptcha",
+        ],
         "bot protection": [
             "access denied",
             "unusual traffic",
@@ -888,6 +972,8 @@ def _detect_failure_mode(text: str) -> Optional[str]:
             "request blocked",
             "temporarily unavailable",
             "automated queries",
+            "service unavailable",
+            "suspicious activity",
         ],
         "consent wall": ["consent", "cookie", "privacy choices"],
         "js required": [
@@ -895,31 +981,46 @@ def _detect_failure_mode(text: str) -> Optional[str]:
             "please enable javascript",
             "javascript required",
             "please enable cookies",
+            "turn on javascript",
         ],
     }
     for label, tokens in patterns.items():
         if any(token in lowered for token in tokens):
             return label
+    if 'name="robots"' in lowered and ("noindex" in lowered or "nofollow" in lowered):
+        return "robots meta"
+    if "s-item" in lowered and "s-item__price" not in lowered and "srp" in lowered:
+        return "missing price blocks"
     if "s-item" not in lowered and "srp" not in lowered and "search" in lowered:
         return "empty template"
     return None
 
 
-def _should_fallback_to_playwright(failure_mode: Optional[str], card_count: int) -> bool:
+def _should_fallback_to_playwright(
+    failure_mode: Optional[str],
+    parse_metrics: dict[str, int],
+    raw_listings: list[Listing],
+) -> bool:
     if failure_mode:
         return True
-    return card_count == 0
+    if not raw_listings:
+        return True
+    if parse_metrics.get("price_count", 0) == 0:
+        return True
+    return False
 
 
 def fetch_with_playwright(url: str, headers: dict[str, str]) -> Optional[str]:
-    if not _playwright_available():
-        LOGGER.warning("Playwright not installed; skipping browser fallback.")
+    if not _ensure_playwright_browsers_installed():
+        LOGGER.error("Playwright browser install missing or failed; skipping browser fallback.")
         return None
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 
     user_data_dir = Path(".cache/ebayflip_playwright")
     user_data_dir.mkdir(parents=True, exist_ok=True)
+    page = None
+    browser = None
     try:
         with sync_playwright() as playwright:
             user_agent = headers.get("User-Agent")
@@ -932,16 +1033,54 @@ def fetch_with_playwright(url: str, headers: dict[str, str]) -> Optional[str]:
             )
             page = browser.new_page()
             page.set_extra_http_headers({key: value for key, value in headers.items() if key.lower() != "host"})
+            time.sleep(random.uniform(0.2, 0.7))
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             try:
-                page.wait_for_selector("li.s-item, div.s-item__wrapper, div.s-item", timeout=15000)
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except PlaywrightTimeoutError:
+                LOGGER.info("Playwright network idle wait timed out; continuing.")
+            try:
+                page.wait_for_selector(
+                    "li.s-item, div.s-item__wrapper, div.s-item, ul.srp-results",
+                    timeout=15000,
+                )
             except PlaywrightTimeoutError:
                 LOGGER.warning("Playwright wait timed out; continuing with captured HTML.")
             html = page.content()
+            failure_mode = _detect_failure_mode(html)
+            if failure_mode:
+                screenshot_path = _save_debug_screenshot(page, prefix="ebay_playwright_failure")
+                debug_path = _save_debug_html(html, prefix="ebay_playwright_failure")
+                LOGGER.warning(
+                    "Playwright failure mode detected: %s screenshot=%s html=%s",
+                    failure_mode,
+                    screenshot_path,
+                    debug_path,
+                )
             browser.close()
             return html
     except Exception:
         LOGGER.exception("Playwright fallback failed.")
+        if page:
+            screenshot_path = _save_debug_screenshot(page, prefix="ebay_playwright_error")
+            try:
+                html = page.content()
+            except Exception:
+                html = ""
+            if html:
+                debug_path = _save_debug_html(html, prefix="ebay_playwright_error")
+            else:
+                debug_path = None
+            LOGGER.warning(
+                "Playwright failure debug saved screenshot=%s html=%s",
+                screenshot_path,
+                debug_path,
+            )
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                LOGGER.exception("Failed to close Playwright browser after error.")
         return None
 
 
@@ -978,6 +1117,8 @@ def _parse_price(text: str) -> tuple[float, str]:
         currency = "USD"
     if "EUR" in cleaned or "€" in cleaned:
         currency = "EUR"
+    if "GBP" in cleaned or "£" in cleaned:
+        currency = "GBP"
     cleaned = (
         cleaned.replace("£", "")
         .replace("US $", "")
@@ -985,14 +1126,16 @@ def _parse_price(text: str) -> tuple[float, str]:
         .replace("EUR", "")
         .replace("€", "")
     )
+    cleaned = cleaned.replace("from", "")
     for token in ["to", "-", "per", "each"]:
         if token in cleaned:
             cleaned = cleaned.split(token)[0]
     cleaned = cleaned.strip()
-    match = re.search(r"(\d+(?:\.\d+)?)", cleaned)
-    if not match:
+    numbers = re.findall(r"(\d+(?:\.\d+)?)", cleaned)
+    if not numbers:
         return 0.0, currency
-    return float(match.group(1)), currency
+    values = [float(value) for value in numbers]
+    return min(values), currency
 
 
 def _extract_item_id(url: str) -> str:
@@ -1063,12 +1206,9 @@ def _parse_html_listings(
             continue
 
         shipping_text = _extract_listing_shipping_text(card)
-        shipping_missing = shipping_text is None
-        shipping_value, shipping_currency = normalize_price(shipping_text or "")
+        shipping_value, shipping_currency, shipping_missing = _parse_shipping_text(shipping_text)
         if shipping_text and shipping_currency and shipping_currency != currency:
             shipping_value = 0.0
-        if shipping_text and "free" in shipping_text.lower():
-            shipping_missing = False
 
         shipping_value, assumed_shipping = client._apply_missing_shipping(shipping_value, shipping_missing)
         price_gbp, shipping_gbp = client._normalize_currency(price_value, shipping_value, currency or "GBP")
@@ -1151,10 +1291,12 @@ def _extract_listing_price_text(card: Any) -> Optional[str]:
         "span.s-item__price",
         "div.s-item__details span.s-item__price",
         "span.s-item__price span",
+        "span.s-item__price span.POSITIVE",
         "*[data-testid='s-item__price']",
         "*[class*='s-item__price']",
         "span[aria-label*='£']",
         "span[aria-label*='$']",
+        "span[aria-label*='GBP']",
         "span[aria-label*='EUR']",
     ]
     for selector in selectors:
@@ -1169,6 +1311,10 @@ def _extract_listing_shipping_text(card: Any) -> Optional[str]:
         "span.s-item__shipping",
         "span.s-item__logisticsCost",
         "span.s-item__shipping.s-item__logisticsCost",
+        "*[data-testid='s-item__shipping']",
+        "*[data-testid='s-item__logisticsCost']",
+        "span[aria-label*='postage']",
+        "span[aria-label*='shipping']",
     ]
     for selector in selectors:
         el = card.select_one(selector)
