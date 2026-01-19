@@ -207,6 +207,38 @@ def _format_condition(condition_id: Optional[str]) -> str:
     return condition_id
 
 
+def _format_listing_type(listing_type: Optional[str]) -> str:
+    if not listing_type or listing_type == "any":
+        return "-"
+    return listing_type
+
+
+def _describe_active_filters(last_diag: Optional[dict]) -> list[str]:
+    if not last_diag:
+        return []
+    filters: list[str] = []
+    category_id = last_diag.get("category_id")
+    if category_id:
+        filters.append(f"Category: {_format_category_path(category_id)}")
+    condition = last_diag.get("condition")
+    if condition:
+        filters.append(f"Condition: {_format_condition(condition)}")
+    listing_type = _format_listing_type(last_diag.get("listing_type"))
+    if listing_type != "-":
+        filters.append(f"Listing type: {listing_type}")
+    price_filters = last_diag.get("price_filters") or {}
+    max_buy = price_filters.get("max_buy_gbp")
+    if max_buy is not None:
+        filters.append(f"Max buy: £{max_buy:.2f}")
+    shipping_max = price_filters.get("shipping_max_gbp")
+    if shipping_max is not None:
+        filters.append(f"Max shipping: £{shipping_max:.2f}")
+    total_max = price_filters.get("total_max_gbp")
+    if total_max is not None:
+        filters.append(f"Total max: £{total_max:.2f}")
+    return filters
+
+
 def _classify_scan_issue(entry: dict, last_diag: Optional[dict]) -> tuple[str, str]:
     if entry.get("retry_report"):
         for report in entry["retry_report"]:
@@ -232,6 +264,13 @@ def _build_diagnostic_rows(scan_debug: list) -> list[dict]:
         entry_data = dataclasses.asdict(entry)
         last_diag = entry_data["diagnostics"][-1] if entry_data.get("diagnostics") else None
         status, action = _classify_scan_issue(entry_data, last_diag)
+        filters = _describe_active_filters(last_diag)
+        rejections = entry_data.get("rejection_counts") or {}
+        rejection_items = [(key, value) for key, value in rejections.items() if value]
+        top_rejection = "-"
+        if rejection_items:
+            reason, count = max(rejection_items, key=lambda item: item[1])
+            top_rejection = f"{reason} ({count})"
         rows.append(
             {
                 "target": entry_data["target_name"],
@@ -241,6 +280,8 @@ def _build_diagnostic_rows(scan_debug: list) -> list[dict]:
                 "action": action,
                 "raw": entry_data.get("raw_count", 0),
                 "filtered": entry_data.get("filtered_count", 0),
+                "filters": ", ".join(filters) if filters else "-",
+                "top_rejection": top_rejection,
                 "failure_mode": last_diag.get("failure_mode") if last_diag else "-",
                 "http_status": last_diag.get("http_status") if last_diag else "-",
             }
@@ -468,6 +509,10 @@ with Tabs[0]:
             entry_data = dataclasses.asdict(entry)
             last_diag = entry_data["diagnostics"][-1] if entry_data.get("diagnostics") else None
             with st.expander(f"{entry_data['target_name']} — {entry_data['target_query']}"):
+                st.markdown("**Outcome**")
+                st.write(
+                    f"Raw results: {entry_data.get('raw_count', 0)} → After filters: {entry_data.get('filtered_count', 0)}"
+                )
                 if entry_data["raw_count"] == 0:
                     st.write("0 results from eBay.")
                     if last_diag and last_diag.get("item_count"):
@@ -481,6 +526,13 @@ with Tabs[0]:
                     st.write(
                         f"Results were filtered out locally (raw {entry_data['raw_count']}, kept {entry_data['filtered_count']})."
                     )
+                active_filters = _describe_active_filters(last_diag)
+                if active_filters:
+                    st.markdown("**Filters applied**")
+                    for active_filter in active_filters:
+                        st.write(f"- {active_filter}")
+                else:
+                    st.write("Filters applied: -")
                 if entry_data.get("retry_report"):
                     st.markdown("**Retries applied:**")
                     retry_steps = "\n".join(f"- {step}" for step in entry_data["retry_report"])
@@ -492,15 +544,21 @@ with Tabs[0]:
                         if value
                     }
                     if reasons:
-                        st.markdown("**Top rejection reasons:**")
-                        for reason, count in sorted(reasons.items(), key=lambda item: item[1], reverse=True):
-                            st.write(f"- {reason} ({count})")
+                        st.markdown("**Local filter rejections:**")
+                        rejection_df = pd.DataFrame(
+                            [
+                                {"reason": reason, "count": count}
+                                for reason, count in sorted(reasons.items(), key=lambda item: item[1], reverse=True)
+                            ]
+                        )
+                        st.dataframe(rejection_df, use_container_width=True, height=160)
                 if last_diag:
                     st.markdown("**Last request details:**")
                     st.write(f"Mode: {last_diag['mode']}")
                     st.write(f"Query: {last_diag['query']}")
                     st.write(f"Category: {last_diag['category_id'] or '-'}")
                     st.write(f"Condition: {last_diag['condition'] or '-'}")
+                    st.write(f"Listing type: {_format_listing_type(last_diag.get('listing_type'))}")
                     st.write(f"Page: {last_diag['pagination']['page']}")
                     st.write(f"Limit: {last_diag['pagination']['limit']}")
                     st.write(f"HTTP status: {last_diag['http_status']}")
