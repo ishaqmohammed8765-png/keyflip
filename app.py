@@ -513,6 +513,20 @@ with Tabs[0]:
                 st.write(
                     f"Raw results: {entry_data.get('raw_count', 0)} → After filters: {entry_data.get('filtered_count', 0)}"
                 )
+                if entry_data.get("blocked_message"):
+                    st.warning(entry_data["blocked_message"])
+                    if entry_data.get("blocked_reason"):
+                        st.write(f"Blocked reason: {entry_data['blocked_reason']}")
+                    if entry_data.get("blocked_url"):
+                        st.write(f"Blocked URL: {entry_data['blocked_url']}")
+                    if entry_data.get("debug_artifacts"):
+                        st.markdown("**Debug artifacts:**")
+                        for artifact in entry_data["debug_artifacts"]:
+                            st.code(artifact)
+                    if os.getenv("EBAY_API_ENABLED") != "1":
+                        st.caption(
+                            "Tip: enable EBAY_API_ENABLED=1 and EBAY_APP_ID to use the official eBay API."
+                        )
                 if entry_data["raw_count"] == 0:
                     st.write("0 results from eBay.")
                     if last_diag and last_diag.get("item_count"):

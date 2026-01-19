@@ -58,6 +58,10 @@ class TargetSearchDebug:
     raw_count: int
     filtered_count: int
     last_request_url: Optional[str]
+    blocked_message: Optional[str] = None
+    blocked_reason: Optional[str] = None
+    blocked_url: Optional[str] = None
+    debug_artifacts: list[str] = dataclasses.field(default_factory=list)
 
 
 def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
@@ -88,6 +92,10 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
                     raw_count=0,
                     filtered_count=0,
                     last_request_url=None,
+                    blocked_message=None,
+                    blocked_reason=None,
+                    blocked_url=None,
+                    debug_artifacts=[],
                 )
             )
             continue
@@ -103,6 +111,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             stop_scan = True
             break
         if not listings:
+            blocked = search_result.blocked
             zero_result_debug.append(
                 TargetSearchDebug(
                     target_name=target.name,
@@ -113,6 +122,10 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
                     raw_count=search_result.raw_count,
                     filtered_count=search_result.filtered_count,
                     last_request_url=search_result.last_request_url,
+                    blocked_message=blocked.message if blocked else None,
+                    blocked_reason=blocked.reason if blocked else None,
+                    blocked_url=blocked.url if blocked else None,
+                    debug_artifacts=blocked.debug_artifacts if blocked else [],
                 )
             )
         for listing in listings:
