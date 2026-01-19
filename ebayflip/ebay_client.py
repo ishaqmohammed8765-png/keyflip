@@ -26,6 +26,29 @@ LOGGER = get_logger()
 
 FINDING_ENDPOINT = "https://svcs.ebay.com/services/search/FindingService/v1"
 HTML_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
+USER_AGENTS = [
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+]
+BOT_FAILURE_MODES = {"captcha", "bot protection"}
 
 
 class RequestLimitError(RuntimeError):
@@ -79,20 +102,16 @@ class EbayClient:
         self.request_cap_reached = False
         self.cache = CacheStore(".cache/ebayflip_cache.sqlite", ttl_seconds=300)
         self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/123.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-GB,en;q=0.9",
-                "Accept-Encoding": _accept_encoding_header(),
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
-            }
-        )
+        self._apply_session_headers()
+
+    def _apply_session_headers(self) -> None:
+        user_agent = random.choice(USER_AGENTS)
+        self.session.headers.update(_default_headers(user_agent))
+
+    def _refresh_session(self, reason: str) -> None:
+        LOGGER.info("Refreshing HTTP session due to %s", reason)
+        self.session = requests.Session()
+        self._apply_session_headers()
 
     def _request(
         self,
@@ -100,13 +119,16 @@ class EbayClient:
         params: Optional[dict[str, Any]] = None,
         *,
         delay: bool = False,
+        use_cache: bool = True,
+        store_cache: bool = True,
     ) -> tuple[requests.Response, bool]:
         cache_key = url
         if params:
             cache_key = f"{url}?{urlencode(params, doseq=True)}"
-        cached = self.cache.get(cache_key)
-        if cached:
-            return _cached_to_response(cached, cache_key), True
+        if use_cache:
+            cached = self.cache.get(cache_key)
+            if cached:
+                return _cached_to_response(cached, cache_key), True
         max_attempts = 3
         response: Optional[requests.Response] = None
         for attempt in range(max_attempts):
@@ -124,7 +146,8 @@ class EbayClient:
                     time.sleep(backoff)
                     continue
             response.raise_for_status()
-            self.cache.set(cache_key, response)
+            if store_cache:
+                self.cache.set(cache_key, response)
             return response, False
         if response is not None:
             response.raise_for_status()
@@ -406,6 +429,37 @@ class EbayClient:
             LOGGER.info("eBay HTML response snippet=%s", response_text[:2000])
         if failure_mode:
             LOGGER.warning("eBay HTML failure mode detected: %s", failure_mode)
+        if _needs_bot_retry(response, failure_mode):
+            self._refresh_session(failure_mode or f"status {response.status_code}")
+            response, cached = fetch_html(
+                self,
+                HTML_SEARCH_URL,
+                params=params,
+                delay=True,
+                use_cache=False,
+                store_cache=False,
+            )
+            response_text = response.text
+            debug_path = _save_debug_html(response_text, prefix="ebay_search_retry")
+            failure_mode = _detect_failure_mode(response_text)
+            response_length = len(response_text)
+            redirect_chain = [resp.url for resp in response.history] if response.history else []
+            LOGGER.info(
+                "eBay HTML retry status=%s url=%s cached=%s length=%s redirects=%s debug_html=%s",
+                response.status_code,
+                response.url,
+                cached,
+                response_length,
+                redirect_chain,
+                debug_path,
+            )
+            request_headers = dict(response.request.headers) if response.request else dict(self.session.headers)
+            LOGGER.info("eBay HTML retry request headers=%s", request_headers)
+            LOGGER.info("eBay HTML retry response headers=%s", _filter_headers(response.headers))
+            if response_text:
+                LOGGER.info("eBay HTML retry response snippet=%s", response_text[:2000])
+            if failure_mode:
+                LOGGER.warning("eBay HTML retry failure mode detected: %s", failure_mode)
 
         raw_listings, parse_metrics = parse_html(response_text, target, self)
         item_count = parse_metrics["card_count"]
@@ -660,6 +714,18 @@ def fetch_ebay_search(
     response, _ = fetch_html(client, HTML_SEARCH_URL, params=params, delay=True)
     html = response.text
     failure_mode = _detect_failure_mode(html)
+    if _needs_bot_retry(response, failure_mode):
+        client._refresh_session(failure_mode or f"status {response.status_code}")
+        response, _ = fetch_html(
+            client,
+            HTML_SEARCH_URL,
+            params=params,
+            delay=True,
+            use_cache=False,
+            store_cache=False,
+        )
+        html = response.text
+        failure_mode = _detect_failure_mode(html)
     listings, metrics = parse_html(html, target, client)
     playwright_html: Optional[str] = None
     if (failure_mode or not listings) and _should_fallback_to_playwright(failure_mode, metrics["card_count"]):
@@ -692,8 +758,16 @@ def fetch_html(
     *,
     params: Optional[dict[str, Any]] = None,
     delay: bool = False,
+    use_cache: bool = True,
+    store_cache: bool = True,
 ) -> tuple[requests.Response, bool]:
-    return client._request(url, params=params, delay=delay)
+    return client._request(
+        url,
+        params=params,
+        delay=delay,
+        use_cache=use_cache,
+        store_cache=store_cache,
+    )
 
 
 def parse_html(
@@ -739,6 +813,31 @@ def _filter_headers(headers: dict[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if key.lower() in keep}
 
 
+def _default_headers(user_agent: str) -> dict[str, str]:
+    return {
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Accept-Encoding": _accept_encoding_header(),
+        "Connection": "keep-alive",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Referer": "https://www.ebay.co.uk/",
+    }
+
+
+def _needs_bot_retry(response: requests.Response, failure_mode: Optional[str]) -> bool:
+    if response.status_code in {403, 429}:
+        return True
+    if failure_mode in BOT_FAILURE_MODES:
+        return True
+    return False
+
+
 def _accept_encoding_header() -> str:
     encodings = ["gzip", "deflate"]
     if importlib.util.find_spec("brotli") or importlib.util.find_spec("brotlicffi"):
@@ -767,10 +866,12 @@ def _detect_failure_mode(text: str) -> Optional[str]:
             "pardon our interruption",
             "akamai",
             "perimeterx",
+            "incapsula",
             "blocked",
             "forbidden",
             "request blocked",
             "temporarily unavailable",
+            "automated queries",
         ],
         "consent wall": ["consent", "cookie", "privacy choices"],
         "js required": [
@@ -805,11 +906,13 @@ def fetch_with_playwright(url: str, headers: dict[str, str]) -> Optional[str]:
     user_data_dir.mkdir(parents=True, exist_ok=True)
     try:
         with sync_playwright() as playwright:
+            user_agent = headers.get("User-Agent")
             browser = playwright.chromium.launch_persistent_context(
                 user_data_dir=str(user_data_dir),
                 headless=True,
                 viewport={"width": 1280, "height": 800},
                 locale="en-GB",
+                user_agent=user_agent,
             )
             page = browser.new_page()
             page.set_extra_http_headers({key: value for key, value in headers.items() if key.lower() != "host"})
@@ -1518,7 +1621,17 @@ def _broaden_query(query: str) -> str:
     pattern = r"\b(" + "|".join(colors) + r")\b"
     cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
+    if not cleaned:
+        return cleaned
+    words = cleaned.split()
+    if len(words) < 5:
+        filler = ["for", "sale", "used", "listing", "deal"]
+        for token in filler:
+            if len(words) >= 5:
+                break
+            if token not in words:
+                words.append(token)
+    return " ".join(words)
 
 
 def _build_retry_steps(base: SearchCriteria) -> list[tuple[str, SearchCriteria]]:
