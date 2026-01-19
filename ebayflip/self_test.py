@@ -5,9 +5,9 @@ from ebayflip.ebay_client import SearchCriteria, _build_retry_steps, _broaden_qu
 
 def run_self_tests() -> None:
     broadened = _broaden_query('iPhone 13 128GB "Unlocked" Graphite')
-    assert broadened == "iPhone 13", f"Unexpected broadened query: {broadened}"
+    assert broadened == "iPhone 13 for sale used listing", f"Unexpected broadened query: {broadened}"
     broadened = _broaden_query("iphone14")
-    assert broadened == "iphone 14", f"Unexpected broadened query: {broadened}"
+    assert broadened == "iphone 14 for sale used listing", f"Unexpected broadened query: {broadened}"
 
     base = SearchCriteria(
         query="Nintendo Switch OLED 64GB White",
