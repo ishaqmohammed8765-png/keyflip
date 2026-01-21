@@ -30,6 +30,7 @@ from ebayflip.config import (
     MIN_ROI,
 )
 from ebayflip.db import (
+    add_target,
     delete_target,
     init_db,
     list_comps_by_listing,
@@ -104,6 +105,19 @@ init_db(DB_PATH)
 
 st.title("eBay Flip Scanner")
 st.caption("Scan eBay listings for underpriced flips, estimate resale, and alert on deals.")
+
+with st.expander("Getting started (3 quick steps)", expanded=True):
+    step_col1, step_col2, step_col3 = st.columns(3)
+    step_col1.markdown(
+        "**1) Add a target**\n\nPick an item you know well (e.g., consoles, headphones). "
+        "Keywords can be broad to start."
+    )
+    step_col2.markdown(
+        "**2) Run a scan**\n\nClick **Scan now** to fetch listings and see evaluation results."
+    )
+    step_col3.markdown(
+        "**3) Tune your filters**\n\nAdjust profit/ROI settings once you see real data."
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -412,6 +426,17 @@ interval_min = st.sidebar.number_input(
 )
 st.session_state.auto_scan_interval = interval_min
 
+st.sidebar.markdown("### Quick status")
+targets_sidebar = _load_targets(DB_PATH)
+enabled_targets = sum(1 for target in targets_sidebar if target.enabled)
+api_enabled = os.getenv("EBAY_API_ENABLED") == "1" and os.getenv("EBAY_APP_ID")
+st.sidebar.write(f"Targets enabled: **{enabled_targets}**")
+st.sidebar.write(f"Mode: **{'API' if api_enabled else 'HTML fallback'}**")
+if enabled_targets == 0:
+    st.sidebar.info("Add a target in the Targets tab to start scanning.")
+if not api_enabled:
+    st.sidebar.caption("Tip: set EBAY_API_ENABLED=1 and EBAY_APP_ID for better reliability.")
+
 def _run_scan_with_feedback() -> None:
     config = build_config()
     client = build_client()
@@ -480,10 +505,21 @@ with Tabs[0]:
     col_form, col_controls = st.columns([1.1, 1])
     with col_form:
         with st.form("manual_candidate"):
-            title = st.text_input("Title", placeholder="e.g., iPhone 14 128GB Unlocked")
+            title = st.text_input(
+                "Title",
+                placeholder="e.g., iPhone 14 128GB Unlocked",
+                help="Paste the listing title as-is for the best matching comps.",
+            )
             buy_price = st.number_input("Buy price (GBP)", min_value=0.0, step=1.0, format="%.2f")
-            condition = st.selectbox("Condition (optional)", ["", *CONDITION_OPTIONS.keys()])
-            url = st.text_input("Source URL (optional)")
+            condition = st.selectbox(
+                "Condition (optional)",
+                ["", *CONDITION_OPTIONS.keys()],
+                help="If known, this helps narrow down comps accuracy.",
+            )
+            url = st.text_input(
+                "Source URL (optional)",
+                help="Optional link to where you found the listing.",
+            )
             submitted = st.form_submit_button("Add to list")
             if submitted:
                 if not title or buy_price <= 0:
@@ -500,6 +536,7 @@ with Tabs[0]:
                     st.success("Added candidate.")
 
         st.markdown("**CSV upload**")
+        st.caption("Use this template: title,buy_price,condition,url")
         uploaded = st.file_uploader("Upload CSV", type=["csv"])
         if uploaded is not None:
             try:
@@ -872,6 +909,37 @@ with Tabs[1]:
     st.subheader("Targets")
     targets = _load_targets(DB_PATH)
     categories_ready = ensure_categories_loaded(DB_PATH)
+    seed_targets = [
+        ("Nintendo Switch OLED", "Nintendo Switch OLED"),
+        ("AirPods Pro 2", "AirPods Pro 2"),
+        ("Sony WH-1000XM5", "Sony WH-1000XM5"),
+    ]
+    if st.button("Add sample targets (beginner friendly)", width="stretch"):
+        existing_names = {target.name for target in targets}
+        added = 0
+        for name, query in seed_targets:
+            if name in existing_names:
+                continue
+            add_target(
+                DB_PATH,
+                Target(
+                    id=None,
+                    name=name,
+                    query=query,
+                    category_id=None,
+                    condition=None,
+                    max_buy_gbp=None,
+                    shipping_max_gbp=None,
+                    listing_type="any",
+                    enabled=True,
+                ),
+            )
+            added += 1
+        _load_targets.clear()
+        if added:
+            st.success(f"Added {added} sample targets.")
+        else:
+            st.info("Sample targets already exist.")
     target_df = pd.DataFrame([dataclasses.asdict(t) for t in targets]) if targets else pd.DataFrame()
     if target_df.empty:
         st.info("No targets yet. Add one below.")
@@ -899,7 +967,11 @@ with Tabs[1]:
         )
 
     with st.expander("Add target", expanded=True):
-        name = st.text_input("Name", key="add_name")
+        name = st.text_input(
+            "Name",
+            key="add_name",
+            help="Give the target a friendly label, e.g., 'Switch OLED under £250'.",
+        )
         if categories_ready:
             category_id = _render_category_picker("add", None)
         else:
@@ -907,10 +979,23 @@ with Tabs[1]:
             category_id = None
         st.session_state["add_category_id"] = category_id
         _maybe_autofill_keywords("add", st.session_state.get("add_name", ""), category_id)
-        query = st.text_input("Keywords", key="add_query")
+        query = st.text_input(
+            "Keywords",
+            key="add_query",
+            help="Start broad. You can refine keywords after your first scan.",
+        )
         query_value = _normalize_query(query, name)
-        condition = _condition_selectbox("Condition", key="add_condition", selected_condition_id=None)
-        listing_type = st.selectbox("Listing type", ["any", "auction", "bin"], key="add_listing_type")
+        condition = _condition_selectbox(
+            "Condition",
+            key="add_condition",
+            selected_condition_id=None,
+        )
+        listing_type = st.selectbox(
+            "Listing type",
+            ["any", "auction", "bin"],
+            key="add_listing_type",
+            help="Use 'any' for more results when starting out.",
+        )
         enabled = st.toggle("Enabled", value=True, key="add_enabled")
         submitted = st.button("Add target", width="stretch")
         if submitted:
@@ -925,8 +1010,6 @@ with Tabs[1]:
                 listing_type=listing_type,
                 enabled=enabled,
             )
-            from ebayflip.db import add_target
-
             add_target(DB_PATH, target)
             _load_targets.clear()
             st.success("Target added. Refresh to see it in the table.")
