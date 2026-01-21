@@ -13,6 +13,13 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from ebayflip import get_logger
+from ebayflip.comps_deals import (
+    DealResult,
+    analyze_candidates,
+    build_candidate_item,
+    normalize_title,
+    sold_comps_to_points,
+)
 from ebayflip.config import (
     AlertSettings,
     AppConfig,
@@ -30,6 +37,7 @@ from ebayflip.db import (
     list_targets,
 )
 from ebayflip.ebay_client import EbayClient
+from ebayflip.ebay_comps_api import EbayApiConfig, EbayCompsApiClient
 from ebayflip.models import Target
 from ebayflip.scheduler import run_scan
 from ebayflip.taxonomy import (
@@ -67,6 +75,10 @@ if "settings" not in st.session_state:
     st.session_state.settings = RunSettings()
 if "alerts" not in st.session_state:
     st.session_state.alerts = AlertSettings(discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL"))
+if "deal_candidates" not in st.session_state:
+    st.session_state.deal_candidates = []
+if "deal_results" not in st.session_state:
+    st.session_state.deal_results = []
 
 
 def _coerce_settings(value: object) -> RunSettings:
@@ -465,9 +477,219 @@ if st.session_state.auto_scan:
         st.info("Auto-scan enabled. A scan will run on the next refresh.")
 
 
-Tabs = st.tabs(["Dashboard", "Targets", "Deals Feed", "Scan Misses", "Settings"])
+Tabs = st.tabs(
+    ["Comps / Deals", "Dashboard", "Targets", "Deals Feed", "Scan Misses", "Settings"]
+)
 
 with Tabs[0]:
+    st.subheader("Comps / Deals")
+    st.caption("Estimate resale value from sold comps and compute profit/ROI for candidate buys.")
+
+    api_config = EbayApiConfig.from_env()
+
+    col_form, col_controls = st.columns([1.1, 1])
+    with col_form:
+        with st.form("manual_candidate"):
+            title = st.text_input("Title", placeholder="e.g., iPhone 14 128GB Unlocked")
+            buy_price = st.number_input("Buy price (GBP)", min_value=0.0, step=1.0, format="%.2f")
+            condition = st.selectbox("Condition (optional)", ["", *CONDITION_OPTIONS.keys()])
+            url = st.text_input("Source URL (optional)")
+            submitted = st.form_submit_button("Add to list")
+            if submitted:
+                if not title or buy_price <= 0:
+                    st.warning("Enter a title and buy price before adding.")
+                else:
+                    candidate = build_candidate_item(
+                        source="manual",
+                        title_raw=title,
+                        buy_price_gbp=float(buy_price),
+                        condition_hint=condition or None,
+                        url=url or None,
+                    )
+                    st.session_state.deal_candidates.append(candidate)
+                    st.success("Added candidate.")
+
+        st.markdown("**CSV upload**")
+        uploaded = st.file_uploader("Upload CSV", type=["csv"])
+        if uploaded is not None:
+            try:
+                csv_df = pd.read_csv(uploaded)
+            except Exception as exc:
+                st.error(f"Unable to read CSV: {exc}")
+            else:
+                st.caption("Expected columns: title,buy_price (optional: condition,url)")
+                if st.button("Add CSV rows"):
+                    added = 0
+                    for _, row in csv_df.iterrows():
+                        title_value = str(row.get("title", "")).strip()
+                        buy_value = row.get("buy_price")
+                        if not title_value or pd.isna(buy_value):
+                            continue
+                        candidate = build_candidate_item(
+                            source="csv",
+                            title_raw=title_value,
+                            buy_price_gbp=float(buy_value),
+                            condition_hint=str(row.get("condition")).strip()
+                            if row.get("condition") and not pd.isna(row.get("condition"))
+                            else None,
+                            url=str(row.get("url")).strip()
+                            if row.get("url") and not pd.isna(row.get("url"))
+                            else None,
+                        )
+                        st.session_state.deal_candidates.append(candidate)
+                        added += 1
+                    st.success(f"Added {added} candidates from CSV.")
+
+        if st.button("Clear candidates"):
+            st.session_state.deal_candidates = []
+            st.session_state.deal_results = []
+
+    with col_controls:
+        days = st.number_input(
+            "Days back",
+            min_value=1,
+            max_value=90,
+            value=api_config.comps_days,
+            step=1,
+        )
+        min_profit = st.slider("Min profit (GBP)", 0.0, 200.0, float(MIN_PROFIT_GBP), step=1.0)
+        min_roi = st.slider("Min ROI", 0.0, 2.0, float(MIN_ROI), step=0.05)
+        show_comps_details = st.checkbox("Show comps details", value=False)
+        use_experimental_scrape = st.checkbox(
+            "Experimental: eBay web scraping",
+            value=False,
+            help="May be blocked by eBay. Official API is the default.",
+        )
+        if use_experimental_scrape:
+            st.warning("Experimental scraping can be blocked by eBay. Use the API when possible.")
+
+    candidates = st.session_state.deal_candidates
+    if candidates:
+        candidate_rows = []
+        for item in candidates:
+            query = item.attributes.get("query") or normalize_title(item.title_raw)[2]
+            candidate_rows.append(
+                {
+                    "title": item.title_raw,
+                    "buy_price_gbp": item.buy_price_gbp,
+                    "condition": item.condition_hint or "-",
+                    "query": query,
+                    "source": item.source,
+                }
+            )
+        st.dataframe(pd.DataFrame(candidate_rows), width="stretch", height=220)
+    else:
+        st.info("Add candidates manually or via CSV to start.")
+
+    if st.button("Analyze", type="primary"):
+        if not candidates:
+            st.warning("Add at least one candidate before analyzing.")
+        else:
+            comps_points: dict[str, list] = {}
+            settings = st.session_state.settings
+            try:
+                if use_experimental_scrape:
+                    client = build_client()
+                else:
+                    api_config.validate()
+                    api_client = EbayCompsApiClient(api_config, settings)
+            except (ValueError, RuntimeError) as exc:
+                st.error(str(exc))
+            else:
+                with st.spinner("Fetching sold comps..."):
+                    fetch_failed = False
+                    for item in candidates:
+                        query = item.attributes.get("query", item.title_norm)
+                        if query in comps_points:
+                            continue
+                        try:
+                            if use_experimental_scrape:
+                                comps_points[query] = sold_comps_to_points(
+                                    client.search_sold_comps(query)
+                                )
+                            else:
+                                comps_points[query] = api_client.fetch_sold_comps(
+                                    query, days=int(days), limit=api_config.comps_limit
+                                )
+                        except RuntimeError as exc:
+                            st.error(str(exc))
+                            fetch_failed = True
+                            break
+                if not fetch_failed:
+                    st.session_state.deal_results = analyze_candidates(
+                        candidates,
+                        comps_points,
+                        days=int(days),
+                        settings=settings,
+                    )
+
+    results: list[DealResult] = st.session_state.deal_results
+    if results:
+        filtered_results = [
+            result
+            for result in results
+            if result.profit_gbp is not None
+            and result.roi is not None
+            and result.profit_gbp >= min_profit
+            and result.roi >= min_roi
+        ]
+        filtered_results.sort(
+            key=lambda item: (
+                item.profit_gbp if item.profit_gbp is not None else -float("inf"),
+                item.roi if item.roi is not None else -float("inf"),
+            ),
+            reverse=True,
+        )
+        rows = []
+        for result in filtered_results:
+            rows.append(
+                {
+                    "title": result.candidate.title_raw,
+                    "buy_price_gbp": result.candidate.buy_price_gbp,
+                    "expected_sell_gbp": result.expected_sell_gbp,
+                    "profit_gbp": result.profit_gbp,
+                    "roi": result.roi,
+                    "confidence": result.confidence,
+                    "sample_size": result.comps.sample_size,
+                }
+            )
+        if rows:
+            st.dataframe(pd.DataFrame(rows), width="stretch", height=320)
+        else:
+            st.info("No deals met the current profit/ROI filters.")
+
+        if show_comps_details:
+            for result in filtered_results:
+                with st.expander(f"{result.candidate.title_raw} — comps details"):
+                    st.markdown(f"**Query:** `{result.comps.query_used}`")
+                    st.write(
+                        {
+                            "sample_size": result.comps.sample_size,
+                            "median_gbp": result.comps.sold_median_gbp,
+                            "p25_gbp": result.comps.sold_p25_gbp,
+                            "p75_gbp": result.comps.sold_p75_gbp,
+                            "confidence": result.confidence,
+                        }
+                    )
+                    comp_rows = [
+                        {
+                            "price_gbp": point.price_gbp,
+                            "shipping_gbp": point.shipping_gbp,
+                            "total_gbp": point.total_gbp,
+                            "sold_date": point.sold_date,
+                            "title": point.title,
+                            "url": point.url,
+                        }
+                        for point in result.comps.sold_points
+                    ]
+                    if comp_rows:
+                        st.dataframe(pd.DataFrame(comp_rows), width="stretch", height=240)
+                    if result.notes:
+                        st.caption("Notes: " + "; ".join(result.notes))
+    elif candidates:
+        st.info("Run analysis to see ranked deals and comps summaries.")
+
+with Tabs[2]:
     targets = _load_targets(DB_PATH)
     evaluations = _load_evaluations(DB_PATH)
     eval_df = pd.DataFrame(evaluations)
@@ -783,7 +1005,7 @@ with Tabs[1]:
             _load_targets.clear()
             st.warning("Target deleted. Refresh to update list.")
 
-with Tabs[2]:
+with Tabs[3]:
     st.subheader("Deals Feed")
     evaluations = _load_evaluations(DB_PATH)
     eval_df = pd.DataFrame(evaluations)
@@ -849,7 +1071,7 @@ with Tabs[2]:
                 else:
                     st.info("No comps stored.")
 
-with Tabs[3]:
+with Tabs[4]:
     st.subheader("Scan Misses")
     scan_listings = st.session_state.get("last_scan_listings", [])
     if scan_listings:
@@ -872,7 +1094,7 @@ with Tabs[3]:
     else:
         st.info("Run a scan to see which listings were evaluated.")
 
-with Tabs[4]:
+with Tabs[5]:
     st.subheader("Settings")
     settings = st.session_state.settings
     alert_settings = st.session_state.alerts
