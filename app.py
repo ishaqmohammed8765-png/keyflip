@@ -52,33 +52,35 @@ LOGGER = get_logger()
 ROOT_DIR = Path(__file__).parent
 DB_PATH = str(ROOT_DIR / "ebayflip.sqlite")
 
+CONDITION_OPTIONS = {
+    "Any": None,
+    "New": "1000",
+    "Open box": "1500",
+    "Used": "3000",
+    "For parts or not working": "7000",
+}
+CONDITION_LABELS = {value: name for name, value in CONDITION_OPTIONS.items() if value}
+
+_SESSION_DEFAULTS: dict[str, object] = {
+    "last_scan": None,
+    "auto_scan": False,
+    "auto_scan_interval": DEFAULT_SCAN_INTERVAL_MIN,
+    "last_scan_listings": list,
+    "last_scan_debug": list,
+    "last_scan_summary": None,
+    "last_scan_error": None,
+    "last_scan_error_at": None,
+    "settings": RunSettings,
+    "alerts": lambda: AlertSettings(discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL")),
+    "deal_candidates": list,
+    "deal_results": list,
+}
+
 st.set_page_config(page_title="eBay Flip Scanner", layout="wide")
 
-if "last_scan" not in st.session_state:
-    st.session_state.last_scan = None
-if "auto_scan" not in st.session_state:
-    st.session_state.auto_scan = False
-if "auto_scan_interval" not in st.session_state:
-    st.session_state.auto_scan_interval = DEFAULT_SCAN_INTERVAL_MIN
-if "last_scan_listings" not in st.session_state:
-    st.session_state.last_scan_listings = []
-if "last_scan_debug" not in st.session_state:
-    st.session_state.last_scan_debug = []
-if "last_scan_summary" not in st.session_state:
-    st.session_state.last_scan_summary = None
-if "last_scan_error" not in st.session_state:
-    st.session_state.last_scan_error = None
-if "last_scan_error_at" not in st.session_state:
-    st.session_state.last_scan_error_at = None
-
-if "settings" not in st.session_state:
-    st.session_state.settings = RunSettings()
-if "alerts" not in st.session_state:
-    st.session_state.alerts = AlertSettings(discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL"))
-if "deal_candidates" not in st.session_state:
-    st.session_state.deal_candidates = []
-if "deal_results" not in st.session_state:
-    st.session_state.deal_results = []
+for key, default in _SESSION_DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = default() if callable(default) else default
 
 
 def _coerce_settings(value: object) -> RunSettings:
@@ -102,14 +104,6 @@ init_db(DB_PATH)
 
 st.title("eBay Flip Scanner")
 st.caption("Scan eBay listings for underpriced flips, estimate resale, and alert on deals.")
-
-CONDITION_OPTIONS = {
-    "Any": None,
-    "New": "1000",
-    "Open box": "1500",
-    "Used": "3000",
-    "For parts or not working": "7000",
-}
 
 
 @st.cache_data(show_spinner=False)
@@ -213,10 +207,7 @@ def _format_category_path(category_id: Optional[str]) -> str:
 def _format_condition(condition_id: Optional[str]) -> str:
     if not condition_id:
         return "-"
-    for label, value in CONDITION_OPTIONS.items():
-        if value == condition_id:
-            return label
-    return condition_id
+    return CONDITION_LABELS.get(condition_id, condition_id)
 
 
 def _format_listing_type(listing_type: Optional[str]) -> str:
@@ -402,8 +393,7 @@ def _maybe_autofill_keywords(prefix: str, name: str, category_id: Optional[str])
 
 def _condition_selectbox(label: str, key: str, selected_condition_id: Optional[str]) -> Optional[str]:
     options = list(CONDITION_OPTIONS.keys())
-    condition_map = {value: name for name, value in CONDITION_OPTIONS.items()}
-    selected_name = condition_map.get(selected_condition_id, "Any")
+    selected_name = CONDITION_LABELS.get(selected_condition_id, "Any")
     selected_index = options.index(selected_name) if selected_name in options else 0
     choice = st.selectbox(label, options, index=selected_index, key=key)
     return CONDITION_OPTIONS.get(choice)
