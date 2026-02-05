@@ -1,6 +1,6 @@
-# eBay Flip Scanner
+# Marketplace Flip Scanner
 
-Streamlit app that scans eBay listings for underpriced items, estimates resale value using sold comps, and alerts you when expected profit meets your thresholds.
+Streamlit app that scans Craigslist listings for underpriced items, estimates resale value using recent comparable prices, and alerts you when expected profit meets your thresholds.
 
 ## Features
 - Define multiple scan targets with filters (price caps, listing type, category, condition).
@@ -19,13 +19,10 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## API credentials (optional)
-The app uses the eBay Finding API when `EBAY_API_ENABLED=1` and `EBAY_APP_ID` are available. Without credentials it falls back to HTML parsing with conservative limits.
+## Marketplace mode
+The app defaults to Craigslist HTML search to reduce anti-bot blocking. eBay API mode remains optional if you explicitly set `marketplace="ebay"` in runtime settings.
 
 ```bash
-export EBAY_API_ENABLED=1
-export EBAY_APP_ID=your_app_id_here
-export EBAY_OAUTH_TOKEN=your_taxonomy_oauth_token
 export DISCORD_WEBHOOK_URL=your_discord_webhook
 ```
 
@@ -38,7 +35,6 @@ export DISCORD_WEBHOOK_URL=your_discord_webhook
 - Requests are rate limited with randomized delays (HTML mode) and exponential backoff on 429/5xx.
 - Total request cap per scan defaults to 40 and is configurable in Settings.
 - Responses are cached in a local SQLite HTTP cache (5 minute TTL) to avoid re-fetching.
-- eBay categories are cached in SQLite after the first successful taxonomy load.
 
 ## Zero-results diagnostics & retries
 - Each target records the request mode, query, filters, status code, and raw vs filtered counts.

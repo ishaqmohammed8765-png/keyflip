@@ -27,7 +27,8 @@ from ebayflip.models import Listing, SoldComp, Target
 
 LOGGER = get_logger()
 
-HTML_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
+EBAY_HTML_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
+CRAIGSLIST_SEARCH_URL_TEMPLATE = "https://{site}.craigslist.org/search/sss"
 DEFAULT_PLAYWRIGHT_BROWSERS_PATH = "/tmp/pw-browsers"
 USER_AGENTS = [
     (
@@ -152,6 +153,7 @@ class EbayClient:
         self.cache = CacheStore(".cache/ebayflip_cache.sqlite", ttl_seconds=300)
         self.session = requests.Session()
         self.api_provider = EbayApiProvider(self)
+        self.search_url = _search_url(self.settings)
         self._apply_session_headers()
 
     def _apply_session_headers(self) -> None:
@@ -159,7 +161,7 @@ class EbayClient:
         self.session.headers.update(_default_headers(user_agent))
 
     def _api_enabled(self) -> bool:
-        return self.api_provider.enabled()
+        return self.settings.marketplace == "ebay" and self.api_provider.enabled()
 
     def _refresh_session(self, reason: str) -> None:
         LOGGER.info("Refreshing HTTP session due to %s", reason)
@@ -359,15 +361,45 @@ class EbayClient:
         page: int = 1,
     ) -> SearchResult:
         limit = self.settings.scan_limit_per_target
-        params = _build_html_params(criteria, page)
+        params = _build_html_params(criteria, page, self.settings)
         response, cached = fetch_html(
             self,
-            HTML_SEARCH_URL,
+            self.search_url,
             params=params,
             delay=True,
             max_attempts=1,
         )
         response_text = response.text
+        if self.settings.marketplace == "craigslist":
+            raw_listings, parse_metrics = parse_html(response_text, target, self)
+            filtered = filter_listings(raw_listings, _criteria_to_target(criteria, target), self.settings)
+            diagnostics.append(
+                self._build_log(
+                    mode="html",
+                    criteria=criteria,
+                    page=page,
+                    limit=limit,
+                    status=response.status_code,
+                    raw_count=len(raw_listings),
+                    filtered_count=len(filtered.listings),
+                    request_url=response.url,
+                    item_count=parse_metrics.get("card_count", 0),
+                    parsed_count=len(raw_listings),
+                    response_length=len(response_text),
+                )
+            )
+            return SearchResult(
+                listings=filtered.listings[:limit],
+                retry_report=[],
+                diagnostics=diagnostics,
+                rejection_counts=filtered.rejection_counts,
+                raw_count=len(raw_listings),
+                filtered_count=len(filtered.listings),
+                last_request_url=response.url,
+                status="ok",
+                blocked=None,
+            )
+
         debug_path = _save_debug_html(response_text, prefix="ebay_search")
         failure_mode = _detect_failure_mode(response_text)
         response_length = len(response_text)
@@ -636,7 +668,9 @@ class EbayClient:
             "LH_Complete": "1",
             "_sop": "13",
         }
-        response, _ = self._request(HTML_SEARCH_URL, params=params, delay=True)
+        if self.settings.marketplace == "craigslist":
+            return self._search_sold_craigslist(comp_query)
+        response, _ = self._request(self.search_url, params=params, delay=True)
         soup = BeautifulSoup(response.text, "lxml")
         comps: list[SoldComp] = []
         for item in soup.select("li.s-item")[: self.settings.comps_limit]:
@@ -661,6 +695,24 @@ class EbayClient:
             )
         if not comps:
             comps = _parse_json_ld_comps(soup, self)
+        return comps
+
+    def _search_sold_craigslist(self, comp_query: str) -> list[SoldComp]:
+        params = {"query": comp_query, "sort": "date"}
+        response, _ = self._request(self.search_url, params=params, delay=True)
+        soup = BeautifulSoup(response.text, "lxml")
+        comps: list[SoldComp] = []
+        for card in soup.select("li.cl-static-search-result")[: self.settings.comps_limit]:
+            title_el = card.select_one("div.title") or card.select_one("a")
+            price_el = card.select_one("div.price") or card.select_one("span.price")
+            link_el = card.select_one("a")
+            if not title_el or not price_el:
+                continue
+            price_value, currency = _parse_price(price_el.get_text(strip=True))
+            if not self._currency_allowed(currency):
+                continue
+            price_gbp, _ = self._normalize_currency(price_value, 0.0, currency)
+            comps.append(SoldComp(price_gbp=price_gbp, title=title_el.get_text(strip=True), url=link_el.get("href") if link_el else None))
         return comps
 
     def _currency_allowed(self, currency: str) -> bool:
@@ -763,6 +815,13 @@ class EbayClient:
         return log
 
 
+def _search_url(settings: RunSettings) -> str:
+    if settings.marketplace == "craigslist":
+        site = settings.craigslist_site.strip().lower() or "london"
+        return CRAIGSLIST_SEARCH_URL_TEMPLATE.format(site=site)
+    return EBAY_HTML_SEARCH_URL
+
+
 def build_url(
     query: str,
     *,
@@ -785,7 +844,7 @@ def build_url(
             params["LH_Auction"] = "1"
         else:
             params["LH_BIN"] = "1"
-    return f"{HTML_SEARCH_URL}?{urlencode(params)}"
+    return f"{_search_url(RunSettings())}?{urlencode(params)}"
 
 
 def normalize_price(text: str) -> tuple[float, str]:
@@ -831,8 +890,8 @@ def fetch_ebay_search(
         listing_type="any",
     )
     target = Target(id=0, name=query, query=query, category_id=category, condition=condition)
-    params = _build_html_params(criteria, page)
-    response, _ = fetch_html(client, HTML_SEARCH_URL, params=params, delay=True, max_attempts=1)
+    params = _build_html_params(criteria, page, self.settings)
+    response, _ = fetch_html(client, client.search_url, params=params, delay=True, max_attempts=1)
     html = response.text
     failure_mode = _detect_failure_mode(html)
     listings, metrics = parse_html(html, target, client)
@@ -896,6 +955,8 @@ def parse_html(
     client: EbayClient,
 ) -> tuple[list[Listing], dict[str, int]]:
     soup = BeautifulSoup(html, "lxml")
+    if client.settings.marketplace == "craigslist":
+        return _parse_craigslist_listings(soup, target, client)
     return _parse_html_listings(soup, target, client)
 
 
@@ -903,7 +964,18 @@ def _get_text(el: Optional[Any]) -> Optional[str]:
     return el.get_text(strip=True) if el else None
 
 
-def _build_html_params(criteria: SearchCriteria, page: int) -> dict[str, Any]:
+def _build_html_params(criteria: SearchCriteria, page: int, settings: Optional[RunSettings] = None) -> dict[str, Any]:
+    settings = settings or RunSettings()
+    if settings.marketplace == "craigslist":
+        params = {"query": criteria.query, "sort": "date", "s": max(page - 1, 0) * 120}
+        if criteria.max_buy_gbp is not None:
+            params["max_price"] = int(criteria.max_buy_gbp)
+        if criteria.listing_type == "owner":
+            params["purveyor"] = "owner"
+        elif criteria.listing_type == "dealer":
+            params["purveyor"] = "dealer"
+        return params
+
     params = {
         "_nkw": criteria.query,
         "_sop": "10",
@@ -946,7 +1018,7 @@ def _default_headers(user_agent: str) -> dict[str, str]:
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "none",
         "Sec-Fetch-User": "?1",
-        "Referer": "https://www.ebay.co.uk/",
+        "Referer": "https://www.craigslist.org/",
     }
 
 
@@ -1498,6 +1570,55 @@ def _get_image_url(item: Any) -> Optional[str]:
     if not image_el:
         return None
     return image_el.get("src") or image_el.get("data-src")
+
+
+def _parse_craigslist_listings(
+    soup: BeautifulSoup, target: Target, client: EbayClient
+) -> tuple[list[Listing], dict[str, int]]:
+    cards = soup.select("li.cl-static-search-result")
+    metrics = {"card_count": len(cards), "title_count": 0, "link_count": 0, "price_count": 0}
+    listings: list[Listing] = []
+    seen_ids: set[str] = set()
+    for idx, card in enumerate(cards):
+        title_el = card.select_one("div.title") or card.select_one("a")
+        link_el = card.select_one("a")
+        price_el = card.select_one("div.price") or card.select_one("span.price")
+        location_el = card.select_one("div.location") or card.select_one("span.meta")
+        if title_el:
+            metrics["title_count"] += 1
+        if link_el and link_el.get("href"):
+            metrics["link_count"] += 1
+        if price_el:
+            metrics["price_count"] += 1
+        if not title_el or not price_el:
+            continue
+        listing_id = card.get("data-pid") or _extract_item_id(link_el.get("href") if link_el else "") or f"cl-{idx}"
+        if listing_id in seen_ids:
+            continue
+        seen_ids.add(listing_id)
+        price_value, currency = _parse_price(price_el.get_text(strip=True))
+        if not client._currency_allowed(currency):
+            continue
+        price_gbp, shipping_gbp = client._normalize_currency(price_value, 0.0, currency)
+        listings.append(
+            Listing(
+                ebay_item_id=str(listing_id),
+                target_id=target.id or 0,
+                title=title_el.get_text(strip=True),
+                url=link_el.get("href") if link_el else "",
+                price_gbp=price_gbp,
+                shipping_gbp=shipping_gbp,
+                total_buy_gbp=price_gbp + shipping_gbp,
+                condition=None,
+                seller_feedback_pct=None,
+                seller_feedback_score=None,
+                listing_type="fixed",
+                location=_get_text(location_el),
+                image_url=_get_image_url(card),
+                raw_json={"source": "craigslist_html"},
+            )
+        )
+    return listings, metrics
 
 
 def _parse_html_listings(
