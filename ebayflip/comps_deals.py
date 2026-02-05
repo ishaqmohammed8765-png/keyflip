@@ -23,6 +23,11 @@ JUNK_PHRASES = (
     "for parts",
 )
 
+_NON_WORD_RE = re.compile(r"[^\w\s]")
+_MULTISPACE_RE = re.compile(r"\s+")
+_STORAGE_RE = re.compile(r"\b(\d{2,4})\s?gb\b")
+_UNLOCKED_MARKERS = ("unlocked", "sim free", "simfree")
+
 OUTLIER_PHRASES = (
     "case",
     "cover",
@@ -101,18 +106,17 @@ def build_candidate_item(
 
 def normalize_title(title: str) -> tuple[str, dict, str]:
     text = title.lower().replace("/", " ")
-    text = re.sub(r"[^\w\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = _NON_WORD_RE.sub(" ", text)
+    text = _MULTISPACE_RE.sub(" ", text).strip()
     for phrase in JUNK_PHRASES:
         text = re.sub(rf"\b{re.escape(phrase)}\b", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = _MULTISPACE_RE.sub(" ", text).strip()
     attributes: dict[str, object] = {}
-    storage_match = re.search(r"\b(\d{2,4})\s?gb\b", text)
+    storage_match = _STORAGE_RE.search(text)
     if storage_match:
         attributes["storage_gb"] = int(storage_match.group(1))
-    unlocked = False
-    if "unlocked" in text or "sim free" in text or "simfree" in text:
-        unlocked = True
+    unlocked = any(marker in text for marker in _UNLOCKED_MARKERS)
+    if unlocked:
         attributes["unlocked"] = True
     tokens = text.split()
     if storage_match:
