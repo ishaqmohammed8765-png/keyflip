@@ -31,11 +31,14 @@ from ebayflip.config import (
 )
 from ebayflip.db import (
     add_target,
+    delete_strategy_profile,
     delete_target,
     init_db,
     list_comps_by_listing,
     list_evaluations_with_listings,
+    list_strategy_profiles,
     list_targets,
+    save_strategy_profile,
 )
 from ebayflip.ebay_client import EbayClient
 from ebayflip.ebay_comps_api import EbayApiConfig, EbayCompsApiClient
@@ -100,6 +103,25 @@ def _coerce_settings(value: object) -> RunSettings:
 
 
 st.session_state.settings = _coerce_settings(st.session_state.settings)
+
+
+def _settings_to_json(settings: RunSettings) -> str:
+    payload = dataclasses.asdict(settings)
+    return json.dumps(payload, sort_keys=True)
+
+
+def _settings_from_json(raw: str) -> RunSettings:
+    data = json.loads(raw)
+    return _coerce_settings(data)
+
+
+def _env_diagnostics() -> list[tuple[str, str, str]]:
+    checks: list[tuple[str, str, str]] = []
+    checks.append(("EBAY_APP_ID", "present" if os.getenv("EBAY_APP_ID") else "missing", "Needed for Finding API mode."))
+    checks.append(("EBAY_API_ENABLED", os.getenv("EBAY_API_ENABLED", "0"), "Set to 1 to enable API mode."))
+    checks.append(("EBAY_OAUTH_TOKEN", "present" if os.getenv("EBAY_OAUTH_TOKEN") else "missing", "Needed for taxonomy/category API loading."))
+    checks.append(("DISCORD_WEBHOOK_URL", "present" if os.getenv("DISCORD_WEBHOOK_URL") else "missing", "Needed for Discord deal alerts."))
+    return checks
 
 init_db(DB_PATH)
 
@@ -1092,6 +1114,28 @@ with Tabs[3]:
         eval_df["roi"] = pd.to_numeric(eval_df["roi"], errors="coerce")
         eval_df["confidence"] = pd.to_numeric(eval_df["confidence"], errors="coerce")
 
+        st.markdown("**Per-target KPIs**")
+        kpi_df = (
+            eval_df.groupby("target_name", dropna=False)
+            .agg(
+                scan_count=("listing_id", "count"),
+                deal_count=("decision", lambda s: int((s == "deal").sum())),
+                avg_profit_gbp=("expected_profit_gbp", "mean"),
+                avg_roi=("roi", "mean"),
+                avg_confidence=("confidence", "mean"),
+            )
+            .reset_index()
+        )
+        kpi_df["hit_rate"] = kpi_df.apply(
+            lambda row: (row["deal_count"] / row["scan_count"]) if row["scan_count"] else 0.0,
+            axis=1,
+        )
+        st.dataframe(
+            kpi_df.sort_values(by=["avg_profit_gbp"], ascending=False),
+            width="stretch",
+            height=220,
+        )
+
         filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
         with filter_col1:
             decision_filter = st.selectbox("Decision", ["deal", "maybe", "ignore"], index=0)
@@ -1219,3 +1263,45 @@ with Tabs[5]:
 
     st.markdown("### API Keys")
     st.code("EBAY_APP_ID=...\nDISCORD_WEBHOOK_URL=...")
+
+    st.markdown("### Strategy profiles")
+    profiles = list_strategy_profiles(DB_PATH)
+    profile_name = st.text_input("Profile name", placeholder="e.g., Conservative UK flips")
+    save_profile = st.button("Save current settings as profile")
+    if save_profile:
+        normalized_name = (profile_name or "").strip()
+        if not normalized_name:
+            st.warning("Enter a profile name before saving.")
+        else:
+            save_strategy_profile(DB_PATH, normalized_name, _settings_to_json(settings))
+            st.success(f"Saved profile: {normalized_name}")
+
+    if profiles:
+        selected_profile = st.selectbox(
+            "Load profile",
+            profiles,
+            format_func=lambda p: f"{p.name} ({p.created_at})",
+        )
+        col_load, col_delete = st.columns(2)
+        with col_load:
+            if st.button("Load selected profile", width="stretch"):
+                try:
+                    st.session_state.settings = _settings_from_json(selected_profile.settings_json)
+                    st.success(f"Loaded profile: {selected_profile.name}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Failed to load profile: {exc}")
+        with col_delete:
+            if st.button("Delete selected profile", width="stretch"):
+                delete_strategy_profile(DB_PATH, int(selected_profile.id))
+                st.warning(f"Deleted profile: {selected_profile.name}")
+                st.rerun()
+
+    st.markdown("### Startup diagnostics")
+    diag_df = pd.DataFrame(
+        [
+            {"setting": name, "status": status, "detail": detail}
+            for name, status, detail in _env_diagnostics()
+        ]
+    )
+    st.dataframe(diag_df, width="stretch", height=180)

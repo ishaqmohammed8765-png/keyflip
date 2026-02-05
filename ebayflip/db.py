@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Iterable, Optional
 
 from ebayflip import get_logger
-from ebayflip.models import CompStats, Evaluation, Listing, Target
+from ebayflip.models import CompStats, Evaluation, Listing, StrategyProfile, Target
 
 LOGGER = get_logger()
 
@@ -132,6 +132,16 @@ def init_db(db_path: str) -> None:
                 channel TEXT,
                 sent_at TEXT,
                 FOREIGN KEY (listing_id) REFERENCES listings(id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                settings_json TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -433,3 +443,28 @@ def was_alert_sent(db_path: str, listing_id: int, channel: str) -> bool:
             (listing_id, channel),
         ).fetchone()
     return row is not None
+
+
+def save_strategy_profile(db_path: str, name: str, settings_json: str) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO strategy_profiles (name, settings_json, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET settings_json = excluded.settings_json
+            """,
+            (name, settings_json, datetime.utcnow().isoformat()),
+        )
+
+
+def list_strategy_profiles(db_path: str) -> list[StrategyProfile]:
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM strategy_profiles ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+    return [StrategyProfile.from_row(row) for row in rows]
+
+
+def delete_strategy_profile(db_path: str, profile_id: int) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute("DELETE FROM strategy_profiles WHERE id = ?", (profile_id,))
