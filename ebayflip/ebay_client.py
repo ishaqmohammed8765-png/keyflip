@@ -280,7 +280,7 @@ class EbayClient:
         last_filtered_count = 0
         last_request_url: Optional[str] = None
 
-        max_attempts = 1
+        max_attempts = len(steps)
         for idx, (label, criteria) in enumerate(steps[:max_attempts]):
             if idx > 0:
                 retry_report.append(label)

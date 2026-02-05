@@ -161,3 +161,20 @@ class SoldComp:
     price_gbp: float
     title: str
     url: Optional[str] = None
+
+
+@dataclass(slots=True)
+class StrategyProfile:
+    id: Optional[int]
+    name: str
+    settings_json: str
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: Any) -> "StrategyProfile":
+        return cls(
+            id=row["id"],
+            name=row["name"],
+            settings_json=row["settings_json"],
+            created_at=row["created_at"],
+        )
