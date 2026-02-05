@@ -77,7 +77,7 @@ _SESSION_DEFAULTS: dict[str, object] = {
     "deal_results": list,
 }
 
-st.set_page_config(page_title="eBay Flip Scanner", layout="wide")
+st.set_page_config(page_title="Marketplace Flip Scanner", layout="wide")
 
 for key, default in _SESSION_DEFAULTS.items():
     if key not in st.session_state:
@@ -103,8 +103,8 @@ st.session_state.settings = _coerce_settings(st.session_state.settings)
 
 init_db(DB_PATH)
 
-st.title("eBay Flip Scanner")
-st.caption("Scan eBay listings for underpriced flips, estimate resale, and alert on deals.")
+st.title("Marketplace Flip Scanner")
+st.caption("Scan Craigslist listings for underpriced flips, estimate resale, and alert on deals.")
 
 with st.expander("Getting started (3 quick steps)", expanded=True):
     step_col1, step_col2, step_col3 = st.columns(3)

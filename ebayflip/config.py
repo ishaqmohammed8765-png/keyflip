@@ -23,6 +23,8 @@ DEFAULT_GBP_EXCHANGE_RATE = 0.78
 
 @dataclass(slots=True)
 class RunSettings:
+    marketplace: str = "craigslist"
+    craigslist_site: str = "london"
     min_profit_gbp: float = MIN_PROFIT_GBP
     min_roi: float = MIN_ROI
     min_confidence: float = MIN_CONFIDENCE
