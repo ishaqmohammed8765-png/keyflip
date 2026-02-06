@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-02-06T16:03:48.933297+00:00",
+  "generated_at": "2026-02-06T17:08:39.056654+00:00",
   "count": 1,
   "scan_summary": {
     "scanned_targets": 3,
@@ -7,7 +7,7 @@
     "evaluated": 1,
     "deals": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-02-06T16:03:48.932960"
+    "last_scan": "2026-02-06T17:08:39.056246"
   },
   "items": [
     {
@@ -26,7 +26,7 @@
         "Comp prices are tightly clustered.",
         "Confidence score 0.65."
       ],
-      "evaluated_at": "2026-02-06T16:03:40.888667",
+      "evaluated_at": "2026-02-06T17:08:29.832193",
       "image_url": null,
       "location": "Angel, London",
       "listing_type": "fixed"
