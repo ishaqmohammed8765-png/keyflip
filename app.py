@@ -14,6 +14,43 @@ st.set_page_config(page_title="Marketplace Flip Dashboard", layout="wide")
 st.title("Marketplace Flip Dashboard")
 st.caption("Read-only view of the latest scheduled scan run from GitHub Actions.")
 
+st.markdown(
+    """
+    <style>
+        .summary-card {
+            background: linear-gradient(135deg, #0f172a, #1e293b);
+            border: 1px solid #334155;
+            border-radius: 14px;
+            padding: 0.9rem 1rem;
+            color: #e2e8f0;
+            margin-bottom: 0.8rem;
+        }
+        .summary-card h4 {
+            margin: 0;
+            font-size: 0.85rem;
+            color: #94a3b8;
+            letter-spacing: 0.02em;
+        }
+        .summary-card p {
+            margin: 0.2rem 0 0;
+            font-size: 1.25rem;
+            font-weight: 700;
+        }
+        .listing-chip {
+            display: inline-block;
+            margin: 0.2rem 0.25rem 0.2rem 0;
+            padding: 0.25rem 0.6rem;
+            border-radius: 999px;
+            background: #e2e8f0;
+            color: #0f172a;
+            font-size: 0.8rem;
+            border: 1px solid #cbd5e1;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 def _load_latest_scan(path: Path) -> dict[str, Any] | None:
     if not path.exists():
@@ -54,12 +91,54 @@ if payload is None:
 
 items = payload.get("items") or []
 scan_summary = payload.get("scan_summary") or {}
+scanned_titles = [str(item.get("title") or "Untitled") for item in items]
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Generated At", str(payload.get("generated_at", "-")))
-col2.metric("Items", str(payload.get("count", len(items))))
-col3.metric("Evaluated", str(scan_summary.get("evaluated", "-")))
-col4.metric("Deals", str(scan_summary.get("deals", "-")))
+col1.markdown(
+    f"""
+    <div class="summary-card">
+        <h4>Generated At</h4>
+        <p>{payload.get("generated_at", "-")}</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+col2.markdown(
+    f"""
+    <div class="summary-card">
+        <h4>Items Stored</h4>
+        <p>{payload.get("count", len(items))}</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+col3.markdown(
+    f"""
+    <div class="summary-card">
+        <h4>Scanned Targets</h4>
+        <p>{scan_summary.get("scanned_targets", "-")}</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+col4.markdown(
+    f"""
+    <div class="summary-card">
+        <h4>Deals Found</h4>
+        <p>{scan_summary.get("deals", "-")}</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.subheader("Scanned item overview")
+if scanned_titles:
+    st.write(f"**{len(scanned_titles)} item(s)** are included in this latest snapshot.")
+    st.markdown("".join(f'<span class="listing-chip">{title}</span>' for title in scanned_titles), unsafe_allow_html=True)
+else:
+    st.write(
+        "No item titles are available in this snapshot yet. Once listings are evaluated, their names will appear here."
+    )
 
 if not items:
     st.warning("Latest scan completed but returned no evaluated items.")
