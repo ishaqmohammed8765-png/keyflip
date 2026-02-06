@@ -282,8 +282,7 @@ class EbayClient:
         last_filtered_count = 0
         last_request_url: Optional[str] = None
 
-        max_attempts = 1
-        for idx, (label, criteria) in enumerate(steps[:max_attempts]):
+        for idx, (label, criteria) in enumerate(steps):
             if idx > 0:
                 retry_report.append(label)
             if mode == "api":
@@ -890,7 +889,7 @@ def fetch_ebay_search(
         listing_type="any",
     )
     target = Target(id=0, name=query, query=query, category_id=category, condition=condition)
-    params = _build_html_params(criteria, page, self.settings)
+    params = _build_html_params(criteria, page, client.settings)
     response, _ = fetch_html(client, client.search_url, params=params, delay=True, max_attempts=1)
     html = response.text
     failure_mode = _detect_failure_mode(html)
