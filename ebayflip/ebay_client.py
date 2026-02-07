@@ -34,22 +34,30 @@ USER_AGENTS = [
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
+        "Chrome/131.0.0.0 Safari/537.36"
     ),
     (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
+        "Chrome/130.0.0.0 Safari/537.36"
     ),
     (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
+        "Chrome/131.0.0.0 Safari/537.36"
     ),
     (
         "Mozilla/5.0 (X11; Linux x86_64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) "
+        "Gecko/20100101 Firefox/133.0"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:133.0) "
+        "Gecko/20100101 Firefox/133.0"
     ),
 ]
 BOT_FAILURE_MODES = {"captcha", "bot protection"}
@@ -661,15 +669,14 @@ class EbayClient:
         )
 
     def _search_sold_html(self, comp_query: str) -> list[SoldComp]:
+        # Always use eBay sold listings for comps - Craigslist has no sold data
         params = {
             "_nkw": comp_query,
             "LH_Sold": "1",
             "LH_Complete": "1",
             "_sop": "13",
         }
-        if self.settings.marketplace == "craigslist":
-            return self._search_sold_craigslist(comp_query)
-        response, _ = self._request(self.search_url, params=params, delay=True)
+        response, _ = self._request(EBAY_HTML_SEARCH_URL, params=params, delay=True)
         soup = BeautifulSoup(response.text, "lxml")
         comps: list[SoldComp] = []
         for item in soup.select("li.s-item")[: self.settings.comps_limit]:
@@ -1226,8 +1233,6 @@ def _detect_failure_mode(text: str) -> Optional[str]:
             "akamai",
             "perimeterx",
             "incapsula",
-            "blocked",
-            "forbidden",
             "request blocked",
             "temporarily unavailable",
             "automated queries",
@@ -1574,37 +1579,92 @@ def _get_image_url(item: Any) -> Optional[str]:
 def _parse_craigslist_listings(
     soup: BeautifulSoup, target: Target, client: EbayClient
 ) -> tuple[list[Listing], dict[str, int]]:
+    # Try multiple Craigslist selectors - layout changes over time
     cards = soup.select("li.cl-static-search-result")
+    if not cards:
+        cards = soup.select("li.cl-search-result")
+    if not cards:
+        cards = soup.select("div.result-row")
+    if not cards:
+        # Fallback: grab any list items inside results container
+        results_container = soup.select_one("#search-results-page-1, #search-results, .cl-results-page")
+        if results_container:
+            cards = results_container.select("li")
     metrics = {"card_count": len(cards), "title_count": 0, "link_count": 0, "price_count": 0}
     listings: list[Listing] = []
     seen_ids: set[str] = set()
     for idx, card in enumerate(cards):
-        title_el = card.select_one("div.title") or card.select_one("a")
-        link_el = card.select_one("a")
-        price_el = card.select_one("div.price") or card.select_one("span.price")
-        location_el = card.select_one("div.location") or card.select_one("span.meta")
+        # Title: try multiple selectors for different CL layouts
+        title_el = (
+            card.select_one("div.title")
+            or card.select_one("a.titlestring")
+            or card.select_one("a.posting-title span.label")
+            or card.select_one("a.result-title")
+            or card.select_one("p > a")
+            or card.select_one("a")
+        )
+        link_el = (
+            card.select_one("a.titlestring")
+            or card.select_one("a.posting-title")
+            or card.select_one("a.result-title")
+            or card.select_one("a[href*='/post/']")
+            or card.select_one("a[href]")
+        )
+        price_el = (
+            card.select_one("div.price")
+            or card.select_one("span.priceinfo")
+            or card.select_one("span.result-price")
+            or card.select_one("span.price")
+        )
+        location_el = (
+            card.select_one("div.location")
+            or card.select_one("div.supertitle")
+            or card.select_one("span.result-hood")
+            or card.select_one("span.meta")
+        )
+        image_el = card.select_one("img")
+
         if title_el:
             metrics["title_count"] += 1
         if link_el and link_el.get("href"):
             metrics["link_count"] += 1
         if price_el:
             metrics["price_count"] += 1
-        if not title_el or not price_el:
+        if not title_el:
             continue
-        listing_id = card.get("data-pid") or _extract_item_id(link_el.get("href") if link_el else "") or f"cl-{idx}"
+        # Allow listings without a price - treat as £0 so they still appear
+        price_text = price_el.get_text(strip=True) if price_el else "0"
+        listing_id = card.get("data-pid") or card.get("data-repost-of") or ""
+        if not listing_id and link_el:
+            href = link_el.get("href", "")
+            # Extract numeric ID from CL URLs like /region/cat/d/title/1234567890.html
+            id_match = re.search(r"/(\d{8,})\.html", href)
+            if id_match:
+                listing_id = id_match.group(1)
+        if not listing_id:
+            listing_id = f"cl-{idx}"
         if listing_id in seen_ids:
             continue
         seen_ids.add(listing_id)
-        price_value, currency = _parse_price(price_el.get_text(strip=True))
+        price_value, currency = _parse_price(price_text)
         if not client._currency_allowed(currency):
             continue
         price_gbp, shipping_gbp = client._normalize_currency(price_value, 0.0, currency)
+        href = ""
+        if link_el and link_el.get("href"):
+            href = link_el.get("href")
+            # Make relative URLs absolute
+            if href.startswith("/"):
+                href = f"https://{client.settings.craigslist_site}.craigslist.org{href}"
+        image_url = None
+        if image_el:
+            image_url = image_el.get("src") or image_el.get("data-src")
         listings.append(
             Listing(
                 ebay_item_id=str(listing_id),
                 target_id=target.id or 0,
                 title=title_el.get_text(strip=True),
-                url=link_el.get("href") if link_el else "",
+                url=href,
                 price_gbp=price_gbp,
                 shipping_gbp=shipping_gbp,
                 total_buy_gbp=price_gbp + shipping_gbp,
@@ -1613,7 +1673,7 @@ def _parse_craigslist_listings(
                 seller_feedback_score=None,
                 listing_type="fixed",
                 location=_get_text(location_el),
-                image_url=_get_image_url(card),
+                image_url=image_url,
                 raw_json={"source": "craigslist_html"},
             )
         )
@@ -2270,15 +2330,7 @@ def _broaden_query(query: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if not cleaned:
         return cleaned
-    words = cleaned.split()
-    if len(words) < 5:
-        filler = ["for", "sale", "used", "listing", "deal"]
-        for token in filler:
-            if len(words) >= 5:
-                break
-            if token not in words:
-                words.append(token)
-    return " ".join(words)
+    return cleaned
 
 
 def _build_retry_steps(base: SearchCriteria) -> list[tuple[str, SearchCriteria]]:
