@@ -22,8 +22,10 @@ def compute_comp_stats(comp_query: str, comps: Iterable[SoldComp]) -> CompStats:
             computed_at=datetime.utcnow().isoformat(),
         )
     median_val = float(median(prices))
-    p25 = prices[int(0.25 * (sold_count - 1))]
-    p75 = prices[int(0.75 * (sold_count - 1))]
+    p25_idx = max(0, min(int(0.25 * (sold_count - 1)), sold_count - 1))
+    p75_idx = max(0, min(int(0.75 * (sold_count - 1)), sold_count - 1))
+    p25 = prices[p25_idx]
+    p75 = prices[p75_idx]
     spread = p75 - p25
     return CompStats(
         comp_query=comp_query,

@@ -3,20 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-MIN_PROFIT_GBP = 10.0
-MIN_ROI = 0.25
-MIN_CONFIDENCE = 0.55
+MIN_PROFIT_GBP = 5.0
+MIN_ROI = 0.15
+MIN_CONFIDENCE = 0.40
 
 EBAY_FEE_PCT_DEFAULT = 0.128
 SHIPPING_OUT_GBP_DEFAULT = 4.0
 BUFFER_FIXED_GBP = 2.0
 BUFFER_PCT_OF_BUY = 0.05
 
-DEFAULT_REQUEST_CAP = 40
-DEFAULT_COMPS_LIMIT = 25
-DEFAULT_SCAN_LIMIT_PER_TARGET = 20
+DEFAULT_REQUEST_CAP = 60
+DEFAULT_COMPS_LIMIT = 30
+DEFAULT_SCAN_LIMIT_PER_TARGET = 25
 DEFAULT_SCAN_INTERVAL_MIN = 15
-DEFAULT_COMPS_TTL_HOURS = 24
+DEFAULT_COMPS_TTL_HOURS = 12
 
 DEFAULT_GBP_EXCHANGE_RATE = 0.78
 
@@ -36,9 +36,9 @@ class RunSettings:
     comps_limit: int = DEFAULT_COMPS_LIMIT
     scan_limit_per_target: int = DEFAULT_SCAN_LIMIT_PER_TARGET
     comps_ttl_hours: int = DEFAULT_COMPS_TTL_HOURS
-    allow_non_gbp: bool = False
+    allow_non_gbp: bool = True
     gbp_exchange_rate: float = DEFAULT_GBP_EXCHANGE_RATE
-    currency_whitelist: tuple[str, ...] = ("GBP",)
+    currency_whitelist: tuple[str, ...] = ("GBP", "USD")
     blocked_keywords: tuple[str, ...] = ()
     min_seller_feedback_pct: Optional[float] = None
     min_seller_feedback_score: Optional[int] = None

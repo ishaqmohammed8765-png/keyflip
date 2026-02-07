@@ -159,7 +159,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
                     condition=listing.condition,
                 )
             )
-            if evaluation.decision == "deal":
+            if evaluation.decision in ("deal", "maybe"):
                 deals += 1
                 _send_alert_if_needed(config, listing_id, listing, evaluation)
             if client.request_cap_reached:

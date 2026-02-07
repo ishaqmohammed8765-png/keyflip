@@ -162,8 +162,10 @@ def compute_comp_summary(
             query_used=comp_query,
         )
     median_val = float(median(totals))
-    p25 = totals[int(0.25 * (sample_size - 1))]
-    p75 = totals[int(0.75 * (sample_size - 1))]
+    p25_idx = max(0, min(int(0.25 * (sample_size - 1)), sample_size - 1))
+    p75_idx = max(0, min(int(0.75 * (sample_size - 1)), sample_size - 1))
+    p25 = totals[p25_idx]
+    p75 = totals[p75_idx]
     return CompSummary(
         sold_points=comp_list,
         sold_median_gbp=median_val,

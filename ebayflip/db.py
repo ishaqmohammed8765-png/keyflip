@@ -249,15 +249,16 @@ def upsert_listing(db_path: str, listing: Listing) -> tuple[int, bool]:
                 now_iso,
             ),
         )
-        if cursor.lastrowid:
-            listing_id = int(cursor.lastrowid)
-            return listing_id, True
+        # Check if this was an insert or update by looking up the row
         row = conn.execute(
             "SELECT id FROM listings WHERE ebay_item_id = ?",
             (listing.ebay_item_id,),
         ).fetchone()
         listing_id = int(row["id"])
-        return listing_id, False
+        # rowcount == 1 for insert, but ON CONFLICT UPDATE also reports 1
+        # Use lastrowid: non-zero only on actual INSERT
+        is_new = cursor.lastrowid is not None and cursor.lastrowid > 0 and cursor.lastrowid == listing_id
+        return listing_id, is_new
 
 
 def get_listing(db_path: str, listing_id: int) -> Optional[Listing]:

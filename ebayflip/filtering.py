@@ -18,6 +18,7 @@ CONDITION_CODE_MAP = {
 
 REJECTION_REASONS = (
     "over max_buy",
+    "over shipping_max",
     "missing/invalid price",
     "wrong condition",
     "blocked keywords",
@@ -47,8 +48,8 @@ def filter_listings(
             reasons.append("missing/invalid price")
         if target.max_buy_gbp is not None and listing.total_buy_gbp > target.max_buy_gbp:
             reasons.append("over max_buy")
-        if target.shipping_max_gbp is not None and listing.shipping_gbp > target.shipping_max_gbp:
-            reasons.append("over max_buy")
+        if target.shipping_max_gbp is not None and listing.shipping_gbp is not None and listing.shipping_gbp > target.shipping_max_gbp:
+            reasons.append("over shipping_max")
         if target.condition:
             if listing.condition:
                 if not _condition_matches(listing.condition, target.condition):

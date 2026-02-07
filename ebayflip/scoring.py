@@ -10,12 +10,28 @@ from ebayflip.models import CompStats, Evaluation, Listing
 def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) -> Evaluation:
     reasons: list[str] = []
     resale_est = comps.median_sold_gbp or 0.0
+
     if comps.sold_count == 0:
-        reasons.append("No sold comps found.")
-    else:
-        reasons.append(
-            f"Median sold £{resale_est:.2f} from {comps.sold_count} comps (p25 £{_fmt(comps.p25_sold_gbp)}, p75 £{_fmt(comps.p75_sold_gbp)})."
+        reasons.append("No sold comps found - cannot estimate profit.")
+        buffer_gbp = settings.buffer_fixed_gbp + (settings.buffer_pct_of_buy * listing.total_buy_gbp)
+        return Evaluation(
+            resale_est_gbp=0.0,
+            ebay_fee_pct=settings.ebay_fee_pct,
+            other_fees_gbp=0.0,
+            shipping_out_gbp=settings.shipping_out_gbp,
+            buffer_gbp=buffer_gbp,
+            expected_profit_gbp=0.0,
+            roi=0.0,
+            confidence=0.0,
+            deal_score=0.0,
+            decision="ignore",
+            reasons=reasons,
+            evaluated_at=_now_iso(),
         )
+
+    reasons.append(
+        f"Median sold £{resale_est:.2f} from {comps.sold_count} comps (p25 £{_fmt(comps.p25_sold_gbp)}, p75 £{_fmt(comps.p75_sold_gbp)})."
+    )
 
     buffer_gbp = settings.buffer_fixed_gbp + (settings.buffer_pct_of_buy * listing.total_buy_gbp)
     expected_profit = (

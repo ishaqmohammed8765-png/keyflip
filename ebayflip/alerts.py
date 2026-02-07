@@ -23,8 +23,10 @@ def send_discord_alert(
 ) -> bool:
     if not webhook_url:
         return False
+    # Truncate long titles to keep Discord message clean
+    display_title = title[:120] + "..." if title and len(title) > 120 else (title or "Untitled")
     content = (
-        f"**{title}**\n"
+        f"**{display_title}**\n"
         f"Buy total: £{buy_total:.2f} | Resale est: £{resale_est:.2f}\n"
         f"Profit: £{expected_profit:.2f} | ROI: {roi:.2%} | Confidence: {confidence:.2f}\n"
         f"{listing_url}\n"
