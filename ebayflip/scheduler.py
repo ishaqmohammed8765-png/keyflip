@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from ebayflip import get_logger
@@ -172,7 +172,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
         new_listings=new_listings,
         evaluated=evaluated,
         deals=deals,
-        last_scan=datetime.utcnow().isoformat(),
+        last_scan=datetime.now(timezone.utc).isoformat(),
         scanned_listings=scanned_listings,
         request_cap_reached=request_cap_reached,
         zero_result_debug=zero_result_debug,
@@ -221,5 +221,5 @@ def _comps_stale(computed_at: Optional[str], ttl_hours: int) -> bool:
         computed_time = datetime.fromisoformat(computed_at)
     except ValueError:
         return True
-    age = datetime.utcnow() - computed_time
+    age = datetime.now(timezone.utc) - computed_time
     return age.total_seconds() >= ttl_hours * 3600

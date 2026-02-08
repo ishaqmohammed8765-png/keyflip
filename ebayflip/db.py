@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from ebayflip import get_logger
@@ -14,8 +14,10 @@ LOGGER = get_logger()
 
 @contextmanager
 def get_connection(db_path: str) -> Iterable[sqlite3.Connection]:
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=15)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     try:
         yield conn
         conn.commit()
@@ -135,6 +137,18 @@ def init_db(db_path: str) -> None:
             )
             """
         )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_target ON listings(target_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_evaluations_listing ON evaluations(listing_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comps_listing ON comps(listing_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_alerts_listing_channel ON alerts_sent(listing_id, channel)"
+        )
 
 
 def add_target(db_path: str, target: Target) -> int:
@@ -200,7 +214,7 @@ def list_targets(db_path: str) -> list[Target]:
 
 
 def upsert_listing(db_path: str, listing: Listing) -> tuple[int, bool]:
-    now_iso = datetime.utcnow().isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()
     with get_connection(db_path) as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -419,7 +433,7 @@ def mark_alert_sent(db_path: str, listing_id: int, channel: str) -> None:
             INSERT INTO alerts_sent (listing_id, channel, sent_at)
             VALUES (?, ?, ?)
             """,
-            (listing_id, channel, datetime.utcnow().isoformat()),
+            (listing_id, channel, datetime.now(timezone.utc).isoformat()),
         )
 
 

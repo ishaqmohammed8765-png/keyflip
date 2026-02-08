@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from statistics import median
 from typing import Iterable
 
@@ -19,7 +19,7 @@ def compute_comp_stats(comp_query: str, comps: Iterable[SoldComp]) -> CompStats:
             p25_sold_gbp=None,
             p75_sold_gbp=None,
             spread_gbp=None,
-            computed_at=datetime.utcnow().isoformat(),
+            computed_at=datetime.now(timezone.utc).isoformat(),
         )
     median_val = float(median(prices))
     p25_idx = max(0, min(int(0.25 * (sold_count - 1)), sold_count - 1))
@@ -34,5 +34,5 @@ def compute_comp_stats(comp_query: str, comps: Iterable[SoldComp]) -> CompStats:
         p25_sold_gbp=p25,
         p75_sold_gbp=p75,
         spread_gbp=spread,
-        computed_at=datetime.utcnow().isoformat(),
+        computed_at=datetime.now(timezone.utc).isoformat(),
     )

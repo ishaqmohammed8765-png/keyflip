@@ -24,6 +24,7 @@ REJECTION_REASONS = (
     "blocked keywords",
     "seller risk thresholds",
     "missing shipping price",
+    "no delivery available",
 )
 
 
@@ -64,6 +65,8 @@ def filter_listings(
             reasons.append("seller risk thresholds")
         if listing.raw_json and listing.raw_json.get("shipping_missing") and not settings.allow_missing_shipping_price:
             reasons.append("missing shipping price")
+        if settings.delivery_only and not _has_delivery(listing):
+            reasons.append("no delivery available")
 
         if reasons:
             for reason in reasons:
@@ -79,6 +82,18 @@ def _condition_matches(listing_condition: str, target_condition: str) -> bool:
     expected = CONDITION_CODE_MAP.get(target_condition, target_condition).lower()
     listing_value = listing_condition.lower()
     return expected in listing_value
+
+
+def _has_delivery(listing: Listing) -> bool:
+    if listing.shipping_gbp is not None and listing.shipping_gbp >= 0:
+        return True
+    if listing.raw_json:
+        shipping_type = listing.raw_json.get("shipping_type", "")
+        if shipping_type and shipping_type.lower() not in ("pickup", "local_pickup", "collection"):
+            return True
+        if listing.raw_json.get("free_shipping"):
+            return True
+    return False
 
 
 def _seller_fails_thresholds(listing: Listing, settings: RunSettings) -> bool:

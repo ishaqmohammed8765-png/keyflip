@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Any, Optional
 
 import requests
@@ -64,7 +64,7 @@ class EbayCompsApiClient:
         self.config.validate()
         days = days or self.config.comps_days
         limit = limit or self.config.comps_limit
-        end_time_from = _format_ebay_time(datetime.utcnow() - timedelta(days=days))
+        end_time_from = _format_ebay_time(datetime.now(timezone.utc) - timedelta(days=days))
         params = {
             "OPERATION-NAME": "findCompletedItems",
             "SERVICE-VERSION": "1.0.0",

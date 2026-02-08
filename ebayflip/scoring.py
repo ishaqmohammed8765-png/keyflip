@@ -104,7 +104,8 @@ def _confidence_reasons(listing: Listing, comps: CompStats, confidence: float) -
 
 
 def _deal_score(profit: float, roi: float, confidence: float) -> float:
-    return max(0.0, profit) * 0.6 + roi * 40 + confidence * 20
+    capped_roi = max(0.0, min(roi, 1.0))
+    return max(0.0, profit) * 0.6 + capped_roi * 40 + confidence * 20
 
 
 def _decision(profit: float, roi: float, confidence: float, settings: RunSettings) -> str:
@@ -120,6 +121,6 @@ def _fmt(value: float | None) -> str:
 
 
 def _now_iso() -> str:
-    from datetime import datetime
+    from datetime import datetime, timezone
 
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
