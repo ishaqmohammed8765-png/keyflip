@@ -43,8 +43,10 @@ class RunSettings:
     min_seller_feedback_pct: Optional[float] = None
     min_seller_feedback_score: Optional[int] = None
     allow_missing_shipping_price: bool = True
-    assumed_inbound_shipping_gbp: float = 0.0
+    assumed_inbound_shipping_gbp: float = 3.50
     use_playwright_fallback: bool = True
+    delivery_only: bool = False
+    include_ebay_buy_now: bool = True
 
 
 @dataclass(slots=True)

@@ -9,7 +9,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -1116,7 +1116,7 @@ def _ensure_playwright_browsers_installed() -> bool:
 def _save_debug_html(text: str, *, prefix: str) -> str:
     debug_dir = Path(".cache/ebayflip_debug")
     debug_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     path = debug_dir / f"{prefix}_{timestamp}.html"
     path.write_text(text, encoding="utf-8")
     return str(path)
@@ -1125,7 +1125,7 @@ def _save_debug_html(text: str, *, prefix: str) -> str:
 def _save_debug_metadata(payload: dict[str, Any], *, prefix: str) -> str:
     debug_dir = Path(".cache/ebayflip_debug")
     debug_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     path = debug_dir / f"{prefix}_{timestamp}.json"
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return str(path)
@@ -1134,7 +1134,7 @@ def _save_debug_metadata(payload: dict[str, Any], *, prefix: str) -> str:
 def _save_debug_screenshot(page: Any, *, prefix: str) -> Optional[str]:
     debug_dir = Path(".cache/ebayflip_debug")
     debug_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     path = debug_dir / f"{prefix}_{timestamp}.png"
     try:
         page.screenshot(path=str(path), full_page=True)
@@ -1354,7 +1354,7 @@ def _capture_playwright_debug(page: Any, *, prefix: str) -> list[str]:
     if page and not page.is_closed():
         debug_dir = Path(".cache/ebayflip_debug")
         debug_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         screenshot_path = safe_screenshot(page, str(debug_dir / f"{prefix}_{timestamp}.png"))
     if screenshot_path:
         artifacts.append(screenshot_path)

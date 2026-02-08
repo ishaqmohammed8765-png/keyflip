@@ -41,10 +41,19 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _build_run_settings() -> RunSettings:
-    settings = RunSettings()
+    marketplace = os.getenv("MARKETPLACE", "craigslist").lower()
+    delivery_only = os.getenv("DELIVERY_ONLY", "").lower() in ("1", "true", "yes")
+    settings = RunSettings(
+        marketplace=marketplace,
+        delivery_only=delivery_only,
+        include_ebay_buy_now=marketplace == "ebay" or os.getenv("INCLUDE_EBAY_BUY_NOW", "").lower() in ("1", "true", "yes"),
+    )
     app_id = os.getenv("EBAY_APP_ID")
     if app_id:
         settings.use_playwright_fallback = False
+    craigslist_site = os.getenv("CRAIGSLIST_SITE", "")
+    if craigslist_site:
+        settings.craigslist_site = craigslist_site
     return settings
 
 
@@ -142,6 +151,23 @@ def main() -> None:
     items = _serialize_items(rows)
 
     generated_at = datetime.now(timezone.utc).isoformat()
+    zero_result_info = []
+    for debug in summary.zero_result_debug:
+        info: dict[str, Any] = {
+            "target_name": debug.target_name,
+            "target_query": debug.target_query,
+            "retry_report": debug.retry_report,
+            "raw_count": debug.raw_count,
+            "filtered_count": debug.filtered_count,
+        }
+        if debug.blocked_reason:
+            info["blocked_reason"] = debug.blocked_reason
+        if debug.blocked_message:
+            info["blocked_message"] = debug.blocked_message
+        if debug.rejection_counts:
+            info["rejection_counts"] = debug.rejection_counts
+        zero_result_info.append(info)
+
     snapshot = {
         "generated_at": generated_at,
         "count": len(items),
@@ -152,6 +178,7 @@ def main() -> None:
             "deals": summary.deals,
             "request_cap_reached": summary.request_cap_reached,
             "last_scan": summary.last_scan,
+            "zero_result_targets": zero_result_info,
         },
         "items": items,
     }
