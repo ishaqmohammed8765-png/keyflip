@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-02-08T04:12:14.090789+00:00",
+  "generated_at": "2026-02-08T05:44:12.680846+00:00",
   "count": 1,
   "scan_summary": {
     "scanned_targets": 3,
@@ -7,7 +7,7 @@
     "evaluated": 1,
     "deals": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-02-08T04:12:14.090391"
+    "last_scan": "2026-02-08T05:44:12.680474"
   },
   "items": [
     {
@@ -24,7 +24,7 @@
       "reasons": [
         "No sold comps found - cannot estimate profit."
       ],
-      "evaluated_at": "2026-02-08T04:12:08.996632",
+      "evaluated_at": "2026-02-08T05:44:09.102260",
       "image_url": null,
       "location": "Angel, London",
       "listing_type": "fixed"
