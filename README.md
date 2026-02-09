@@ -16,6 +16,7 @@ Streamlit app that scans Craigslist listings for underpriced items, estimates re
 - Safer external-link handling (http/https only).
 - Deal intelligence: max buy at target profit, break-even buy, suggested offer price, and buy-edge.
 - Capital planner: pick a portfolio of actionable flips within your bankroll budget.
+- Smart target auto-add: proposes and inserts new targets from recent high-confidence deals.
 
 ## Quick start
 ```bash
@@ -25,6 +26,7 @@ streamlit run app.py
 
 ## Beginner quick win
 1. Open **Manage Targets** and add 3 to 5 products you understand well.
+   - Optional: use **Auto-Add Smart Targets** to let the app create new targets from strong recent results.
 2. Run one scan: `python scanner/run_scan.py`
 3. In **Dashboard**, set:
    - `Minimum confidence`: `0.50`

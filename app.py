@@ -383,8 +383,16 @@ def _render_targets_tab() -> None:
     st.subheader("Manage Scan Targets")
     st.caption("Beginner tip: start with 3 to 5 specific products with strong resale demand.")
     try:
-        from ebayflip.db import add_target, delete_target, init_db, list_targets, update_target
+        from ebayflip.db import (
+            add_target,
+            delete_target,
+            init_db,
+            list_evaluations_with_listings,
+            list_targets,
+            update_target,
+        )
         from ebayflip.models import Target
+        from ebayflip.target_suggestions import suggest_targets_from_evaluations
 
         db_path = str(DB_PATH)
         if DB_PATH.exists():
@@ -427,6 +435,69 @@ def _render_targets_tab() -> None:
                         if st.button("Delete", key=f"delete_{target.id}"):
                             delete_target(db_path, target.id)
                             st.rerun()
+
+        st.divider()
+        st.subheader("Smart Auto-Add")
+        st.caption("Adds new targets automatically from recent high-confidence deals.")
+        country_options = ["UK", "US", "DE", "FR", "AU"]
+        default_country = "UK"
+        if targets:
+            existing_country = (targets[0].country or "").upper()
+            if existing_country in country_options:
+                default_country = existing_country
+        smart_col1, smart_col2, smart_col3, smart_col4 = st.columns([1, 1, 1, 1])
+        with smart_col1:
+            smart_limit = st.slider("Auto-add count", min_value=1, max_value=5, value=2, step=1)
+        with smart_col2:
+            smart_min_conf = st.slider(
+                "Min confidence",
+                min_value=0.30,
+                max_value=0.95,
+                value=0.60,
+                step=0.05,
+                help="Uses only stronger historical picks.",
+            )
+        with smart_col3:
+            smart_min_profit = st.number_input(
+                "Min expected profit (GBP)",
+                min_value=0.0,
+                value=15.0,
+                step=1.0,
+            )
+        with smart_col4:
+            smart_country = st.selectbox(
+                "Country",
+                country_options,
+                index=country_options.index(default_country),
+            )
+        if st.button("Auto-Add Smart Targets", type="primary"):
+            init_db(db_path)
+            evaluation_rows = list_evaluations_with_listings(db_path)
+            suggestions = suggest_targets_from_evaluations(
+                evaluation_rows,
+                targets,
+                limit=smart_limit,
+                min_confidence=smart_min_conf,
+                min_profit_gbp=smart_min_profit,
+            )
+            if not suggestions:
+                st.info("No smart suggestions yet. Run more scans or lower thresholds.")
+            else:
+                added: list[str] = []
+                for suggestion in suggestions:
+                    add_target(
+                        db_path,
+                        Target(
+                            id=None,
+                            name=suggestion.name,
+                            query=suggestion.query,
+                            max_buy_gbp=suggestion.max_buy_gbp,
+                            country=smart_country,
+                        ),
+                    )
+                    added.append(suggestion.name)
+                st.success(f"Added {len(added)} smart target(s): {', '.join(added)}")
+                st.rerun()
 
         st.divider()
         st.subheader("Add New Target")
