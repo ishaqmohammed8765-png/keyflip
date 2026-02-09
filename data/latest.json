@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-02-09T05:49:41.288818+00:00",
+  "generated_at": "2026-02-09T06:52:22.890619+00:00",
   "count": 1,
   "scan_summary": {
     "scanned_targets": 3,
@@ -7,7 +7,7 @@
     "evaluated": 1,
     "deals": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-02-09T05:49:41.288248+00:00",
+    "last_scan": "2026-02-09T06:52:22.889882+00:00",
     "zero_result_targets": [
       {
         "target_name": "AirPods Pro 2",
@@ -60,7 +60,7 @@
       "reasons": [
         "No sold comps found - cannot estimate profit."
       ],
-      "evaluated_at": "2026-02-09T05:49:38.106242+00:00",
+      "evaluated_at": "2026-02-09T06:52:18.362739+00:00",
       "image_url": null,
       "location": "Angel, London",
       "listing_type": "fixed"
