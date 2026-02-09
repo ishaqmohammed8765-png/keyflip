@@ -149,7 +149,7 @@ def suggest_targets_from_evaluations(
         profit = _safe_float(row.get("expected_profit_gbp"))
         title = str(row.get("title") or "").strip()
         total_buy = _safe_float(row.get("total_buy_gbp"))
-        if decision not in {"deal", "maybe"}:
+        if decision and decision not in {"deal", "maybe"}:
             continue
         if confidence < min_confidence or profit < min_profit_gbp:
             continue

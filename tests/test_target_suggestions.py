@@ -61,3 +61,17 @@ def test_suggest_targets_ranks_by_quality_signal() -> None:
     suggestions = suggest_targets_from_evaluations(rows, [], limit=2, min_confidence=0.6, min_profit_gbp=10.0)
     assert len(suggestions) == 2
     assert suggestions[0].query == "nintendo switch oled"
+
+
+def test_suggest_targets_accepts_rows_without_decision() -> None:
+    rows = [
+        {
+            "confidence": 0.75,
+            "expected_profit_gbp": 22.0,
+            "title": "Steam Deck OLED 512GB",
+            "total_buy_gbp": 260.0,
+        }
+    ]
+    suggestions = suggest_targets_from_evaluations(rows, [], limit=1, min_confidence=0.6, min_profit_gbp=10.0)
+    assert len(suggestions) == 1
+    assert suggestions[0].query == "steam deck oled"

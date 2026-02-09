@@ -395,11 +395,10 @@ def _render_targets_tab() -> None:
         from ebayflip.target_suggestions import suggest_targets_from_evaluations
 
         db_path = str(DB_PATH)
-        if DB_PATH.exists():
-            targets = list_targets(db_path)
-        else:
-            st.info("Database not initialized yet. Run a scan first to create the database.")
-            targets = []
+        init_db(db_path)
+        targets = list_targets(db_path)
+        if not targets:
+            st.info("No targets yet. Add one manually or use Smart Auto-Add after at least one scan.")
 
         if targets:
             st.caption(f"{len(targets)} target(s) configured")
@@ -473,6 +472,20 @@ def _render_targets_tab() -> None:
         if st.button("Auto-Add Smart Targets", type="primary"):
             init_db(db_path)
             evaluation_rows = list_evaluations_with_listings(db_path)
+            # Fallback: use latest snapshot if evaluation history is empty.
+            if not evaluation_rows:
+                payload = load_latest_scan(LATEST_SCAN_PATH) or {}
+                raw_items = payload.get("items") or []
+                evaluation_rows = [
+                    {
+                        "decision": item.get("decision"),
+                        "confidence": item.get("confidence"),
+                        "expected_profit_gbp": item.get("expected_profit_gbp"),
+                        "title": item.get("title"),
+                        "total_buy_gbp": item.get("total_buy_gbp"),
+                    }
+                    for item in raw_items
+                ]
             suggestions = suggest_targets_from_evaluations(
                 evaluation_rows,
                 targets,
@@ -481,7 +494,9 @@ def _render_targets_tab() -> None:
                 min_profit_gbp=smart_min_profit,
             )
             if not suggestions:
-                st.info("No smart suggestions yet. Run more scans or lower thresholds.")
+                st.info(
+                    "No smart suggestions yet. Run a fresh scan so the app has profitable listings to learn from."
+                )
             else:
                 added: list[str] = []
                 for suggestion in suggestions:
