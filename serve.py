@@ -13,16 +13,12 @@ Serves the same scan data as the Streamlit dashboard, plus:
 """
 from __future__ import annotations
 
-import csv
-import io
-import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 try:
-    from flask import Flask, Response, jsonify, render_template_string
+    from flask import Flask, Response, jsonify, render_template_string, request
 except ImportError:
     raise SystemExit(
         "Flask is required for the standalone server.\n"
@@ -35,6 +31,19 @@ LATEST_SCAN_PATH = ROOT_DIR / "data" / "latest.json"
 HISTORY_PATH = ROOT_DIR / "data" / "history.jsonl"
 
 app = Flask(__name__)
+
+from ebayflip.dashboard_data import (
+    filter_items,
+    items_to_csv_bytes,
+    load_history,
+    load_latest_scan,
+    scan_age_seconds,
+    sort_items,
+    summarize_items,
+)
+from ebayflip.deal_insights import enrich_items
+from ebayflip.config import RunSettings
+from ebayflip.safety import safe_external_url
 
 DASHBOARD_HTML = """\
 <!DOCTYPE html>
@@ -132,9 +141,16 @@ DASHBOARD_HTML = """\
     <option value="maybe">Maybe only</option>
     <option value="ignore">Ignore only</option>
   </select>
+  <input type="number" id="minScore" min="0" max="1000" step="0.1" placeholder="Min score"
+         oninput="filterTable()" />
+  <input type="number" id="minProfit" step="1" placeholder="Min profit GBP"
+         oninput="filterTable()" />
+  <input type="number" id="minConfidence" min="0" max="1" step="0.05" placeholder="Min confidence"
+         oninput="filterTable()" />
   <input type="text" id="searchBox" class="search-box" placeholder="Search titles..."
          oninput="filterTable()" />
   <a href="/api/export/csv" class="btn btn-secondary" download>Export CSV</a>
+  <a href="/api/latest?decision=deal&min_score=40" class="btn btn-secondary">Deals API</a>
   <button class="btn" onclick="location.reload()">Refresh</button>
 </div>
 
@@ -144,14 +160,17 @@ DASHBOARD_HTML = """\
 <tr>
   <th>Decision</th><th>Title</th><th>Buy</th><th>Resale</th>
   <th>Profit</th><th>ROI</th><th>Confidence</th><th>Score</th>
+  <th>Grade</th><th>Risk</th><th>Max Buy</th><th>Edge</th>
 </tr>
 </thead>
 <tbody>
 {% for item in items %}
-<tr data-decision="{{ item.decision }}" data-title="{{ item.title|lower }}">
+<tr data-decision="{{ item.decision }}" data-title="{{ item.title|lower }}"
+    data-score="{{ item.deal_score or 0 }}" data-profit="{{ item.expected_profit_gbp or 0 }}"
+    data-confidence="{{ item.confidence or 0 }}">
   <td><span class="tag tag-{{ item.decision }}">{{ item.decision }}</span></td>
   <td>
-    {% if item.url %}<a href="{{ item.url }}" target="_blank">{{ item.title[:80] }}</a>
+    {% if item.safe_url %}<a href="{{ item.safe_url }}" target="_blank" rel="noopener noreferrer">{{ item.title[:80] }}</a>
     {% else %}{{ item.title[:80] }}{% endif %}
     {% if item.reasons %}
     <div class="details">{{ item.reasons[:2]|join(' | ') }}</div>
@@ -164,6 +183,10 @@ DASHBOARD_HTML = """\
   <td>{{ "%.0f"|format((item.roi or 0) * 100) }}%%</td>
   <td>{{ "%.2f"|format(item.confidence or 0) }}</td>
   <td>{{ "%.1f"|format(item.deal_score or 0) }}</td>
+  <td>{{ item.flip_grade or '-' }}</td>
+  <td>{{ item.risk_band or '-' }}</td>
+  <td>&pound;{{ "%.2f"|format(item.max_total_buy_target_gbp or 0) }}</td>
+  <td>&pound;{{ "%.2f"|format(item.buy_edge_gbp or 0) }}</td>
 </tr>
 {% endfor %}
 </tbody>
@@ -178,13 +201,24 @@ DASHBOARD_HTML = """\
 <script>
 function filterTable() {
   const decision = document.getElementById('filterDecision').value;
+  const minScore = parseFloat(document.getElementById('minScore').value || '0');
+  const minProfitRaw = document.getElementById('minProfit').value;
+  const minProfit = minProfitRaw === '' ? null : parseFloat(minProfitRaw);
+  const minConfidenceRaw = document.getElementById('minConfidence').value;
+  const minConfidence = minConfidenceRaw === '' ? 0 : parseFloat(minConfidenceRaw);
   const search = document.getElementById('searchBox').value.toLowerCase();
   document.querySelectorAll('#flipTable tbody tr').forEach(row => {
     const rowDecision = row.getAttribute('data-decision');
     const rowTitle = row.getAttribute('data-title');
+    const rowScore = parseFloat(row.getAttribute('data-score') || '0');
+    const rowProfit = parseFloat(row.getAttribute('data-profit') || '0');
+    const rowConfidence = parseFloat(row.getAttribute('data-confidence') || '0');
     const matchDecision = decision === 'all' || rowDecision === decision;
     const matchSearch = !search || rowTitle.includes(search);
-    row.style.display = matchDecision && matchSearch ? '' : 'none';
+    const matchScore = rowScore >= minScore;
+    const matchProfit = minProfit === null || rowProfit >= minProfit;
+    const matchConfidence = rowConfidence >= minConfidence;
+    row.style.display = matchDecision && matchSearch && matchScore && matchProfit && matchConfidence ? '' : 'none';
   });
 }
 // Auto-refresh every 60 seconds
@@ -195,66 +229,52 @@ setTimeout(() => location.reload(), 60000);
 """
 
 
-def _load_scan_data() -> dict[str, Any] | None:
-    if not LATEST_SCAN_PATH.exists():
-        return None
-    try:
-        return json.loads(LATEST_SCAN_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+def _to_render_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rendered: list[dict[str, Any]] = []
+    for item in items:
+        row = dict(item)
+        row["safe_url"] = safe_external_url(item.get("url"))
+        rendered.append(row)
+    return rendered
 
 
-def _load_history() -> list[dict[str, Any]]:
-    if not HISTORY_PATH.exists():
-        return []
-    entries = []
+def _query_float(name: str) -> float | None:
+    raw = request.args.get(name)
+    if raw is None or raw.strip() == "":
+        return None
     try:
-        for line in HISTORY_PATH.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass
-    return entries
+        return float(raw)
+    except ValueError:
+        return None
 
 
 @app.route("/")
 def dashboard():
-    data = _load_scan_data()
-    items = []
-    deal_count = maybe_count = 0
-    total_profit = 0.0
+    data = load_latest_scan(LATEST_SCAN_PATH)
+    items: list[dict[str, Any]] = []
     last_scan = "-"
     zero_targets = []
+    summary_stats = {"deal_count": 0, "maybe_count": 0, "total_profit": 0.0, "total_items": 0}
 
     if data:
-        items = data.get("items") or []
+        items = enrich_items(
+            sort_items(data.get("items") or []),
+            RunSettings.from_env(),
+            target_profit_gbp=float(os.getenv("FLIP_TARGET_PROFIT", "20")),
+        )
         scan_summary = data.get("scan_summary") or {}
         last_scan = data.get("generated_at", "-")[:19]
         zero_targets = scan_summary.get("zero_result_targets") or []
-
-        decision_order = {"deal": 0, "maybe": 1, "ignore": 2}
-        items.sort(key=lambda x: (decision_order.get(x.get("decision", "ignore"), 3), -(x.get("deal_score") or 0)))
-
-        deal_count = sum(1 for i in items if i.get("decision") == "deal")
-        maybe_count = sum(1 for i in items if i.get("decision") == "maybe")
-        total_profit = sum(
-            i.get("expected_profit_gbp", 0)
-            for i in items
-            if i.get("decision") in ("deal", "maybe") and i.get("expected_profit_gbp", 0) > 0
-        )
+        summary_stats = summarize_items(items)
 
     return render_template_string(
         DASHBOARD_HTML,
         data=data,
-        items=items,
-        deal_count=deal_count,
-        maybe_count=maybe_count,
-        total_profit=total_profit,
-        total_items=len(items),
+        items=_to_render_items(items),
+        deal_count=summary_stats["deal_count"],
+        maybe_count=summary_stats["maybe_count"],
+        total_profit=summary_stats["total_profit"],
+        total_items=summary_stats["total_items"],
         last_scan=last_scan,
         zero_targets=zero_targets,
     )
@@ -262,55 +282,69 @@ def dashboard():
 
 @app.route("/api/latest")
 def api_latest():
-    data = _load_scan_data()
+    data = load_latest_scan(LATEST_SCAN_PATH)
     if data is None:
         return jsonify({"error": "No scan data found"}), 404
-    return jsonify(data)
+    decision_raw = request.args.get("decision", "All")
+    decision = decision_raw.strip().lower()
+    if decision in {"all", ""}:
+        decision_normalized = "All"
+    elif decision in {"deal", "maybe", "ignore"}:
+        decision_normalized = decision
+    else:
+        decision_normalized = "All"
+    search = request.args.get("q", "")
+    min_score = _query_float("min_score") or 0.0
+    min_profit = _query_float("min_profit")
+    target_profit = _query_float("target_profit")
+    if target_profit is None:
+        target_profit = float(os.getenv("FLIP_TARGET_PROFIT", "20"))
+    run_settings = RunSettings.from_env()
+    source_items = enrich_items(
+        sort_items(data.get("items") or []),
+        run_settings,
+        target_profit_gbp=target_profit,
+    )
+    items = filter_items(
+        source_items,
+        decision=decision_normalized,
+        search_term=search,
+        min_score=min_score,
+        min_profit=min_profit,
+    )
+    payload = dict(data)
+    payload["items"] = _to_render_items(items)
+    payload["count"] = len(items)
+    payload["filters"] = {
+        "decision": decision_normalized,
+        "q": search,
+        "min_score": min_score,
+        "min_profit": min_profit,
+        "target_profit": target_profit,
+    }
+    return jsonify(payload)
 
 
 @app.route("/api/health")
 def api_health():
-    data = _load_scan_data()
+    data = load_latest_scan(LATEST_SCAN_PATH)
     healthy = data is not None
-    scan_age_seconds = None
-    if data and data.get("generated_at"):
-        try:
-            gen_time = datetime.fromisoformat(data["generated_at"])
-            if gen_time.tzinfo is None:
-                gen_time = gen_time.replace(tzinfo=timezone.utc)
-            scan_age_seconds = (datetime.now(timezone.utc) - gen_time).total_seconds()
-        except (ValueError, TypeError):
-            pass
+    age_seconds = scan_age_seconds(data)
     return jsonify({
         "status": "ok" if healthy else "no_data",
         "scan_data_exists": healthy,
-        "scan_age_seconds": scan_age_seconds,
+        "scan_age_seconds": age_seconds,
         "items_count": len(data.get("items", [])) if data else 0,
     })
 
 
 @app.route("/api/export/csv")
 def api_export_csv():
-    data = _load_scan_data()
+    data = load_latest_scan(LATEST_SCAN_PATH)
     if data is None:
         return Response("No scan data available", status=404, mimetype="text/plain")
 
-    items = data.get("items") or []
-    output = io.StringIO()
-    fieldnames = [
-        "decision", "title", "url", "total_buy_gbp", "resale_est_gbp",
-        "expected_profit_gbp", "roi", "confidence", "deal_score",
-        "location", "listing_type", "evaluated_at", "reasons",
-    ]
-    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
-    writer.writeheader()
-    for item in items:
-        row = dict(item)
-        reasons = row.get("reasons") or []
-        row["reasons"] = "; ".join(str(r) for r in reasons)
-        writer.writerow(row)
-
-    csv_bytes = output.getvalue().encode("utf-8")
+    csv_bytes = items_to_csv_bytes(sort_items(data.get("items") or []))
     return Response(
         csv_bytes,
         mimetype="text/csv",
@@ -320,7 +354,7 @@ def api_export_csv():
 
 @app.route("/api/history")
 def api_history():
-    entries = _load_history()
+    entries = load_history(HISTORY_PATH)
     summary = []
     for entry in entries[-50:]:
         summary.append({

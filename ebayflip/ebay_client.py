@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import dataclasses
 import importlib.util
@@ -24,6 +24,11 @@ from ebayflip.config import RunSettings
 from ebayflip.filtering import filter_listings
 from ebayflip.ebay_api_provider import EbayApiProvider
 from ebayflip.models import Listing, SoldComp, Target
+from ebayflip.search_retry import (
+    broaden_query as _broaden_query,
+    build_retry_steps as _build_retry_steps,
+    total_max as _total_max,
+)
 
 LOGGER = get_logger()
 
@@ -1527,16 +1532,16 @@ def _parse_price(text: str) -> tuple[float, str]:
     currency = "GBP"
     if "US" in cleaned or "$" in cleaned:
         currency = "USD"
-    if "EUR" in cleaned or "€" in cleaned:
+    if "EUR" in cleaned or "\u20ac" in cleaned:
         currency = "EUR"
-    if "GBP" in cleaned or "£" in cleaned:
+    if "GBP" in cleaned or "\u00a3" in cleaned:
         currency = "GBP"
     cleaned = (
-        cleaned.replace("£", "")
+        cleaned.replace("\u00a3", "")
         .replace("US $", "")
         .replace("$", "")
         .replace("EUR", "")
-        .replace("€", "")
+        .replace("\u20ac", "")
     )
     cleaned = cleaned.replace("from", "")
     for token in ["to", "-", "per", "each"]:
@@ -1632,7 +1637,7 @@ def _parse_craigslist_listings(
             metrics["price_count"] += 1
         if not title_el:
             continue
-        # Allow listings without a price - treat as £0 so they still appear
+        # Allow listings without a price - treat as GBP 0 so they still appear
         price_text = price_el.get_text(strip=True) if price_el else "0"
         listing_id = card.get("data-pid") or card.get("data-repost-of") or ""
         if not listing_id and link_el:
@@ -1810,7 +1815,6 @@ def _extract_listing_price_text(card: Any) -> Optional[str]:
         "span.s-item__price span.POSITIVE",
         "*[data-testid='s-item__price']",
         "*[class*='s-item__price']",
-        "span[aria-label*='£']",
         "span[aria-label*='$']",
         "span[aria-label*='GBP']",
         "span[aria-label*='EUR']",
@@ -2302,73 +2306,6 @@ def _criteria_to_target(criteria: SearchCriteria, target: Target) -> Target:
     )
 
 
-def _broaden_query(query: str) -> str:
-    if not query:
-        return query
-    cleaned = re.sub(r'(["\'])(.*?)\1', r"\2", query)
-    cleaned = re.sub(r"(?<=\D)(?=\d)|(?<=\d)(?=\D)", " ", cleaned)
-    cleaned = re.sub(r"\b\d+\s?(gb|tb)\b", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b\d+\s?(gig|gigabyte|terabyte)s?\b", "", cleaned, flags=re.IGNORECASE)
-    colors = (
-        "black",
-        "white",
-        "silver",
-        "gray",
-        "grey",
-        "blue",
-        "red",
-        "green",
-        "graphite",
-        "gold",
-        "pink",
-        "purple",
-        "midnight",
-        "starlight",
-    )
-    pattern = r"\b(" + "|".join(colors) + r")\b"
-    cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    if not cleaned:
-        return cleaned
-    return cleaned
-
-
-def _build_retry_steps(base: SearchCriteria) -> list[tuple[str, SearchCriteria]]:
-    steps: list[tuple[str, SearchCriteria]] = [("initial", base)]
-    if base.category_id:
-        steps.append(("removed category filter", dataclasses.replace(base, category_id=None)))
-    if base.condition:
-        steps.append(("removed condition filter", dataclasses.replace(base, condition=None)))
-    if base.listing_type and base.listing_type != "any":
-        steps.append(("removed listing type filter", dataclasses.replace(base, listing_type="any")))
-    if base.max_buy_gbp is not None or base.shipping_max_gbp is not None:
-        steps.append(
-            (
-                "removed price filters",
-                dataclasses.replace(base, max_buy_gbp=None, shipping_max_gbp=None),
-            )
-        )
-    widened_query = _broaden_query(base.query)
-    if widened_query and widened_query != base.query:
-        steps.append(
-            (
-                f"broadened query from '{base.query}' to '{widened_query}'",
-                dataclasses.replace(base, query=widened_query),
-            )
-        )
-    return steps
-
-
-def _total_max(max_buy: Optional[float], shipping_max: Optional[float]) -> Optional[float]:
-    if max_buy is None and shipping_max is None:
-        return None
-    if max_buy is None:
-        return shipping_max
-    if shipping_max is None:
-        return max_buy
-    return max_buy + shipping_max
-
-
 def _empty_search_result() -> SearchResult:
     return SearchResult(
         listings=[],
@@ -2387,3 +2324,4 @@ if __name__ == "__main__":
     results = fetch_ebay_search("iphone 14")
     print(f"Found {len(results)} items")
     print(results[:3])
+

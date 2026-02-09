@@ -1,7 +1,4 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Tuple
+﻿from __future__ import annotations
 
 from ebayflip.config import RunSettings
 from ebayflip.models import CompStats, Evaluation, Listing
@@ -30,7 +27,7 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
         )
 
     reasons.append(
-        f"Median sold £{resale_est:.2f} from {comps.sold_count} comps (p25 £{_fmt(comps.p25_sold_gbp)}, p75 £{_fmt(comps.p75_sold_gbp)})."
+        f"Median sold GBP {resale_est:.2f} from {comps.sold_count} comps (p25 GBP {_fmt(comps.p25_sold_gbp)}, p75 GBP {_fmt(comps.p75_sold_gbp)})."
     )
 
     buffer_gbp = settings.buffer_fixed_gbp + (settings.buffer_pct_of_buy * listing.total_buy_gbp)
@@ -124,3 +121,4 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+

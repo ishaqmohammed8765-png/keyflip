@@ -41,19 +41,10 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _build_run_settings() -> RunSettings:
-    marketplace = os.getenv("MARKETPLACE", "craigslist").lower()
-    delivery_only = os.getenv("DELIVERY_ONLY", "").lower() in ("1", "true", "yes")
-    settings = RunSettings(
-        marketplace=marketplace,
-        delivery_only=delivery_only,
-        include_ebay_buy_now=marketplace == "ebay" or os.getenv("INCLUDE_EBAY_BUY_NOW", "").lower() in ("1", "true", "yes"),
-    )
+    settings = RunSettings.from_env()
     app_id = os.getenv("EBAY_APP_ID")
     if app_id:
         settings.use_playwright_fallback = False
-    craigslist_site = os.getenv("CRAIGSLIST_SITE", "")
-    if craigslist_site:
-        settings.craigslist_site = craigslist_site
     return settings
 
 

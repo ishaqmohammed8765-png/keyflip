@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from typing import Optional
 
 MIN_PROFIT_GBP = 5.0
@@ -21,10 +22,36 @@ DEFAULT_COMPS_TTL_HOURS = 12
 DEFAULT_GBP_EXCHANGE_RATE = 0.78
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _default_craigslist_site() -> str:
+    override = os.getenv("CRAIGSLIST_SITE")
+    if override and override.strip():
+        return override.strip().lower()
+    locale = os.getenv("LOCALE", "").lower()
+    country = os.getenv("COUNTRY", "").lower()
+    if locale.startswith("en_us") or country in {"us", "usa", "united states"}:
+        return "sfbay"
+    return "london"
+
+
+def _default_currency_whitelist() -> tuple[str, ...]:
+    configured = os.getenv("CURRENCY_WHITELIST")
+    if not configured:
+        return ("GBP", "USD")
+    values = tuple(part.strip().upper() for part in configured.split(",") if part.strip())
+    return values or ("GBP", "USD")
+
+
 @dataclass(slots=True)
 class RunSettings:
     marketplace: str = "craigslist"
-    craigslist_site: str = "london"
+    craigslist_site: str = field(default_factory=_default_craigslist_site)
     min_profit_gbp: float = MIN_PROFIT_GBP
     min_roi: float = MIN_ROI
     min_confidence: float = MIN_CONFIDENCE
@@ -38,7 +65,7 @@ class RunSettings:
     comps_ttl_hours: int = DEFAULT_COMPS_TTL_HOURS
     allow_non_gbp: bool = True
     gbp_exchange_rate: float = DEFAULT_GBP_EXCHANGE_RATE
-    currency_whitelist: tuple[str, ...] = ("GBP", "USD")
+    currency_whitelist: tuple[str, ...] = field(default_factory=_default_currency_whitelist)
     blocked_keywords: tuple[str, ...] = ()
     min_seller_feedback_pct: Optional[float] = None
     min_seller_feedback_score: Optional[int] = None
@@ -47,6 +74,32 @@ class RunSettings:
     use_playwright_fallback: bool = True
     delivery_only: bool = False
     include_ebay_buy_now: bool = True
+
+    @classmethod
+    def from_env(cls, **overrides: object) -> "RunSettings":
+        marketplace = os.getenv("MARKETPLACE", "craigslist").strip().lower() or "craigslist"
+        include_buy_now_raw = os.getenv("INCLUDE_EBAY_BUY_NOW")
+        if include_buy_now_raw is None:
+            include_buy_now = marketplace == "ebay"
+        else:
+            include_buy_now = include_buy_now_raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+        kwargs: dict[str, object] = {
+            "marketplace": marketplace,
+            "craigslist_site": _default_craigslist_site(),
+            "request_cap": int(os.getenv("REQUEST_CAP", str(DEFAULT_REQUEST_CAP))),
+            "scan_limit_per_target": int(
+                os.getenv("SCAN_LIMIT_PER_TARGET", str(DEFAULT_SCAN_LIMIT_PER_TARGET))
+            ),
+            "comps_limit": int(os.getenv("COMPS_LIMIT", str(DEFAULT_COMPS_LIMIT))),
+            "delivery_only": _env_bool("DELIVERY_ONLY", False),
+            "include_ebay_buy_now": include_buy_now,
+            "allow_non_gbp": _env_bool("ALLOW_NON_GBP", True),
+            "gbp_exchange_rate": float(os.getenv("GBP_EXCHANGE_RATE", str(DEFAULT_GBP_EXCHANGE_RATE))),
+            "currency_whitelist": _default_currency_whitelist(),
+            "use_playwright_fallback": _env_bool("EBAY_USE_PLAYWRIGHT", True),
+        }
+        kwargs.update(overrides)
+        return cls(**kwargs)
 
 
 @dataclass(slots=True)

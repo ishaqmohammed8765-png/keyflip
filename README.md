@@ -1,4 +1,4 @@
-# Marketplace Flip Scanner
+﻿# Marketplace Flip Scanner
 
 Streamlit app that scans Craigslist listings for underpriced items, estimates resale value using recent comparable prices, and alerts you when expected profit meets your thresholds.
 
@@ -10,14 +10,28 @@ Streamlit app that scans Craigslist listings for underpriced items, estimates re
 - Discord webhook alerts for new deals.
 - SQLite persistence for targets, listings, comps, evaluations, and alerts.
 - HTML fallback when eBay API credentials are not available.
-- Hierarchical category selection (Category → Subcategory → Sub-subcategory) with cached taxonomy.
-- Fail-open retries when a target returns zero results, plus a “Why no results?” debug panel.
+- Hierarchical category selection (Category -> Subcategory -> Sub-subcategory) with cached taxonomy.
+- Fail-open retries when a target returns zero results, plus a "Why no results?" debug panel.
+- Dashboard filters for minimum score and minimum profit.
+- Safer external-link handling (http/https only).
+- Deal intelligence: max buy at target profit, break-even buy, suggested offer price, and buy-edge.
+- Capital planner: pick a portfolio of actionable flips within your bankroll budget.
 
 ## Quick start
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+## Beginner quick win
+1. Open **Manage Targets** and add 3 to 5 products you understand well.
+2. Run one scan: `python scanner/run_scan.py`
+3. In **Dashboard**, set:
+   - `Minimum confidence`: `0.50`
+   - `Decision`: `deal`
+   - `Target profit per item`: `20` to `30` GBP
+4. Only message sellers whose listing price is below **Max Buy @ Target**.
+5. Use **Capital Plan** to avoid overspending your budget.
 
 ## Marketplace mode
 The app defaults to Craigslist HTML search to reduce anti-bot blocking. eBay API mode remains optional if you explicitly set `marketplace="ebay"` in runtime settings.
@@ -31,19 +45,27 @@ export DISCORD_WEBHOOK_URL=your_discord_webhook
 - AirPods Pro 2
 - Sony WH-1000XM5
 
-## Notes on rate limiting & caching
+## Notes on rate limiting and caching
 - Requests are rate limited with randomized delays (HTML mode) and exponential backoff on 429/5xx.
-- Total request cap per scan defaults to 40 and is configurable in Settings.
+- Total request cap per scan defaults to 60 and is configurable in settings.
 - Responses are cached in a local SQLite HTTP cache (5 minute TTL) to avoid re-fetching.
 
-## Zero-results diagnostics & retries
+## Zero-results diagnostics and retries
 - Each target records the request mode, query, filters, status code, and raw vs filtered counts.
 - When a target yields zero listings, the app retries by removing category, condition, price filters,
   and finally broadening keywords (removing quotes, capacity, and color terms).
-- The Dashboard includes a “Why no results?” panel that shows retry steps, rejection reasons,
+- The dashboard includes a "Why no results?" panel that shows retry steps, rejection reasons,
   and the last request URL to help troubleshoot filters.
 - When eBay serves a human verification challenge, debug artifacts (HTML, metadata, and screenshots when available)
   are written to `.cache/ebayflip_debug/` and surfaced in the UI.
+
+## Standalone server API filters
+`serve.py` supports query filtering on `GET /api/latest`:
+- `decision`: `deal|maybe|ignore|All`
+- `q`: title search text
+- `min_score`: minimum deal score
+- `min_profit`: minimum expected profit
+- `target_profit`: target profit used for max-buy calculations
 
 ## Category selection
 - The Targets form uses a dropdown-driven category tree (up to 3 levels deep).
@@ -59,6 +81,8 @@ export DISCORD_WEBHOOK_URL=your_discord_webhook
 ## Project structure
 ```
 app.py
+serve.py
+scanner/run_scan.py
 requirements.txt
 README.md
 ebayflip/
@@ -72,6 +96,8 @@ ebayflip/
   scheduler.py
   models.py
   taxonomy.py
+  dashboard_data.py
+  safety.py
   data/
     ebay_categories_fallback.json
 ```

@@ -115,7 +115,7 @@ def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
             zero_result_debug.append(
                 TargetSearchDebug(
                     target_name=target.name,
-                    target_query=target.query,
+                    target_query=normalized_target.query,
                     retry_report=search_result.retry_report,
                     diagnostics=search_result.diagnostics,
                     rejection_counts=search_result.rejection_counts,
