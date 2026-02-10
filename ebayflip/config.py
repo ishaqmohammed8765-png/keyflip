@@ -23,6 +23,10 @@ DEFAULT_GBP_EXCHANGE_RATE = 0.78
 DEFAULT_PAYMENT_FEE_PCT = 0.029
 DEFAULT_PAYMENT_FEE_FIXED_GBP = 0.30
 DEFAULT_RETURN_RESERVE_PCT = 0.03
+DEFAULT_VAT_RESERVE_PCT = 0.0
+DEFAULT_PACKAGING_GBP = 0.0
+DEFAULT_LABOUR_GBP = 0.0
+DEFAULT_EXTRA_FIXED_COSTS_GBP = 0.0
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -123,6 +127,10 @@ class RunSettings:
     payment_fee_pct: float = DEFAULT_PAYMENT_FEE_PCT
     payment_fee_fixed_gbp: float = DEFAULT_PAYMENT_FEE_FIXED_GBP
     return_reserve_pct: float = DEFAULT_RETURN_RESERVE_PCT
+    vat_reserve_pct: float = DEFAULT_VAT_RESERVE_PCT
+    packaging_gbp: float = DEFAULT_PACKAGING_GBP
+    labour_gbp: float = DEFAULT_LABOUR_GBP
+    extra_fixed_costs_gbp: float = DEFAULT_EXTRA_FIXED_COSTS_GBP
     auto_popular_targets: bool = True
     popular_targets_per_category: int = 3
     auto_smart_targets: bool = True
@@ -177,6 +185,12 @@ class RunSettings:
             ),
             "return_reserve_pct": float(
                 os.getenv("RETURN_RESERVE_PCT", str(DEFAULT_RETURN_RESERVE_PCT))
+            ),
+            "vat_reserve_pct": float(os.getenv("VAT_RESERVE_PCT", str(DEFAULT_VAT_RESERVE_PCT))),
+            "packaging_gbp": float(os.getenv("PACKAGING_GBP", str(DEFAULT_PACKAGING_GBP))),
+            "labour_gbp": float(os.getenv("LABOUR_GBP", str(DEFAULT_LABOUR_GBP))),
+            "extra_fixed_costs_gbp": float(
+                os.getenv("EXTRA_FIXED_COSTS_GBP", str(DEFAULT_EXTRA_FIXED_COSTS_GBP))
             ),
             "auto_popular_targets": _env_bool("AUTO_POPULAR_TARGETS", True),
             "popular_targets_per_category": max(

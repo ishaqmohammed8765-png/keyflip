@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ebayflip.config import RunSettings
+from ebayflip.costs import other_fees_gbp_for_resale
 
 
 def max_total_buy_for_target_profit(
@@ -11,8 +12,10 @@ def max_total_buy_for_target_profit(
     target_profit_gbp: float,
     settings: RunSettings,
 ) -> float:
+    other_fees = other_fees_gbp_for_resale(resale_est_gbp, settings)
     numerator = (
         resale_est_gbp * (1 - settings.ebay_fee_pct)
+        - other_fees
         - settings.shipping_out_gbp
         - settings.buffer_fixed_gbp
         - target_profit_gbp

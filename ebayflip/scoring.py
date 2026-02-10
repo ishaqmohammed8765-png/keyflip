@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 from ebayflip.config import RunSettings
+from ebayflip.costs import other_fees_gbp_for_resale
 from ebayflip.models import CompStats, Evaluation, Listing
 
 
@@ -38,10 +39,13 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
     buffer_gbp = settings.buffer_fixed_gbp + (settings.buffer_pct_of_buy * listing.total_buy_gbp)
     payment_fee_gbp = (resale_est * settings.payment_fee_pct) + settings.payment_fee_fixed_gbp
     return_reserve_gbp = resale_est * settings.return_reserve_pct
-    other_fees_gbp = payment_fee_gbp + return_reserve_gbp
+    vat_reserve_gbp = resale_est * settings.vat_reserve_pct
+    fixed_overheads_gbp = settings.packaging_gbp + settings.labour_gbp + settings.extra_fixed_costs_gbp
+    other_fees_gbp = other_fees_gbp_for_resale(resale_est, settings)
     reasons.append(
         "Included fees: payment processing GBP "
-        f"{payment_fee_gbp:.2f} and return reserve GBP {return_reserve_gbp:.2f}."
+        f"{payment_fee_gbp:.2f}, return reserve GBP {return_reserve_gbp:.2f}, VAT reserve GBP {vat_reserve_gbp:.2f}, "
+        f"and fixed overheads GBP {fixed_overheads_gbp:.2f}."
     )
     if _shipping_missing(listing):
         buffer_gbp += settings.missing_shipping_penalty_gbp

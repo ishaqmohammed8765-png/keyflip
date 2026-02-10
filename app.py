@@ -17,6 +17,10 @@ DB_PATH = ROOT_DIR / "ebayflip.sqlite"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from ebayflip.env import load_dotenv
+
+load_dotenv(ROOT_DIR / ".env")
+
 from ebayflip.dashboard_data import (
     filter_items,
     history_summary_rows,
@@ -30,6 +34,11 @@ from ebayflip.dashboard_data import (
 from ebayflip.deal_insights import enrich_items, plan_portfolio
 from ebayflip.config import RunSettings
 from ebayflip.safety import safe_external_url
+from ebayflip.scan_runner import (
+    scan_run_status,
+    start_background_scan_if_needed,
+    trigger_background_scan,
+)
 
 st.set_page_config(page_title="KeyFlip - Flip Scanner", layout="wide")
 
@@ -112,9 +121,9 @@ def _render_app_intro() -> None:
     st.caption("Automated arbitrage scanner - compare buy-side deals against resale comps.")
     with st.expander("New to flipping? Start here", expanded=False):
         st.markdown(
-            "1. Run `python scanner/run_scan.py --watch` for autopilot scanning.\n"
+            "1. In **Dashboard**, click **Run scan now** (the dashboard can auto-scan when data is missing/stale).\n"
             "2. The scanner auto-adds popular-category targets and smart new targets from profitable hits.\n"
-            "3. In **Dashboard**, keep only `deal` and set a minimum confidence around `0.50`.\n"
+            "3. Start with **Minimum confidence** around `0.50` and filter decision to `deal` or `maybe`.\n"
             "4. Use **Max Buy** and **Suggested Offer** to avoid overpaying.\n"
             "5. Check **Capital Plan** to control bankroll and position sizing."
         )
@@ -160,7 +169,13 @@ def _render_zero_result_diagnostics(items: list[dict[str, Any]], scan_summary: d
     zero_result_targets = scan_summary.get("zero_result_targets") or []
     if not zero_result_targets:
         return
+    blocked_count = sum(1 for zrt in zero_result_targets if zrt.get("blocked_reason"))
     with st.expander(f"Targets with no results ({len(zero_result_targets)})", expanded=not items):
+        if blocked_count:
+            st.warning(
+                "Some targets look blocked by anti-bot checks. If this persists, try waiting, enabling Playwright "
+                "(`EBAY_USE_PLAYWRIGHT=1`), or switching buy marketplace (`MARKETPLACE=mercari`)."
+            )
         for zrt in zero_result_targets:
             st.markdown(f"**{zrt.get('target_name', 'Unknown')}** (query: `{zrt.get('target_query', '-')}`)")
             if zrt.get("blocked_reason"):
@@ -181,6 +196,7 @@ def _render_zero_result_diagnostics(items: list[dict[str, Any]], scan_summary: d
 
 def _render_strategy_controls() -> dict[str, Any]:
     target_profit_default = float(os.getenv("FLIP_TARGET_PROFIT", "20"))
+    run_defaults = RunSettings.from_env()
     strategy_col1, strategy_col2, strategy_col3, strategy_col4 = st.columns([1.2, 1, 1, 1])
     with strategy_col1:
         target_profit = st.number_input(
@@ -207,6 +223,36 @@ def _render_strategy_controls() -> dict[str, Any]:
         )
     with strategy_col4:
         max_cards = st.slider("Results to show", min_value=10, max_value=100, value=30, step=5)
+    with st.expander("Deal thresholds (labeling)", expanded=False):
+        st.caption(
+            "These thresholds control how rows are labelled `deal/maybe/ignore` in the dashboard. "
+            "Lower them to see more candidates; raise them to be stricter."
+        )
+        th_col1, th_col2, th_col3 = st.columns(3)
+        with th_col1:
+            deal_min_profit = st.number_input(
+                "Deal min profit (GBP)",
+                min_value=0.0,
+                value=float(run_defaults.min_profit_gbp),
+                step=1.0,
+            )
+        with th_col2:
+            deal_min_roi = st.number_input(
+                "Deal min ROI",
+                min_value=0.0,
+                max_value=5.0,
+                value=float(run_defaults.min_roi),
+                step=0.05,
+                help="ROI is expressed as a ratio (0.15 = 15%).",
+            )
+        with th_col3:
+            deal_min_confidence = st.number_input(
+                "Deal min confidence",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(run_defaults.min_confidence),
+                step=0.05,
+            )
     planner_col1, planner_col2 = st.columns([1, 1])
     with planner_col1:
         bankroll_gbp = st.number_input(
@@ -231,6 +277,9 @@ def _render_strategy_controls() -> dict[str, Any]:
         "max_cards": max_cards,
         "bankroll_gbp": bankroll_gbp,
         "max_planned_picks": max_planned_picks,
+        "deal_min_profit": deal_min_profit,
+        "deal_min_roi": deal_min_roi,
+        "deal_min_confidence": deal_min_confidence,
     }
 
 
@@ -448,10 +497,28 @@ tab_dashboard, tab_history, tab_targets = st.tabs(["Dashboard", "Scan History", 
 # ======== DASHBOARD TAB ========
 with tab_dashboard:
     payload = load_latest_scan(LATEST_SCAN_PATH)
+    auto_started = start_background_scan_if_needed(payload)
+    status = scan_run_status()
+    scan_col1, scan_col2, scan_col3 = st.columns([1.2, 1, 2.2])
+    with scan_col1:
+        if st.button("Run scan now", type="primary"):
+            started = trigger_background_scan(force=True)
+            if started:
+                st.success("Scan started in the background. This page will update on the next refresh.")
+            else:
+                st.warning("Scan already running (or recently ran). Try again in a minute.")
+    with scan_col2:
+        st.caption(f"Scanner: **{status.get('status', 'idle')}**")
+    with scan_col3:
+        if status.get("message"):
+            st.caption(
+                f"{status.get('message')} | started: {status.get('started_at') or '-'} | ended: {status.get('ended_at') or '-'}"
+            )
     if payload is None:
-        st.info(
-            "No scan data found yet. Run `python scanner/run_scan.py` to populate this dashboard."
-        )
+        if status.get("status") == "running" or auto_started:
+            st.info("No scan data yet. Auto-scan is running; wait for refresh (usually under a minute).")
+        else:
+            st.info("No scan data yet. Click **Run scan now** to populate the dashboard.")
     else:
         run_settings = RunSettings.from_env()
         controls = _render_strategy_controls()
@@ -461,6 +528,24 @@ with tab_dashboard:
             run_settings,
             target_profit_gbp=controls["target_profit"],
         )
+        # Re-label items in the UI based on the thresholds the user picked above.
+        for item in items:
+            item["decision_model"] = item.get("decision")
+            profit = float(item.get("expected_profit_gbp") or 0.0)
+            roi = float(item.get("roi") or 0.0)
+            confidence = float(item.get("confidence") or 0.0)
+            if (
+                profit >= float(controls["deal_min_profit"])
+                and roi >= float(controls["deal_min_roi"])
+                and confidence >= float(controls["deal_min_confidence"])
+            ):
+                item["decision"] = "deal"
+            elif profit >= 0 and roi >= 0.10 and confidence >= 0.35:
+                item["decision"] = "maybe"
+            else:
+                item["decision"] = "ignore"
+            edge = float(item.get("buy_edge_gbp") or 0.0)
+            item["is_actionable"] = edge > 0 and profit > 0 and confidence >= float(controls["deal_min_confidence"])
         scan_summary = payload.get("scan_summary") or {}
         summary = summarize_items(items)
         actionable_count = sum(1 for item in items if item.get("is_actionable"))

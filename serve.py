@@ -40,6 +40,10 @@ app = Flask(__name__)
 _SCAN_LOCK = threading.Lock()
 _LAST_SCAN_TRIGGER_MONO = 0.0
 
+from ebayflip.env import load_dotenv
+
+load_dotenv(ROOT_DIR / ".env")
+
 from ebayflip.dashboard_data import (
     filter_items,
     items_to_csv_bytes,

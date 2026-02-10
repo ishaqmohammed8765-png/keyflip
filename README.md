@@ -32,15 +32,22 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+On first launch, the dashboard will auto-run a one-shot scan if there is no recent scan data.
+You can also click **Run scan now** in the dashboard at any time.
+
 ## Beginner quick win
-1. Start automatic scans: `python scanner/run_scan.py --watch`
+1. Run an initial scan from the dashboard (**Run scan now**) or from CLI: `python scanner/run_scan.py`
 2. Let scanner auto-manage targets from defaults, popular categories, and smart discovery.
 3. In **Dashboard**, set:
    - `Minimum confidence`: `0.50`
-   - `Decision`: `deal`
+   - `Decision`: `deal` (or `maybe` while tuning)
    - `Target profit per item`: `20` to `30` GBP
 4. Only message sellers whose listing price is below **Max Buy @ Target**.
 5. Use **Capital Plan** to avoid overspending your budget.
+
+## .env support (optional)
+If you don't want to export lots of environment variables, create a `.env` file in the project root.
+The app, scanner, and standalone server will load it automatically (without overwriting existing env vars).
 
 ## Marketplace mode
 The app defaults to buying from eBay and selling on eBay comps (UK-friendly defaults). You can configure both sides independently.
@@ -50,7 +57,7 @@ The app defaults to buying from eBay and selling on eBay comps (UK-friendly defa
 export MARKETPLACE=ebay
 #
 # If eBay blocks (splashui/captcha), auto-fallback can switch buy-side marketplace.
-export BUY_BLOCKED_FALLBACK_ENABLED=1
+export BUY_BLOCKED_FALLBACK_ENABLED=1  # default: on
 export BUY_BLOCKED_FALLBACK_MARKETPLACE=mercari,craigslist,poshmark
 
 # Sell-side source(s) for comps (default: ebay outside US locales;
@@ -129,6 +136,8 @@ Standalone server scan trigger (when Streamlit is down):
 - HTML fallback parsing is best-effort and can miss some data.
 - Currency conversion uses a configurable fixed rate for non-GBP listings.
 - Alerts only fire for new DEAL decisions.
+- Profit estimates depend on your cost assumptions. You can model additional overheads via:
+  `VAT_RESERVE_PCT`, `PACKAGING_GBP`, `LABOUR_GBP`, `EXTRA_FIXED_COSTS_GBP` (all default to 0).
 
 ## Project structure
 ```
