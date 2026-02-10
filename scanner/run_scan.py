@@ -202,7 +202,10 @@ def _write_snapshot(snapshot: dict[str, Any], history_max_lines: int) -> None:
 
 def _zero_result_summary(summary: Any) -> list[dict[str, Any]]:
     zero_result_info = []
+    drop_blocked = os.getenv("DROP_BLOCKED_TARGETS", "1").strip().lower() in {"1", "true", "yes", "y", "on"}
     for debug in summary.zero_result_debug:
+        if drop_blocked and debug.blocked_reason:
+            continue
         info: dict[str, Any] = {
             "target_name": debug.target_name,
             "target_query": debug.target_query,

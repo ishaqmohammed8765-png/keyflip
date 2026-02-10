@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+import os
 
 DECISION_ORDER = {"deal": 0, "maybe": 1, "ignore": 2}
 CSV_FIELDS = [
@@ -36,9 +37,19 @@ def load_latest_scan(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+    if os.getenv("DROP_BLOCKED_TARGETS", "1").strip().lower() in {"1", "true", "yes", "y", "on"}:
+        summary = payload.get("scan_summary")
+        if isinstance(summary, dict):
+            zero_targets = summary.get("zero_result_targets")
+            if isinstance(zero_targets, list):
+                summary["zero_result_targets"] = [
+                    entry for entry in zero_targets
+                    if not (isinstance(entry, dict) and entry.get("blocked_reason"))
+                ]
+    return payload
 
 
 def load_history(path: Path) -> list[dict[str, Any]]:

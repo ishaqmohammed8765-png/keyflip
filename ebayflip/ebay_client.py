@@ -206,6 +206,7 @@ class EbayClient:
         )
         self.search_url = _search_url(self.settings)
         self._apply_session_headers()
+        self._purge_blocked_cache_on_start()
 
     def attach_request_budget(self, request_budget: RequestBudget) -> None:
         self.request_budget = request_budget
@@ -302,6 +303,29 @@ class EbayClient:
         self.session = requests.Session()
         self._apply_session_headers()
 
+    def _purge_blocked_cache_on_start(self) -> None:
+        if os.getenv("CACHE_PURGE_BLOCKED_ON_START", "1").strip().lower() not in {"1", "true", "yes", "y", "on"}:
+            return
+        try:
+            removed = self.cache.purge_blocked_responses(
+                ["splashui/challenge", "pardon our interruption", "verify you are human", "captcha"]
+            )
+            if removed > 0:
+                LOGGER.info("Purged %s blocked response(s) from HTTP cache.", removed)
+        except Exception:
+            LOGGER.debug("Failed to purge blocked HTTP cache responses.", exc_info=True)
+
+    def _cache_key(self, url: str, params: Optional[dict[str, Any]] = None) -> str:
+        if params:
+            return f"{url}?{urlencode(params, doseq=True)}"
+        return url
+
+    def _evict_cache_entry(self, url: str, params: Optional[dict[str, Any]] = None) -> None:
+        try:
+            self.cache.delete(self._cache_key(url, params))
+        except Exception:
+            LOGGER.debug("Failed to evict cache key for blocked response.", exc_info=True)
+
     def _request(
         self,
         url: str,
@@ -312,9 +336,7 @@ class EbayClient:
         store_cache: bool = True,
         max_attempts: int = 3,
     ) -> tuple[requests.Response, bool]:
-        cache_key = url
-        if params:
-            cache_key = f"{url}?{urlencode(params, doseq=True)}"
+        cache_key = self._cache_key(url, params)
         if use_cache:
             cached = self.cache.get(cache_key)
             if cached:
@@ -596,6 +618,7 @@ class EbayClient:
         if not blocked_detail and failure_mode in BOT_FAILURE_MODES:
             blocked_detail = "captcha" if failure_mode == "captcha" else "challenge"
         if blocked_detail:
+            self._evict_cache_entry(self.search_url, params)
             blocked_artifacts = [
                 debug_path,
                 _save_debug_metadata(
@@ -674,6 +697,7 @@ class EbayClient:
             LOGGER.info("Attempting Playwright fallback for eBay search. reasons=%s", fallback_reasons)
             playwright_result = fetch_with_playwright(response.url, self.session.headers)
             if playwright_result.blocked:
+                self._evict_cache_entry(self.search_url, params)
                 diagnostics.append(
                     self._build_log(
                         mode="playwright",
@@ -742,6 +766,7 @@ class EbayClient:
         else:
             blocked_detail = None
         if blocked_detail:
+            self._evict_cache_entry(self.search_url, params)
             blocked_artifacts = [
                 _save_debug_html(final_html, prefix="ebay_zero_prices"),
                 _save_debug_metadata(

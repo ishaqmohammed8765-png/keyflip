@@ -83,3 +83,15 @@ class CacheStore:
     def delete(self, key: str) -> None:
         with sqlite3.connect(self.path) as conn:
             conn.execute("DELETE FROM http_cache WHERE cache_key = ?", (key,))
+
+    def purge_blocked_responses(self, tokens: list[str]) -> int:
+        if not tokens:
+            return 0
+        normalized = [token.strip().lower() for token in tokens if token and token.strip()]
+        if not normalized:
+            return 0
+        where_clause = " OR ".join("LOWER(response_text) LIKE ?" for _ in normalized)
+        params = tuple(f"%{token}%" for token in normalized)
+        with sqlite3.connect(self.path) as conn:
+            cursor = conn.execute(f"DELETE FROM http_cache WHERE {where_clause}", params)
+            return int(cursor.rowcount or 0)
