@@ -65,3 +65,10 @@ def test_search_active_listings_falls_back_to_mercari_when_ebay_blocked(monkeypa
     assert len(result.listings) == 1
     assert "fallback: buy marketplace switched from ebay to mercari due to anti-bot challenge" in result.retry_report
     assert result.listings[0].raw_json.get("source") == "mercari_html"
+
+
+def test_blocked_buy_fallback_defaults_to_craigslist_for_uk_locale(monkeypatch) -> None:
+    monkeypatch.delenv("BUY_BLOCKED_FALLBACK_MARKETPLACE", raising=False)
+    monkeypatch.setenv("LOCALE", "en_GB")
+    client = EbayClient(RunSettings(marketplace="ebay"))
+    assert client._blocked_buy_fallback_marketplaces() == ["craigslist"]

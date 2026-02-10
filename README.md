@@ -43,19 +43,20 @@ streamlit run app.py
 5. Use **Capital Plan** to avoid overspending your budget.
 
 ## Marketplace mode
-The app defaults to buying from Craigslist and selling on eBay comps. You can configure both sides independently.
+The app defaults to buying from eBay and selling on eBay comps (UK-friendly defaults). You can configure both sides independently.
 
 ```bash
 # Buy-side source for active deals
 export MARKETPLACE=ebay
 #
-# If eBay blocks (splashui/captcha), auto-fallback can switch buy-side to Mercari.
+# If eBay blocks (splashui/captcha), auto-fallback can switch buy-side marketplace.
 export BUY_BLOCKED_FALLBACK_ENABLED=1
 export BUY_BLOCKED_FALLBACK_MARKETPLACE=mercari,craigslist,poshmark
 
-# Sell-side source(s) for comps (default: ebay,mercari,poshmark)
+# Sell-side source(s) for comps (default: ebay outside US locales;
+# default: ebay,mercari,poshmark for en_US/US locales)
 # Examples: ebay | mercari | poshmark | ebay,mercari,poshmark
-export SELL_MARKETPLACE=ebay,mercari,poshmark
+export SELL_MARKETPLACE=ebay
 
 # Delivery-only mode (default is on)
 export DELIVERY_ONLY=1

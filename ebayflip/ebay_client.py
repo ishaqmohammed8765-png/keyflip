@@ -93,6 +93,24 @@ CHALLENGE_SELECTORS = [
 ]
 
 
+def _is_us_locale() -> bool:
+    locale = os.getenv("LOCALE", "").strip().lower()
+    country = os.getenv("COUNTRY", "").strip().lower()
+    return locale.startswith("en_us") or country in {"us", "usa", "united states"}
+
+
+def _default_buy_blocked_fallback_marketplaces() -> tuple[str, ...]:
+    if _is_us_locale():
+        return ("craigslist", "mercari")
+    return ("craigslist",)
+
+
+def _default_comp_active_fallback_marketplaces() -> tuple[str, ...]:
+    if _is_us_locale():
+        return ("craigslist", "mercari", "poshmark")
+    return ("craigslist",)
+
+
 class RequestLimitError(RuntimeError):
     pass
 
@@ -241,7 +259,10 @@ class EbayClient:
         }
 
     def _blocked_buy_fallback_marketplaces(self) -> list[str]:
-        configured = os.getenv("BUY_BLOCKED_FALLBACK_MARKETPLACE", "craigslist,mercari")
+        configured = os.getenv(
+            "BUY_BLOCKED_FALLBACK_MARKETPLACE",
+            ",".join(_default_buy_blocked_fallback_marketplaces()),
+        )
         parts = [part.strip().lower() for part in configured.split(",") if part.strip()]
         allowed = {"craigslist", "mercari", "poshmark"}
         ordered: list[str] = []
@@ -252,7 +273,7 @@ class EbayClient:
                 continue
             ordered.append(part)
         # Always keep backup fallbacks available even if env is set to a single blocked source.
-        for backup in ("craigslist", "mercari"):
+        for backup in _default_buy_blocked_fallback_marketplaces():
             if backup not in ordered:
                 ordered.append(backup)
         return ordered
@@ -1025,7 +1046,10 @@ class EbayClient:
         return comps[: self.settings.comps_limit]
 
     def _active_comp_fallback_marketplaces(self, sell_sources: list[str]) -> list[str]:
-        configured = os.getenv("COMP_ACTIVE_FALLBACK_MARKETPLACE", "craigslist,mercari,poshmark")
+        configured = os.getenv(
+            "COMP_ACTIVE_FALLBACK_MARKETPLACE",
+            ",".join(_default_comp_active_fallback_marketplaces()),
+        )
         parts = [part.strip().lower() for part in configured.split(",") if part.strip()]
         allowed = {"craigslist", "mercari", "poshmark"}
         ordered: list[str] = []

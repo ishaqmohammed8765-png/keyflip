@@ -297,7 +297,7 @@ def dashboard():
     items: list[dict[str, Any]] = []
     last_scan = "-"
     zero_targets = []
-    market_label = "Buy: ebay -> Sell comps: ebay,mercari,poshmark"
+    market_label = "Buy: ebay -> Sell comps: ebay"
     summary_stats = {"deal_count": 0, "maybe_count": 0, "total_profit": 0.0, "total_items": 0}
 
     if data:

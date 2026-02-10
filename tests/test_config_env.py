@@ -31,6 +31,20 @@ def test_default_ebay_site_domain_uses_locale(monkeypatch) -> None:
     assert settings.ebay_site_domain == "www.ebay.com"
 
 
+def test_default_craigslist_site_uses_uk_when_not_us(monkeypatch) -> None:
+    monkeypatch.delenv("CRAIGSLIST_SITE", raising=False)
+    monkeypatch.setenv("LOCALE", "en_GB")
+    settings = RunSettings.from_env(marketplace="craigslist")
+    assert settings.craigslist_site == "london"
+
+
+def test_default_sell_marketplace_uses_uk_single_source(monkeypatch) -> None:
+    monkeypatch.delenv("SELL_MARKETPLACE", raising=False)
+    monkeypatch.setenv("LOCALE", "en_GB")
+    settings = RunSettings.from_env()
+    assert settings.sell_marketplace == "ebay"
+
+
 def test_ebay_site_domain_override(monkeypatch) -> None:
     monkeypatch.setenv("EBAY_SITE_DOMAIN", "www.ebay.co.uk")
     settings = RunSettings.from_env()

@@ -40,7 +40,7 @@ def _default_craigslist_site() -> str:
     country = os.getenv("COUNTRY", "").lower()
     if locale.startswith("en_us") or country in {"us", "usa", "united states"}:
         return "sfbay"
-    return "sfbay"
+    return "london"
 
 
 def _default_ebay_site_domain() -> str:
@@ -62,6 +62,17 @@ def _default_currency_whitelist() -> tuple[str, ...]:
     return values or ("GBP", "USD")
 
 
+def _default_sell_marketplace() -> str:
+    configured = os.getenv("SELL_MARKETPLACE")
+    if configured and configured.strip():
+        return configured.strip().lower()
+    locale = os.getenv("LOCALE", "").lower()
+    country = os.getenv("COUNTRY", "").lower()
+    if locale.startswith("en_us") or country in {"us", "usa", "united states"}:
+        return "ebay,mercari,poshmark"
+    return "ebay"
+
+
 def _sanitize_sell_marketplace(raw: str) -> str:
     allowed = {"ebay", "mercari", "poshmark"}
     values: list[str] = []
@@ -78,7 +89,7 @@ def _sanitize_sell_marketplace(raw: str) -> str:
 @dataclass(slots=True)
 class RunSettings:
     marketplace: str = "ebay"
-    sell_marketplace: str = "ebay,mercari,poshmark"
+    sell_marketplace: str = field(default_factory=_default_sell_marketplace)
     ebay_site_domain: str = field(default_factory=_default_ebay_site_domain)
     craigslist_site: str = field(default_factory=_default_craigslist_site)
     min_profit_gbp: float = MIN_PROFIT_GBP
@@ -122,10 +133,7 @@ class RunSettings:
     @classmethod
     def from_env(cls, **overrides: object) -> "RunSettings":
         marketplace = os.getenv("MARKETPLACE", "ebay").strip().lower() or "ebay"
-        sell_marketplace_raw = (
-            os.getenv("SELL_MARKETPLACE", "ebay,mercari,poshmark").strip().lower()
-            or "ebay,mercari,poshmark"
-        )
+        sell_marketplace_raw = _default_sell_marketplace()
         sell_marketplace = _sanitize_sell_marketplace(sell_marketplace_raw)
         include_buy_now_raw = os.getenv("INCLUDE_EBAY_BUY_NOW")
         if include_buy_now_raw is None:

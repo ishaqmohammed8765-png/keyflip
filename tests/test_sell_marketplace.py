@@ -71,3 +71,10 @@ def test_search_sold_comps_falls_back_to_active_when_no_sold(monkeypatch) -> Non
     comps = client.search_sold_comps("airpods pro 2")
     assert len(comps) == 1
     assert comps[0].price_gbp == 125.0
+
+
+def test_active_comp_fallback_defaults_to_craigslist_for_uk_locale(monkeypatch) -> None:
+    monkeypatch.delenv("COMP_ACTIVE_FALLBACK_MARKETPLACE", raising=False)
+    monkeypatch.setenv("LOCALE", "en_GB")
+    client = EbayClient(RunSettings(marketplace="ebay", sell_marketplace="ebay"))
+    assert client._active_comp_fallback_marketplaces(["ebay"]) == ["craigslist"]
