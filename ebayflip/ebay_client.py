@@ -101,8 +101,8 @@ def _is_us_locale() -> bool:
 
 def _default_buy_blocked_fallback_marketplaces() -> tuple[str, ...]:
     if _is_us_locale():
-        return ("craigslist", "mercari")
-    return ("craigslist",)
+        return ("mercari", "craigslist", "poshmark")
+    return ("craigslist", "mercari")
 
 
 def _default_comp_active_fallback_marketplaces() -> tuple[str, ...]:
@@ -296,7 +296,16 @@ class EbayClient:
         fallback_last_url = blocked_result.last_request_url
 
         for fallback_marketplace in self._blocked_buy_fallback_marketplaces():
-            fallback_settings = dataclasses.replace(self.settings, marketplace=fallback_marketplace)
+            fallback_delivery_only = self.settings.delivery_only
+            if fallback_marketplace == "craigslist" and self.settings.delivery_only:
+                # Craigslist listings frequently omit explicit delivery markers;
+                # keep fallback productive by not enforcing delivery-only here.
+                fallback_delivery_only = False
+            fallback_settings = dataclasses.replace(
+                self.settings,
+                marketplace=fallback_marketplace,
+                delivery_only=fallback_delivery_only,
+            )
             fallback_client = EbayClient(
                 fallback_settings,
                 app_id=self.app_id,
