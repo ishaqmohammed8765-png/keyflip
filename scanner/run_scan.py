@@ -148,7 +148,7 @@ def _source_from_row(row: dict[str, Any], *, fallback: str) -> str:
 
 
 def _serialize_items(rows: list[dict[str, Any]], *, settings: RunSettings) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
+    items_by_key: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in rows:
         reasons = row.get("reasons_json")
         parsed_reasons: list[str] = []
@@ -160,29 +160,46 @@ def _serialize_items(rows: list[dict[str, Any]], *, settings: RunSettings) -> li
             except json.JSONDecodeError:
                 parsed_reasons = []
 
-        items.append(
-            {
-                "listing_id": row.get("listing_id"),
-                "title": row.get("title"),
-                "url": row.get("url"),
-                "total_buy_gbp": row.get("total_buy_gbp"),
-                "resale_est_gbp": row.get("resale_est_gbp"),
-                "expected_profit_gbp": row.get("expected_profit_gbp"),
-                "roi": row.get("roi"),
-                "confidence": row.get("confidence"),
-                "deal_score": row.get("deal_score"),
-                "decision": row.get("decision"),
-                "reasons": parsed_reasons,
-                "evaluated_at": row.get("evaluated_at"),
-                "image_url": row.get("image_url"),
-                "location": row.get("location"),
-                "listing_type": row.get("listing_type"),
-                "source": _source_from_row(row, fallback=settings.marketplace),
-                "buy_marketplace": settings.marketplace,
-                "sell_marketplace": settings.sell_marketplace,
-            }
+        item = {
+            "listing_id": row.get("listing_id"),
+            "title": row.get("title"),
+            "url": row.get("url"),
+            "total_buy_gbp": row.get("total_buy_gbp"),
+            "resale_est_gbp": row.get("resale_est_gbp"),
+            "expected_profit_gbp": row.get("expected_profit_gbp"),
+            "roi": row.get("roi"),
+            "confidence": row.get("confidence"),
+            "deal_score": row.get("deal_score"),
+            "decision": row.get("decision"),
+            "reasons": parsed_reasons,
+            "evaluated_at": row.get("evaluated_at"),
+            "image_url": row.get("image_url"),
+            "location": row.get("location"),
+            "listing_type": row.get("listing_type"),
+            "source": _source_from_row(row, fallback=settings.marketplace),
+            "buy_marketplace": settings.marketplace,
+            "sell_marketplace": settings.sell_marketplace,
+        }
+        key = (
+            row.get("listing_id"),
+            row.get("url"),
+            row.get("title"),
+            row.get("location"),
+            row.get("listing_type"),
         )
-    return items
+        existing = items_by_key.get(key)
+        if existing is None:
+            items_by_key[key] = item
+            continue
+        existing_dt = _parse_iso(existing.get("evaluated_at"))
+        candidate_dt = _parse_iso(item.get("evaluated_at"))
+        if existing_dt is None or (candidate_dt is not None and candidate_dt > existing_dt):
+            items_by_key[key] = item
+    return sorted(
+        items_by_key.values(),
+        key=lambda item: _parse_iso(item.get("evaluated_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
 
 
 def _parse_iso(value: Any) -> datetime | None:

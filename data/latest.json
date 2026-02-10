@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-02-10T18:17:11.458709+00:00",
-  "count": 3,
+  "count": 1,
   "marketplaces": {
     "buy": "ebay",
     "sell": "ebay,mercari,poshmark"
@@ -35,54 +35,6 @@
         "Confidence score 0.55."
       ],
       "evaluated_at": "2026-02-10T18:17:05.981761+00:00",
-      "image_url": null,
-      "location": "Pac Heights / Marina",
-      "listing_type": "fixed",
-      "source": "craigslist_html",
-      "buy_marketplace": "ebay",
-      "sell_marketplace": "ebay,mercari,poshmark"
-    },
-    {
-      "listing_id": 27,
-      "title": "(Mint) iPhone 11 Pro - Factory Unlocked (Delivery in SF)",
-      "url": "https://sfbay.craigslist.org/sfc/mob/d/san-francisco-mint-iphone-11-pro/7910223797.html",
-      "total_buy_gbp": 182.95875,
-      "resale_est_gbp": 329.32575,
-      "expected_profit_gbp": 89.0653665,
-      "roi": 0.48680572260140603,
-      "confidence": 0.55,
-      "deal_score": 83.91144880405623,
-      "decision": "deal",
-      "reasons": [
-        "Median sold GBP 329.33 from 30 comps (p25 GBP 18.30, p75 GBP 395.19).",
-        "Wide comp spread reduced confidence.",
-        "Confidence score 0.55."
-      ],
-      "evaluated_at": "2026-02-10T18:17:04.658625+00:00",
-      "image_url": null,
-      "location": "Pac Heights / Marina",
-      "listing_type": "fixed",
-      "source": "craigslist_html",
-      "buy_marketplace": "ebay",
-      "sell_marketplace": "ebay,mercari,poshmark"
-    },
-    {
-      "listing_id": 27,
-      "title": "(Mint) iPhone 11 Pro - Factory Unlocked (Delivery in SF)",
-      "url": "https://sfbay.craigslist.org/sfc/mob/d/san-francisco-mint-iphone-11-pro/7910223797.html",
-      "total_buy_gbp": 182.95875,
-      "resale_est_gbp": 329.32575,
-      "expected_profit_gbp": 89.0653665,
-      "roi": 0.48680572260140603,
-      "confidence": 0.55,
-      "deal_score": 83.91144880405623,
-      "decision": "deal",
-      "reasons": [
-        "Median sold GBP 329.33 from 30 comps (p25 GBP 18.30, p75 GBP 395.19).",
-        "Wide comp spread reduced confidence.",
-        "Confidence score 0.55."
-      ],
-      "evaluated_at": "2026-02-10T18:16:48.985800+00:00",
       "image_url": null,
       "location": "Pac Heights / Marina",
       "listing_type": "fixed",

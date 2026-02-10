@@ -46,3 +46,38 @@ def test_filter_rows_since_keeps_current_cycle_rows() -> None:
     ]
     filtered = _filter_rows_since(rows, since=start)
     assert [row["listing_id"] for row in filtered] == [2, 3]
+
+
+def test_serialize_items_deduplicates_to_latest_evaluation() -> None:
+    rows = [
+        {
+            "listing_id": 27,
+            "title": "Phone",
+            "url": "https://example.test/item/27",
+            "deal_score": 20.0,
+            "decision": "maybe",
+            "evaluated_at": "2026-02-10T18:00:00+00:00",
+            "location": "SF",
+            "listing_type": "fixed",
+            "raw_json": "{}",
+        },
+        {
+            "listing_id": 27,
+            "title": "Phone",
+            "url": "https://example.test/item/27",
+            "deal_score": 35.0,
+            "decision": "deal",
+            "evaluated_at": "2026-02-10T18:00:03+00:00",
+            "location": "SF",
+            "listing_type": "fixed",
+            "raw_json": "{}",
+        },
+    ]
+    settings = RunSettings(marketplace="ebay", sell_marketplace="ebay")
+
+    items = _serialize_items(rows, settings=settings)
+
+    assert len(items) == 1
+    assert items[0]["decision"] == "deal"
+    assert items[0]["deal_score"] == 35.0
+    assert items[0]["evaluated_at"] == "2026-02-10T18:00:03+00:00"
