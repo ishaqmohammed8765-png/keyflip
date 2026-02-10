@@ -37,7 +37,7 @@ def _default_craigslist_site() -> str:
     country = os.getenv("COUNTRY", "").lower()
     if locale.startswith("en_us") or country in {"us", "usa", "united states"}:
         return "sfbay"
-    return "london"
+    return "sfbay"
 
 
 def _default_currency_whitelist() -> tuple[str, ...]:

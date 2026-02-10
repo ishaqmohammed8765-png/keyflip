@@ -51,7 +51,7 @@ export MARKETPLACE=ebay
 #
 # If eBay blocks (splashui/captcha), auto-fallback can switch buy-side to Mercari.
 export BUY_BLOCKED_FALLBACK_ENABLED=1
-export BUY_BLOCKED_FALLBACK_MARKETPLACE=mercari
+export BUY_BLOCKED_FALLBACK_MARKETPLACE=mercari,craigslist,poshmark
 
 # Sell-side source(s) for comps (default: ebay,mercari,poshmark)
 # Examples: ebay | mercari | poshmark | ebay,mercari,poshmark

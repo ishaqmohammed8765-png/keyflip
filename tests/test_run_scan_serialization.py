@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from ebayflip.config import RunSettings
-from scanner.run_scan import _serialize_items
+from scanner.run_scan import _filter_rows_since, _serialize_items
 
 
 def test_serialize_items_includes_source_and_marketplaces() -> None:
@@ -34,3 +35,14 @@ def test_serialize_items_includes_source_and_marketplaces() -> None:
     assert items[0]["source"] == "craigslist_html"
     assert items[0]["buy_marketplace"] == "ebay"
     assert items[0]["sell_marketplace"] == "ebay"
+
+
+def test_filter_rows_since_keeps_current_cycle_rows() -> None:
+    start = datetime(2026, 2, 10, 18, 0, 0, tzinfo=timezone.utc)
+    rows = [
+        {"evaluated_at": "2026-02-10T17:59:59+00:00", "listing_id": 1},
+        {"evaluated_at": "2026-02-10T18:00:00+00:00", "listing_id": 2},
+        {"evaluated_at": "2026-02-10T18:00:05+00:00", "listing_id": 3},
+    ]
+    filtered = _filter_rows_since(rows, since=start)
+    assert [row["listing_id"] for row in filtered] == [2, 3]

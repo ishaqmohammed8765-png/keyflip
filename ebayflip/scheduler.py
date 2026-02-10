@@ -4,6 +4,7 @@ import dataclasses
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
 from typing import Optional
 
 from ebayflip import get_logger
@@ -286,7 +287,15 @@ class ArbitrageScanner:
 
     def _comps_for_listing(self, listing_id: int, listing: Listing, target: Target, *, client: EbayClient) -> CompStats:
         comps = get_latest_comps(self.config.db_path, listing_id)
-        if comps is None or _comps_stale(comps.computed_at, self.config.run.comps_ttl_hours):
+        refresh_empty = os.getenv("REFRESH_EMPTY_COMPS", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        should_refresh_empty = bool(comps is not None and refresh_empty and comps.sold_count == 0)
+        if comps is None or should_refresh_empty or _comps_stale(comps.computed_at, self.config.run.comps_ttl_hours):
             comp_query = _comp_query_for_listing(listing, target)
             if self._client_cap_reached(client):
                 if comps is None:
@@ -359,9 +368,12 @@ def _normalize_target_query(target: Target) -> tuple[Target, Optional[str]]:
 
 
 def _comp_query_for_listing(listing: Listing, target: Target) -> str:
+    query = (target.query or "").strip()
+    if query:
+        return query
     if listing.title:
-        return listing.title.strip() or target.query
-    return target.query
+        return listing.title.strip() or "item"
+    return "item"
 
 
 def _listing_source(listing: Listing, *, fallback: str) -> str:

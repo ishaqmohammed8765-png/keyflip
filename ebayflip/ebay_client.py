@@ -238,8 +238,22 @@ class EbayClient:
             "on",
         }
 
-    def _blocked_buy_fallback_marketplace(self) -> str:
-        return os.getenv("BUY_BLOCKED_FALLBACK_MARKETPLACE", "mercari").strip().lower() or "mercari"
+    def _blocked_buy_fallback_marketplaces(self) -> list[str]:
+        configured = os.getenv("BUY_BLOCKED_FALLBACK_MARKETPLACE", "craigslist,mercari")
+        parts = [part.strip().lower() for part in configured.split(",") if part.strip()]
+        allowed = {"craigslist", "mercari", "poshmark"}
+        ordered: list[str] = []
+        for part in parts:
+            if part not in allowed:
+                continue
+            if part in ordered:
+                continue
+            ordered.append(part)
+        # Always keep backup fallbacks available even if env is set to a single blocked source.
+        for backup in ("craigslist", "mercari"):
+            if backup not in ordered:
+                ordered.append(backup)
+        return ordered
 
     def _search_active_with_blocked_fallback(
         self,
@@ -251,49 +265,62 @@ class EbayClient:
             return blocked_result
         if not self._buy_fallback_enabled():
             return blocked_result
-        fallback_marketplace = self._blocked_buy_fallback_marketplace()
-        if fallback_marketplace not in {"craigslist", "mercari", "poshmark"}:
-            LOGGER.warning("Unsupported buy fallback marketplace '%s'; returning blocked result.", fallback_marketplace)
-            return blocked_result
-        fallback_settings = dataclasses.replace(self.settings, marketplace=fallback_marketplace)
-        fallback_client = EbayClient(
-            fallback_settings,
-            app_id=self.app_id,
-            request_budget=self.request_budget,
-        )
-        LOGGER.warning(
-            "Buy-side fallback activated after eBay block. from=%s to=%s query=%s reason=%s",
-            self.settings.marketplace,
-            fallback_marketplace,
-            target.query,
-            blocked_result.blocked.reason if blocked_result.blocked else "blocked",
-        )
-        fallback_result = fallback_client._search_active_with_retry(target, mode="html")
-        self.request_count = self.request_budget.used
-        self.request_cap_reached = fallback_client.request_cap_reached or self.request_budget.reached()
-        if fallback_result.listings:
-            merged_retry_report = list(blocked_result.retry_report) + [
-                f"fallback: buy marketplace switched from ebay to {fallback_marketplace} due to anti-bot challenge"
-            ] + list(fallback_result.retry_report)
-            return SearchResult(
-                listings=fallback_result.listings,
-                retry_report=merged_retry_report,
-                diagnostics=list(blocked_result.diagnostics) + list(fallback_result.diagnostics),
-                rejection_counts=fallback_result.rejection_counts,
-                raw_count=fallback_result.raw_count,
-                filtered_count=fallback_result.filtered_count,
-                last_request_url=fallback_result.last_request_url,
-                status="ok",
-                blocked=None,
+        fallback_diagnostics = list(blocked_result.diagnostics)
+        fallback_retry = list(blocked_result.retry_report)
+        fallback_rejections = dict(blocked_result.rejection_counts)
+        fallback_raw = blocked_result.raw_count
+        fallback_filtered = blocked_result.filtered_count
+        fallback_last_url = blocked_result.last_request_url
+
+        for fallback_marketplace in self._blocked_buy_fallback_marketplaces():
+            fallback_settings = dataclasses.replace(self.settings, marketplace=fallback_marketplace)
+            fallback_client = EbayClient(
+                fallback_settings,
+                app_id=self.app_id,
+                request_budget=self.request_budget,
             )
+            LOGGER.warning(
+                "Buy-side fallback activated after eBay block. from=%s to=%s query=%s reason=%s",
+                self.settings.marketplace,
+                fallback_marketplace,
+                target.query,
+                blocked_result.blocked.reason if blocked_result.blocked else "blocked",
+            )
+            fallback_result = fallback_client.search_active_listings(target)
+            self.request_count = self.request_budget.used
+            self.request_cap_reached = fallback_client.request_cap_reached or self.request_budget.reached()
+            fallback_retry.extend(
+                [
+                    f"fallback: buy marketplace switched from ebay to {fallback_marketplace} due to anti-bot challenge"
+                ]
+            )
+            fallback_retry.extend(fallback_result.retry_report)
+            fallback_diagnostics.extend(fallback_result.diagnostics)
+            fallback_rejections = fallback_result.rejection_counts or fallback_rejections
+            fallback_raw = fallback_result.raw_count or fallback_raw
+            fallback_filtered = fallback_result.filtered_count or fallback_filtered
+            fallback_last_url = fallback_result.last_request_url or fallback_last_url
+            if fallback_result.listings:
+                return SearchResult(
+                    listings=fallback_result.listings,
+                    retry_report=fallback_retry,
+                    diagnostics=fallback_diagnostics,
+                    rejection_counts=fallback_rejections,
+                    raw_count=fallback_raw,
+                    filtered_count=fallback_filtered,
+                    last_request_url=fallback_last_url,
+                    status="ok",
+                    blocked=None,
+                )
+
         return SearchResult(
             listings=[],
-            retry_report=list(blocked_result.retry_report) + list(fallback_result.retry_report),
-            diagnostics=list(blocked_result.diagnostics) + list(fallback_result.diagnostics),
-            rejection_counts=fallback_result.rejection_counts or blocked_result.rejection_counts,
-            raw_count=fallback_result.raw_count or blocked_result.raw_count,
-            filtered_count=fallback_result.filtered_count or blocked_result.filtered_count,
-            last_request_url=fallback_result.last_request_url or blocked_result.last_request_url,
+            retry_report=fallback_retry,
+            diagnostics=fallback_diagnostics,
+            rejection_counts=fallback_rejections,
+            raw_count=fallback_raw,
+            filtered_count=fallback_filtered,
+            last_request_url=fallback_last_url,
             status=blocked_result.status,
             blocked=blocked_result.blocked,
         )
@@ -439,6 +466,21 @@ class EbayClient:
                     LOGGER.warning("Comps source '%s' failed for query '%s': %s", source, comp_query, exc)
                     continue
             deduped = _dedupe_sold_comps(comps_by_source)
+            if not deduped and os.getenv("COMP_FALLBACK_TO_ACTIVE", "1").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "y",
+                "on",
+            }:
+                active_fallback = self._search_active_comps_fallback(comp_query, sell_sources=sell_sources)
+                if active_fallback:
+                    LOGGER.warning(
+                        "Using active listing fallback comps for query '%s' (count=%s).",
+                        comp_query,
+                        len(active_fallback),
+                    )
+                    deduped = _dedupe_sold_comps(active_fallback)
             return deduped[: self.settings.comps_limit]
         except RequestLimitError as exc:
             LOGGER.info("Request cap reached during %s comps search: %s", sell_marketplace, exc)
@@ -964,6 +1006,97 @@ class EbayClient:
             if href and href.startswith("/"):
                 href = f"https://poshmark.com{href}"
             comps.append(SoldComp(price_gbp=price_gbp, title=title, url=href))
+            if len(comps) >= self.settings.comps_limit:
+                break
+        return comps
+
+    def _search_active_comps_fallback(self, comp_query: str, *, sell_sources: list[str]) -> list[SoldComp]:
+        comps: list[SoldComp] = []
+        for source in self._active_comp_fallback_marketplaces(sell_sources):
+            try:
+                comps.extend(self._search_active_comps_from_marketplace(comp_query, source))
+            except Exception as exc:
+                LOGGER.warning("Active comps fallback source '%s' failed for query '%s': %s", source, comp_query, exc)
+                continue
+            if len(comps) >= self.settings.comps_limit:
+                break
+        return comps[: self.settings.comps_limit]
+
+    def _active_comp_fallback_marketplaces(self, sell_sources: list[str]) -> list[str]:
+        configured = os.getenv("COMP_ACTIVE_FALLBACK_MARKETPLACE", "craigslist,mercari,poshmark")
+        parts = [part.strip().lower() for part in configured.split(",") if part.strip()]
+        allowed = {"craigslist", "mercari", "poshmark"}
+        ordered: list[str] = []
+        for source in parts + sell_sources:
+            if source not in allowed:
+                continue
+            if source in ordered:
+                continue
+            ordered.append(source)
+        return ordered
+
+    def _search_active_comps_from_marketplace(self, comp_query: str, source: str) -> list[SoldComp]:
+        fallback_settings = dataclasses.replace(
+            self.settings,
+            marketplace=source,
+            delivery_only=False,
+            scan_limit_per_target=max(self.settings.comps_limit * 2, 20),
+        )
+        fallback_client = EbayClient(
+            fallback_settings,
+            app_id=self.app_id,
+            request_budget=self.request_budget,
+        )
+        query = (comp_query or "").strip() or "item"
+        target = Target(id=0, name=query, query=query)
+        result = fallback_client.search_active_listings(target)
+        self.request_count = self.request_budget.used
+        self.request_cap_reached = fallback_client.request_cap_reached or self.request_budget.reached()
+        comps: list[SoldComp] = []
+        for listing in result.listings:
+            if listing.price_gbp <= 0:
+                continue
+            title = (listing.title or "").strip() or query
+            if source in {"mercari", "poshmark"} and not _looks_like_listing_title(title):
+                continue
+            comps.append(
+                SoldComp(
+                    price_gbp=listing.price_gbp,
+                    title=title[:200],
+                    url=listing.url,
+                )
+            )
+            if len(comps) >= self.settings.comps_limit:
+                break
+        return comps
+
+    def _search_active_poshmark_comps(self, comp_query: str) -> list[SoldComp]:
+        params = {"query": comp_query}
+        response, _ = self._request(POSHMARK_SEARCH_URL, params=params, delay=True)
+        soup = BeautifulSoup(response.text, "lxml")
+        comps: list[SoldComp] = []
+        cards = soup.select("div.tile") or soup.select("li, div")
+        for card in cards[: self.settings.comps_limit * 3]:
+            title_el = card.select_one("img[alt]") or card.select_one("a")
+            price_el = card.select_one(".price, span, p")
+            link_el = card.select_one("a[href]")
+            if not title_el or not price_el:
+                continue
+            title = title_el.get("alt") if getattr(title_el, "get", None) else None
+            if not title:
+                title = title_el.get_text(strip=True)
+            if not title or not _looks_like_listing_title(title):
+                continue
+            href = link_el.get("href") if link_el else None
+            if href and href.startswith("/"):
+                href = f"https://poshmark.com{href}"
+            if href and not _looks_like_listing_link("poshmark", href):
+                continue
+            price_value, currency = _parse_price(price_el.get_text(strip=True))
+            if price_value <= 0 or not self._currency_allowed(currency):
+                continue
+            price_gbp, _ = self._normalize_currency(price_value, 0.0, currency)
+            comps.append(SoldComp(price_gbp=price_gbp, title=title[:200], url=href))
             if len(comps) >= self.settings.comps_limit:
                 break
         return comps
@@ -1876,6 +2009,33 @@ def _extract_id_from_href(href: str, *, prefix: str, idx: int) -> str:
     return f"{prefix}-{idx}"
 
 
+def _looks_like_listing_link(source: str, href: str) -> bool:
+    if not href:
+        return False
+    lower = href.lower()
+    if source == "mercari":
+        return "/item/" in lower
+    if source == "poshmark":
+        return "/listing/" in lower
+    return True
+
+
+def _looks_like_listing_title(title: str) -> bool:
+    if not title:
+        return False
+    text = " ".join(title.split()).strip()
+    if len(text) < 6:
+        return False
+    lowered = text.lower()
+    if lowered.startswith("size:"):
+        return False
+    if lowered in {"just shared", "just in", "new listing"}:
+        return False
+    if not re.search(r"[a-zA-Z]", text):
+        return False
+    return True
+
+
 def _parse_mercari_listings(
     soup: BeautifulSoup,
     target: Target,
@@ -1909,6 +2069,10 @@ def _parse_mercari_listings(
         href = link_el.get("href") if link_el else ""
         if href and href.startswith("/"):
             href = f"https://www.mercari.com{href}"
+        if not _looks_like_listing_link("mercari", href):
+            continue
+        if not _looks_like_listing_title(title):
+            continue
         listing_id = _extract_id_from_href(href or "", prefix="mercari", idx=idx)
         if listing_id in seen_ids:
             continue
@@ -1928,7 +2092,10 @@ def _parse_mercari_listings(
                 listing_type="fixed",
                 location=None,
                 image_url=None,
-                raw_json={"source": "mercari_html"},
+                raw_json={
+                    "source": "mercari_html",
+                    "shipping_type": "delivery",
+                },
             )
         )
     return listings, metrics
@@ -1967,6 +2134,10 @@ def _parse_poshmark_listings(
         href = link_el.get("href") if link_el else ""
         if href and href.startswith("/"):
             href = f"https://poshmark.com{href}"
+        if not _looks_like_listing_link("poshmark", href):
+            continue
+        if not _looks_like_listing_title(title):
+            continue
         listing_id = _extract_id_from_href(href or "", prefix="poshmark", idx=idx)
         if listing_id in seen_ids:
             continue
@@ -1986,7 +2157,10 @@ def _parse_poshmark_listings(
                 listing_type="fixed",
                 location=None,
                 image_url=None,
-                raw_json={"source": "poshmark_html"},
+                raw_json={
+                    "source": "poshmark_html",
+                    "shipping_type": "delivery",
+                },
             )
         )
     return listings, metrics

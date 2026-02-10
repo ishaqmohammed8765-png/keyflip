@@ -44,3 +44,17 @@ def test_search_sold_comps_keeps_partial_results_when_one_source_fails(monkeypat
     monkeypatch.setattr(client, "_search_sold_mercari", fail)
     comps = client.search_sold_comps("item")
     assert len(comps) == 1
+
+
+def test_search_sold_comps_falls_back_to_active_when_no_sold(monkeypatch) -> None:
+    client = EbayClient(RunSettings(marketplace="ebay", sell_marketplace="poshmark"))
+    monkeypatch.setattr(client, "_search_sold_poshmark", lambda _query: [])
+    monkeypatch.setattr(client, "_active_comp_fallback_marketplaces", lambda _sources: ["poshmark"])
+    monkeypatch.setattr(
+        client,
+        "_search_active_comps_from_marketplace",
+        lambda _query, _source: [SoldComp(price_gbp=125.0, title="AirPods Pro 2")],
+    )
+    comps = client.search_sold_comps("airpods pro 2")
+    assert len(comps) == 1
+    assert comps[0].price_gbp == 125.0

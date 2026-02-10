@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+import re
 from typing import Iterable
 
 from ebayflip.config import RunSettings
@@ -20,6 +21,7 @@ REJECTION_REASONS = (
     "over max_buy",
     "over shipping_max",
     "missing/invalid price",
+    "weak target match",
     "wrong condition",
     "blocked keywords",
     "seller risk thresholds",
@@ -47,6 +49,8 @@ def filter_listings(
         reasons: list[str] = []
         if listing.price_gbp <= 0 or listing.total_buy_gbp <= 0:
             reasons.append("missing/invalid price")
+        if not _matches_target_query(listing, target):
+            reasons.append("weak target match")
         if target.max_buy_gbp is not None and listing.total_buy_gbp > target.max_buy_gbp:
             reasons.append("over max_buy")
         if target.shipping_max_gbp is not None and listing.shipping_gbp is not None and listing.shipping_gbp > target.shipping_max_gbp:
@@ -113,3 +117,31 @@ def _seller_fails_thresholds(listing: Listing, settings: RunSettings) -> bool:
         if listing.seller_feedback_score < settings.min_seller_feedback_score:
             return True
     return False
+
+
+def _matches_target_query(listing: Listing, target: Target) -> bool:
+    query = (target.query or target.name or "").strip().lower()
+    title = (listing.title or "").strip().lower()
+    if not query or not title:
+        return True
+    query_tokens = _tokenize(query)
+    title_tokens = set(_tokenize(title))
+    if not query_tokens or not title_tokens:
+        return True
+    overlap = sum(1 for token in query_tokens if token in title_tokens)
+    required_overlap = 1 if len(query_tokens) <= 3 else 2
+    return overlap >= required_overlap
+
+
+def _tokenize(value: str) -> list[str]:
+    stopwords = {"the", "and", "for", "with", "new", "used", "pro", "plus", "max"}
+    tokens: list[str] = []
+    for raw in re.findall(r"[a-z0-9]+", value.lower()):
+        if len(raw) < 2:
+            continue
+        if raw in stopwords:
+            continue
+        if raw.isdigit() and len(raw) < 2:
+            continue
+        tokens.append(raw)
+    return tokens

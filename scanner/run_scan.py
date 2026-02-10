@@ -185,6 +185,29 @@ def _serialize_items(rows: list[dict[str, Any]], *, settings: RunSettings) -> li
     return items
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _filter_rows_since(rows: list[dict[str, Any]], *, since: datetime) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        evaluated_at = _parse_iso(row.get("evaluated_at"))
+        if evaluated_at is None:
+            continue
+        if evaluated_at >= since:
+            filtered.append(row)
+    return filtered
+
+
 def _write_snapshot(snapshot: dict[str, Any], history_max_lines: int) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LATEST_PATH.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
@@ -224,11 +247,13 @@ def _zero_result_summary(summary: Any) -> list[dict[str, Any]]:
 
 
 def _run_once(config: AppConfig, *, history_max_lines: int) -> dict[str, Any]:
+    run_started_at = datetime.now(timezone.utc)
     pruned = prune_stale_listings(config.db_path, max_age_hours=config.run.listing_max_age_hours)
     client = EbayClient(config.run, app_id=os.getenv("EBAY_APP_ID"))
     summary = run_scan(config, client)
 
     rows = list_evaluations_with_listings(config.db_path)
+    rows = _filter_rows_since(rows, since=run_started_at)
     items = _serialize_items(rows, settings=config.run)
     generated_at = datetime.now(timezone.utc).isoformat()
     zero_result_info = _zero_result_summary(summary)
