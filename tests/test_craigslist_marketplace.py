@@ -39,3 +39,23 @@ def test_parse_html_for_craigslist_cards() -> None:
     assert listings[0].title == "Nintendo Switch OLED"
     assert listings[0].price_gbp == 180.0
     assert listings[0].url.endswith("1001.html")
+
+
+def test_parse_html_for_craigslist_generates_stable_fallback_id_without_pid() -> None:
+    html = """
+    <ul>
+      <li class='cl-static-search-result'>
+        <a href='/abc/2002.html'>
+          <div class='title'>Sony WH-1000XM5</div>
+        </a>
+        <div class='price'>$180</div>
+      </li>
+    </ul>
+    """
+    client = EbayClient(RunSettings(marketplace="craigslist", craigslist_site="sfbay"))
+    target = Target(id=1, name="sony", query="sony")
+    listings, _ = parse_html(html, target, client)
+
+    assert len(listings) == 1
+    assert listings[0].ebay_item_id.startswith("cl-")
+    assert listings[0].ebay_item_id != "cl-0"

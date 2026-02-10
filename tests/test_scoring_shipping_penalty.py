@@ -38,3 +38,37 @@ def test_missing_shipping_adds_risk_buffer_and_reduces_confidence() -> None:
     assert evaluation.confidence < 1.0
     assert any("Missing inbound shipping" in reason for reason in evaluation.reasons)
 
+
+def test_evaluation_includes_payment_and_return_reserve_fees() -> None:
+    settings = RunSettings(
+        payment_fee_pct=0.03,
+        payment_fee_fixed_gbp=0.30,
+        return_reserve_pct=0.05,
+        min_profit_gbp=0.0,
+        min_roi=0.0,
+        min_confidence=0.0,
+    )
+    listing = Listing(
+        ebay_item_id="2",
+        target_id=1,
+        title="Test Item 2",
+        url="https://example.test/2",
+        price_gbp=100.0,
+        shipping_gbp=0.0,
+        total_buy_gbp=100.0,
+        raw_json={},
+    )
+    comps = CompStats(
+        comp_query="test item 2",
+        sold_count=10,
+        median_sold_gbp=200.0,
+        p25_sold_gbp=190.0,
+        p75_sold_gbp=210.0,
+        spread_gbp=20.0,
+        computed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    evaluation = evaluate_listing(listing, comps, settings)
+
+    assert evaluation.other_fees_gbp == 16.3
+    assert any("Included fees: payment processing" in reason for reason in evaluation.reasons)

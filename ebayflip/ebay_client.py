@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import dataclasses
+import hashlib
 import importlib.util
 import json
 import os
@@ -34,7 +35,7 @@ from ebayflip.search_retry import (
 
 LOGGER = get_logger()
 
-EBAY_HTML_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
+DEFAULT_EBAY_SITE_DOMAIN = "www.ebay.co.uk"
 CRAIGSLIST_SEARCH_URL_TEMPLATE = "https://{site}.craigslist.org/search/sss"
 MERCARI_SEARCH_URL = "https://www.mercari.com/search/"
 POSHMARK_SEARCH_URL = "https://poshmark.com/search"
@@ -227,7 +228,8 @@ class EbayClient:
         return self.settings.marketplace == "ebay" and self.api_provider.enabled()
 
     def _sell_api_enabled(self) -> bool:
-        return self.settings.sell_marketplace == "ebay" and self.api_provider.enabled()
+        sources = _parse_sell_marketplaces(self.settings.sell_marketplace or "ebay")
+        return "ebay" in sources and self.api_provider.enabled()
 
     def _buy_fallback_enabled(self) -> bool:
         return os.getenv("BUY_BLOCKED_FALLBACK_ENABLED", "1").strip().lower() in {
@@ -899,7 +901,7 @@ class EbayClient:
             "LH_Complete": "1",
             "_sop": "13",
         }
-        response, _ = self._request(EBAY_HTML_SEARCH_URL, params=params, delay=True)
+        response, _ = self._request(_ebay_search_url(self.settings), params=params, delay=True)
         soup = BeautifulSoup(response.text, "lxml")
         comps: list[SoldComp] = []
         for item in soup.select("li.s-item")[: self.settings.comps_limit]:
@@ -1208,7 +1210,27 @@ def _search_url(settings: RunSettings) -> str:
         return MERCARI_SEARCH_URL
     if settings.marketplace == "poshmark":
         return POSHMARK_SEARCH_URL
-    return EBAY_HTML_SEARCH_URL
+    return _ebay_search_url(settings)
+
+
+def _ebay_site_domain(settings: RunSettings) -> str:
+    configured = (settings.ebay_site_domain or "").strip().lower()
+    if not configured:
+        configured = DEFAULT_EBAY_SITE_DOMAIN
+    if configured.startswith("http://") or configured.startswith("https://"):
+        parsed = urlparse(configured)
+        return parsed.netloc or DEFAULT_EBAY_SITE_DOMAIN
+    return configured
+
+
+def _ebay_search_url(settings: RunSettings) -> str:
+    domain = _ebay_site_domain(settings)
+    return f"https://{domain}/sch/i.html"
+
+
+def _ebay_item_url(settings: RunSettings, item_id: str) -> str:
+    domain = _ebay_site_domain(settings)
+    return f"https://{domain}/itm/{item_id}"
 
 
 def build_url(
@@ -1233,7 +1255,8 @@ def build_url(
             params["LH_Auction"] = "1"
         else:
             params["LH_BIN"] = "1"
-    return f"{_search_url(RunSettings())}?{urlencode(params)}"
+    settings = RunSettings()
+    return f"{_search_url(settings)}?{urlencode(params)}"
 
 
 def normalize_price(text: str) -> tuple[float, str]:
@@ -2232,7 +2255,8 @@ def _parse_craigslist_listings(
             if id_match:
                 listing_id = id_match.group(1)
         if not listing_id:
-            listing_id = f"cl-{idx}"
+            id_seed = f"{href}|{title_el.get_text(strip=True)}|{price_text}|{idx}"
+            listing_id = f"cl-{hashlib.sha1(id_seed.encode('utf-8')).hexdigest()[:16]}"
         if listing_id in seen_ids:
             continue
         seen_ids.add(listing_id)
@@ -2304,7 +2328,7 @@ def _parse_html_listings(
         if not ebay_item_id and link:
             ebay_item_id = _extract_item_id(link)
         if not link and ebay_item_id:
-            link = f"https://www.ebay.co.uk/itm/{ebay_item_id}"
+            link = _ebay_item_url(client.settings, ebay_item_id)
         if not ebay_item_id:
             continue
         if ebay_item_id in seen_ids:
@@ -2555,7 +2579,7 @@ def _parse_initial_state_listings(
         price_gbp, _ = client._normalize_currency(price_value, 0.0, currency)
         url = _get_state_text(item, ["itemUrl", "viewItemUrl", "url"])
         if not url:
-            url = f"https://www.ebay.co.uk/itm/{ebay_item_id}"
+            url = _ebay_item_url(client.settings, ebay_item_id)
         image_url = _get_state_text(item, ["imageUrl", "image", "thumbnailUrl"])
         shipping_value, assumed_shipping = client._apply_missing_shipping(0.0, True)
         listings.append(

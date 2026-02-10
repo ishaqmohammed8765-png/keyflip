@@ -34,6 +34,19 @@ def test_search_sold_comps_supports_multiple_sources(monkeypatch) -> None:
     assert len(comps) == 2
 
 
+def test_search_sold_comps_uses_ebay_api_when_in_multi_source(monkeypatch) -> None:
+    client = EbayClient(RunSettings(marketplace="ebay", sell_marketplace="ebay,mercari"))
+    monkeypatch.setattr(client.api_provider, "enabled", lambda: True)
+    monkeypatch.setattr(client.api_provider, "search_sold_comps", lambda _query: [SoldComp(price_gbp=99.0, title="API")])
+    monkeypatch.setattr(client, "_search_sold_html", lambda _query: [SoldComp(price_gbp=88.0, title="HTML")])
+    monkeypatch.setattr(client, "_search_sold_mercari", lambda _query: [])
+
+    comps = client.search_sold_comps("item")
+    titles = [comp.title for comp in comps]
+    assert "API" in titles
+    assert "HTML" not in titles
+
+
 def test_search_sold_comps_keeps_partial_results_when_one_source_fails(monkeypatch) -> None:
     client = EbayClient(RunSettings(marketplace="ebay", sell_marketplace="ebay,mercari"))
     monkeypatch.setattr(client, "_search_sold_html", lambda _query: [SoldComp(price_gbp=100.0, title="A")])

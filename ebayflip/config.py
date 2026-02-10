@@ -20,6 +20,9 @@ DEFAULT_SCAN_INTERVAL_MIN = 15
 DEFAULT_COMPS_TTL_HOURS = 12
 
 DEFAULT_GBP_EXCHANGE_RATE = 0.78
+DEFAULT_PAYMENT_FEE_PCT = 0.029
+DEFAULT_PAYMENT_FEE_FIXED_GBP = 0.30
+DEFAULT_RETURN_RESERVE_PCT = 0.03
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -38,6 +41,17 @@ def _default_craigslist_site() -> str:
     if locale.startswith("en_us") or country in {"us", "usa", "united states"}:
         return "sfbay"
     return "sfbay"
+
+
+def _default_ebay_site_domain() -> str:
+    override = os.getenv("EBAY_SITE_DOMAIN")
+    if override and override.strip():
+        return override.strip().lower()
+    locale = os.getenv("LOCALE", "").lower()
+    country = os.getenv("COUNTRY", "").lower()
+    if locale.startswith("en_us") or country in {"us", "usa", "united states"}:
+        return "www.ebay.com"
+    return "www.ebay.co.uk"
 
 
 def _default_currency_whitelist() -> tuple[str, ...]:
@@ -65,6 +79,7 @@ def _sanitize_sell_marketplace(raw: str) -> str:
 class RunSettings:
     marketplace: str = "ebay"
     sell_marketplace: str = "ebay,mercari,poshmark"
+    ebay_site_domain: str = field(default_factory=_default_ebay_site_domain)
     craigslist_site: str = field(default_factory=_default_craigslist_site)
     min_profit_gbp: float = MIN_PROFIT_GBP
     min_roi: float = MIN_ROI
@@ -94,6 +109,9 @@ class RunSettings:
     fx_cache_minutes: int = 360
     missing_shipping_penalty_gbp: float = 4.0
     missing_shipping_confidence_penalty: float = 0.08
+    payment_fee_pct: float = DEFAULT_PAYMENT_FEE_PCT
+    payment_fee_fixed_gbp: float = DEFAULT_PAYMENT_FEE_FIXED_GBP
+    return_reserve_pct: float = DEFAULT_RETURN_RESERVE_PCT
     auto_popular_targets: bool = True
     popular_targets_per_category: int = 3
     auto_smart_targets: bool = True
@@ -117,7 +135,15 @@ class RunSettings:
         kwargs: dict[str, object] = {
             "marketplace": marketplace,
             "sell_marketplace": sell_marketplace,
+            "ebay_site_domain": _default_ebay_site_domain(),
             "craigslist_site": _default_craigslist_site(),
+            "min_profit_gbp": float(os.getenv("MIN_PROFIT_GBP", str(MIN_PROFIT_GBP))),
+            "min_roi": float(os.getenv("MIN_ROI", str(MIN_ROI))),
+            "min_confidence": float(os.getenv("MIN_CONFIDENCE", str(MIN_CONFIDENCE))),
+            "ebay_fee_pct": float(os.getenv("EBAY_FEE_PCT", str(EBAY_FEE_PCT_DEFAULT))),
+            "shipping_out_gbp": float(os.getenv("SHIPPING_OUT_GBP", str(SHIPPING_OUT_GBP_DEFAULT))),
+            "buffer_fixed_gbp": float(os.getenv("BUFFER_FIXED_GBP", str(BUFFER_FIXED_GBP))),
+            "buffer_pct_of_buy": float(os.getenv("BUFFER_PCT_OF_BUY", str(BUFFER_PCT_OF_BUY))),
             "request_cap": int(os.getenv("REQUEST_CAP", str(DEFAULT_REQUEST_CAP))),
             "scan_limit_per_target": int(
                 os.getenv("SCAN_LIMIT_PER_TARGET", str(DEFAULT_SCAN_LIMIT_PER_TARGET))
@@ -136,6 +162,13 @@ class RunSettings:
             "missing_shipping_penalty_gbp": float(os.getenv("MISSING_SHIPPING_PENALTY_GBP", "4.0")),
             "missing_shipping_confidence_penalty": float(
                 os.getenv("MISSING_SHIPPING_CONFIDENCE_PENALTY", "0.08")
+            ),
+            "payment_fee_pct": float(os.getenv("PAYMENT_FEE_PCT", str(DEFAULT_PAYMENT_FEE_PCT))),
+            "payment_fee_fixed_gbp": float(
+                os.getenv("PAYMENT_FEE_FIXED_GBP", str(DEFAULT_PAYMENT_FEE_FIXED_GBP))
+            ),
+            "return_reserve_pct": float(
+                os.getenv("RETURN_RESERVE_PCT", str(DEFAULT_RETURN_RESERVE_PCT))
             ),
             "auto_popular_targets": _env_bool("AUTO_POPULAR_TARGETS", True),
             "popular_targets_per_category": max(

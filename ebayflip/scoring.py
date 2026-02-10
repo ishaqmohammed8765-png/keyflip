@@ -36,6 +36,13 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
     )
 
     buffer_gbp = settings.buffer_fixed_gbp + (settings.buffer_pct_of_buy * listing.total_buy_gbp)
+    payment_fee_gbp = (resale_est * settings.payment_fee_pct) + settings.payment_fee_fixed_gbp
+    return_reserve_gbp = resale_est * settings.return_reserve_pct
+    other_fees_gbp = payment_fee_gbp + return_reserve_gbp
+    reasons.append(
+        "Included fees: payment processing GBP "
+        f"{payment_fee_gbp:.2f} and return reserve GBP {return_reserve_gbp:.2f}."
+    )
     if _shipping_missing(listing):
         buffer_gbp += settings.missing_shipping_penalty_gbp
         reasons.append(
@@ -44,6 +51,7 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
     expected_profit = (
         resale_est * (1 - settings.ebay_fee_pct)
         - listing.total_buy_gbp
+        - other_fees_gbp
         - settings.shipping_out_gbp
         - buffer_gbp
     )
@@ -58,7 +66,7 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
     return Evaluation(
         resale_est_gbp=resale_est,
         ebay_fee_pct=settings.ebay_fee_pct,
-        other_fees_gbp=0.0,
+        other_fees_gbp=other_fees_gbp,
         shipping_out_gbp=settings.shipping_out_gbp,
         buffer_gbp=buffer_gbp,
         expected_profit_gbp=expected_profit,
