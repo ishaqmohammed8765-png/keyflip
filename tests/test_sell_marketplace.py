@@ -32,3 +32,15 @@ def test_search_sold_comps_supports_multiple_sources(monkeypatch) -> None:
 
     comps = client.search_sold_comps("item")
     assert len(comps) == 2
+
+
+def test_search_sold_comps_keeps_partial_results_when_one_source_fails(monkeypatch) -> None:
+    client = EbayClient(RunSettings(marketplace="ebay", sell_marketplace="ebay,mercari"))
+    monkeypatch.setattr(client, "_search_sold_html", lambda _query: [SoldComp(price_gbp=100.0, title="A")])
+
+    def fail(_query: str):
+        raise RuntimeError("temporary fail")
+
+    monkeypatch.setattr(client, "_search_sold_mercari", fail)
+    comps = client.search_sold_comps("item")
+    assert len(comps) == 1

@@ -89,6 +89,17 @@ class RunSettings:
     delivery_only: bool = True
     include_ebay_buy_now: bool = True
     listing_max_age_hours: int = 72
+    scan_workers: int = 4
+    live_fx_enabled: bool = True
+    fx_cache_minutes: int = 360
+    missing_shipping_penalty_gbp: float = 4.0
+    missing_shipping_confidence_penalty: float = 0.08
+    auto_popular_targets: bool = True
+    popular_targets_per_category: int = 3
+    auto_smart_targets: bool = True
+    auto_smart_target_limit: int = 3
+    min_smart_target_confidence: float = 0.60
+    min_smart_target_profit_gbp: float = 10.0
 
     @classmethod
     def from_env(cls, **overrides: object) -> "RunSettings":
@@ -121,6 +132,21 @@ class RunSettings:
             "currency_whitelist": _default_currency_whitelist(),
             "use_playwright_fallback": _env_bool("EBAY_USE_PLAYWRIGHT", True),
             "listing_max_age_hours": int(os.getenv("LISTING_MAX_AGE_HOURS", "72")),
+            "scan_workers": max(1, int(os.getenv("SCAN_WORKERS", "4"))),
+            "live_fx_enabled": _env_bool("LIVE_FX_ENABLED", True),
+            "fx_cache_minutes": max(10, int(os.getenv("FX_CACHE_MINUTES", "360"))),
+            "missing_shipping_penalty_gbp": float(os.getenv("MISSING_SHIPPING_PENALTY_GBP", "4.0")),
+            "missing_shipping_confidence_penalty": float(
+                os.getenv("MISSING_SHIPPING_CONFIDENCE_PENALTY", "0.08")
+            ),
+            "auto_popular_targets": _env_bool("AUTO_POPULAR_TARGETS", True),
+            "popular_targets_per_category": max(
+                1, int(os.getenv("POPULAR_TARGETS_PER_CATEGORY", "3"))
+            ),
+            "auto_smart_targets": _env_bool("AUTO_SMART_TARGETS", True),
+            "auto_smart_target_limit": max(1, int(os.getenv("AUTO_SMART_TARGET_LIMIT", "3"))),
+            "min_smart_target_confidence": float(os.getenv("MIN_SMART_TARGET_CONFIDENCE", "0.60")),
+            "min_smart_target_profit_gbp": float(os.getenv("MIN_SMART_TARGET_PROFIT_GBP", "10.0")),
         }
         kwargs.update(overrides)
         return cls(**kwargs)

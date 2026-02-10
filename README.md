@@ -9,6 +9,9 @@ Streamlit app that automatically scans listings, compares them against multi-sit
 - Multi-sell-source comps via `SELL_MARKETPLACE` (supports comma-separated values).
 - Delivery-only filtering enabled by default.
 - Automatic stale-item pruning so old listings are periodically removed.
+- Parallel target scanning (`SCAN_WORKERS`) for faster throughput.
+- Auto-targeting from popular categories plus smart target discovery from profitable scans.
+- Live FX conversion cache for non-GBP pricing with static fallback.
 - Sold/completed comp lookup with median/p25/p75 stats.
 - Profit, ROI, confidence, and deal score with explainable reasons.
 - Discord webhook alerts for new deals.
@@ -55,6 +58,17 @@ export DELIVERY_ONLY=1
 
 # Auto-delete listings older than this many hours (default: 72)
 export LISTING_MAX_AGE_HOURS=72
+
+# Parallel workers for scanning targets (default: 4)
+export SCAN_WORKERS=4
+
+# Auto-popular target seeding and smart discovery
+export AUTO_POPULAR_TARGETS=1
+export POPULAR_TARGETS_PER_CATEGORY=3
+export AUTO_SMART_TARGETS=1
+
+# Live FX conversion (fallback remains available)
+export LIVE_FX_ENABLED=1
 ```
 
 ```bash

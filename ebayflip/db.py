@@ -147,7 +147,7 @@ def init_db(db_path: str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_comps_listing ON comps(listing_id)"
         )
         cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_alerts_listing_channel ON alerts_sent(listing_id, channel)"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_listing_channel ON alerts_sent(listing_id, channel)"
         )
 
 
@@ -431,13 +431,17 @@ def list_comps_by_listing(db_path: str, listing_id: int) -> list[CompStats]:
 
 def mark_alert_sent(db_path: str, listing_id: int, channel: str) -> None:
     with get_connection(db_path) as conn:
-        conn.execute(
-            """
-            INSERT INTO alerts_sent (listing_id, channel, sent_at)
-            VALUES (?, ?, ?)
-            """,
-            (listing_id, channel, datetime.now(timezone.utc).isoformat()),
-        )
+        try:
+            conn.execute(
+                """
+                INSERT INTO alerts_sent (listing_id, channel, sent_at)
+                VALUES (?, ?, ?)
+                """,
+                (listing_id, channel, datetime.now(timezone.utc).isoformat()),
+            )
+        except sqlite3.IntegrityError:
+            # Concurrent alert writers can race; uniqueness protects against duplicate notifications.
+            return
 
 
 def was_alert_sent(db_path: str, listing_id: int, channel: str) -> bool:

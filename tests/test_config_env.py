@@ -32,3 +32,9 @@ def test_marketplace_craigslist_is_coerced_to_ebay(monkeypatch) -> None:
     monkeypatch.setenv("MARKETPLACE", "craigslist")
     settings = RunSettings.from_env()
     assert settings.marketplace == "ebay"
+
+
+def test_sanitize_sell_marketplaces(monkeypatch) -> None:
+    monkeypatch.setenv("SELL_MARKETPLACE", "craigslist,ebay,poshmark,foo")
+    settings = RunSettings.from_env()
+    assert settings.sell_marketplace == "ebay,poshmark"

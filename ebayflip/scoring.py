@@ -11,6 +11,11 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
     if comps.sold_count == 0:
         reasons.append("No sold comps found - cannot estimate profit.")
         buffer_gbp = settings.buffer_fixed_gbp + (settings.buffer_pct_of_buy * listing.total_buy_gbp)
+        if _shipping_missing(listing):
+            buffer_gbp += settings.missing_shipping_penalty_gbp
+            reasons.append(
+                f"Missing inbound shipping; added risk buffer GBP {settings.missing_shipping_penalty_gbp:.2f}."
+            )
         return Evaluation(
             resale_est_gbp=0.0,
             ebay_fee_pct=settings.ebay_fee_pct,
@@ -31,6 +36,11 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
     )
 
     buffer_gbp = settings.buffer_fixed_gbp + (settings.buffer_pct_of_buy * listing.total_buy_gbp)
+    if _shipping_missing(listing):
+        buffer_gbp += settings.missing_shipping_penalty_gbp
+        reasons.append(
+            f"Missing inbound shipping; added risk buffer GBP {settings.missing_shipping_penalty_gbp:.2f}."
+        )
     expected_profit = (
         resale_est * (1 - settings.ebay_fee_pct)
         - listing.total_buy_gbp
@@ -39,7 +49,7 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
     )
     roi = expected_profit / listing.total_buy_gbp if listing.total_buy_gbp else 0.0
 
-    confidence = _confidence_score(listing, comps)
+    confidence = _confidence_score(listing, comps, settings)
     reasons.extend(_confidence_reasons(listing, comps, confidence))
 
     deal_score = _deal_score(expected_profit, roi, confidence)
@@ -61,7 +71,7 @@ def evaluate_listing(listing: Listing, comps: CompStats, settings: RunSettings) 
     )
 
 
-def _confidence_score(listing: Listing, comps: CompStats) -> float:
+def _confidence_score(listing: Listing, comps: CompStats, settings: RunSettings) -> float:
     score = 0.4
     if comps.sold_count >= 10:
         score += 0.25
@@ -81,6 +91,8 @@ def _confidence_score(listing: Listing, comps: CompStats) -> float:
         score += 0.1
     if listing.returns_accepted:
         score += 0.05
+    if _shipping_missing(listing):
+        score -= settings.missing_shipping_confidence_penalty
     return max(0.0, min(score, 1.0))
 
 
@@ -121,4 +133,10 @@ def _now_iso() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def _shipping_missing(listing: Listing) -> bool:
+    if isinstance(listing.raw_json, dict):
+        return bool(listing.raw_json.get("shipping_missing"))
+    return False
 

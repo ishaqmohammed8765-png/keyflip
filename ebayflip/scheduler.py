@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -36,7 +37,7 @@ class ScanSummary:
     scanned_listings: list["ScannedListing"]
     request_cap_reached: bool
     zero_result_debug: list["TargetSearchDebug"]
-    buy_marketplace: str = "craigslist"
+    buy_marketplace: str = "ebay"
     sell_marketplace: str = "ebay"
     opportunities: list["ArbitrageOpportunity"] = dataclasses.field(default_factory=list)
 
@@ -88,6 +89,19 @@ class TargetSearchDebug:
     debug_artifacts: list[str] = dataclasses.field(default_factory=list)
 
 
+@dataclass(slots=True)
+class TargetScanResult:
+    scanned_targets: int = 0
+    new_listings: int = 0
+    evaluated: int = 0
+    deals: int = 0
+    scanned_listings: list[ScannedListing] = dataclasses.field(default_factory=list)
+    zero_result_debug: list[TargetSearchDebug] = dataclasses.field(default_factory=list)
+    opportunities: list[ArbitrageOpportunity] = dataclasses.field(default_factory=list)
+    request_cap_reached: bool = False
+    request_count: int = 0
+
+
 def run_scan(config: AppConfig, client: EbayClient) -> ScanSummary:
     scanner = ArbitrageScanner(config=config, client=client)
     return scanner.scan()
@@ -108,14 +122,28 @@ class ArbitrageScanner:
         self.zero_result_debug: list[TargetSearchDebug] = []
         self.opportunities: list[ArbitrageOpportunity] = []
         self.stop_scan = False
+        self.total_request_count = 0
 
     def scan(self) -> ScanSummary:
         init_db(self.config.db_path)
         targets = [target for target in list_targets(self.config.db_path) if target.enabled]
-        for target in targets:
-            if self.stop_scan:
-                break
-            self._scan_target(target)
+        workers = max(1, int(self.config.run.scan_workers or 1))
+        can_parallelize = isinstance(self.client, EbayClient)
+        if workers == 1 or len(targets) <= 1 or not can_parallelize:
+            for target in targets:
+                if self.stop_scan:
+                    break
+                result = self._scan_target(target, self.client)
+                self._merge_result(result)
+                self.total_request_count = self.client.request_count
+                if result.request_cap_reached:
+                    self.stop_scan = True
+                    self.request_cap_reached = True
+                    break
+        else:
+            self._scan_parallel(targets, workers=workers)
+            if self.total_request_count >= self.config.run.request_cap:
+                self.request_cap_reached = True
         return ScanSummary(
             scanned_targets=self.scanned_targets,
             new_listings=self.new_listings,
@@ -130,11 +158,32 @@ class ArbitrageScanner:
             opportunities=self.opportunities,
         )
 
-    def _scan_target(self, target: Target) -> None:
+    def _scan_parallel(self, targets: list[Target], *, workers: int) -> None:
+        LOGGER.info("Running parallel scan with %s worker(s) across %s target(s).", workers, len(targets))
+        worker_clients: list[EbayClient] = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {}
+            for target in targets:
+                worker_client = EbayClient(self.config.run, app_id=self.client.app_id)
+                worker_clients.append(worker_client)
+                future = executor.submit(self._scan_target, target, worker_client)
+                futures[future] = target
+            for future in as_completed(futures):
+                target = futures[future]
+                try:
+                    result = future.result()
+                except Exception:
+                    LOGGER.exception("Target scan failed for %s", target.name)
+                    continue
+                self._merge_result(result)
+        self.total_request_count = sum(client.request_count for client in worker_clients)
+
+    def _scan_target(self, target: Target, client: EbayClient) -> TargetScanResult:
+        result = TargetScanResult()
         normalized_target, skip_reason = _normalize_target_query(target)
         if skip_reason:
             LOGGER.warning("Skipping target %s: %s", target.name, skip_reason)
-            self.zero_result_debug.append(
+            result.zero_result_debug.append(
                 TargetSearchDebug(
                     target_name=target.name,
                     target_query=target.query or target.name,
@@ -150,19 +199,20 @@ class ArbitrageScanner:
                     debug_artifacts=[],
                 )
             )
-            return
-        if self.client.request_count >= self.config.run.request_cap:
+            result.request_count = client.request_count
+            return result
+        if client.request_count >= self.config.run.request_cap:
             LOGGER.info("Request cap reached, stopping scan.")
-            self.request_cap_reached = True
-            self.stop_scan = True
-            return
+            result.request_cap_reached = True
+            result.request_count = client.request_count
+            return result
 
-        self.scanned_targets += 1
-        search_result: SearchResult = self.client.search_active_listings(normalized_target)
+        result.scanned_targets = 1
+        search_result: SearchResult = client.search_active_listings(normalized_target)
         listings = search_result.listings
         if not listings:
             blocked = search_result.blocked
-            self.zero_result_debug.append(
+            result.zero_result_debug.append(
                 TargetSearchDebug(
                     target_name=target.name,
                     target_query=normalized_target.query,
@@ -182,13 +232,13 @@ class ArbitrageScanner:
         for listing in listings:
             listing_id, is_new = upsert_listing(self.config.db_path, listing)
             if is_new:
-                self.new_listings += 1
+                result.new_listings += 1
 
-            comps = self._comps_for_listing(listing_id, listing, normalized_target)
+            comps = self._comps_for_listing(listing_id, listing, normalized_target, client=client)
             evaluation = evaluate_listing(listing, comps, self.config.run)
             insert_evaluation(self.config.db_path, listing_id, evaluation)
-            self.evaluated += 1
-            self.scanned_listings.append(
+            result.evaluated += 1
+            result.scanned_listings.append(
                 ScannedListing(
                     title=listing.title or "Untitled listing",
                     url=listing.url,
@@ -199,7 +249,7 @@ class ArbitrageScanner:
                     source=_listing_source(listing, fallback=self.config.run.marketplace),
                 )
             )
-            self.opportunities.append(
+            result.opportunities.append(
                 ArbitrageOpportunity(
                     listing_id=listing_id,
                     target_name=target.name,
@@ -220,18 +270,19 @@ class ArbitrageScanner:
                 )
             )
             if evaluation.decision in ("deal", "maybe"):
-                self.deals += 1
+                result.deals += 1
                 _send_alert_if_needed(self.config, listing_id, listing, evaluation)
-            if self.client.request_cap_reached:
-                self.request_cap_reached = True
-                self.stop_scan = True
+            if client.request_cap_reached:
+                result.request_cap_reached = True
                 break
+        result.request_count = client.request_count
+        return result
 
-    def _comps_for_listing(self, listing_id: int, listing: Listing, target: Target) -> CompStats:
+    def _comps_for_listing(self, listing_id: int, listing: Listing, target: Target, *, client: EbayClient) -> CompStats:
         comps = get_latest_comps(self.config.db_path, listing_id)
         if comps is None or _comps_stale(comps.computed_at, self.config.run.comps_ttl_hours):
             comp_query = _comp_query_for_listing(listing, target)
-            if self.client.request_count >= self.config.run.request_cap:
+            if client.request_count >= self.config.run.request_cap:
                 if comps is None:
                     LOGGER.info("Request cap reached before comps search; using empty comps.")
                     comps = compute_comp_stats(comp_query, [])
@@ -239,10 +290,21 @@ class ArbitrageScanner:
                 else:
                     LOGGER.info("Request cap reached before comps refresh; using stale comps.")
             else:
-                comps_list = self.client.search_sold_comps(comp_query)
+                comps_list = client.search_sold_comps(comp_query)
                 comps = compute_comp_stats(comp_query, comps_list)
                 insert_comps(self.config.db_path, listing_id, comps)
         return comps
+
+    def _merge_result(self, result: TargetScanResult) -> None:
+        self.scanned_targets += result.scanned_targets
+        self.new_listings += result.new_listings
+        self.evaluated += result.evaluated
+        self.deals += result.deals
+        self.scanned_listings.extend(result.scanned_listings)
+        self.zero_result_debug.extend(result.zero_result_debug)
+        self.opportunities.extend(result.opportunities)
+        if result.request_cap_reached:
+            self.request_cap_reached = True
 
 
 def _send_alert_if_needed(config: AppConfig, listing_id: int, listing: Listing, evaluation: Evaluation) -> None:

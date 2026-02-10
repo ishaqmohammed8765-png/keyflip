@@ -23,7 +23,9 @@ from ebayflip.db import (
 )
 from ebayflip.ebay_client import EbayClient
 from ebayflip.models import Target
+from ebayflip.popular_targets import get_popular_targets
 from ebayflip.scheduler import run_scan
+from ebayflip.target_suggestions import suggest_targets_from_evaluations
 
 DB_PATH = ROOT_DIR / "ebayflip.sqlite"
 DATA_DIR = ROOT_DIR / "data"
@@ -79,23 +81,55 @@ def _seed_targets_from_env_or_defaults() -> list[str]:
     return list(DEFAULT_SEED_TARGETS)
 
 
-def _ensure_scan_targets(db_path: str) -> list[str]:
-    existing_enabled_targets = [target for target in list_targets(db_path) if target.enabled]
-    if existing_enabled_targets:
-        return []
+def _target_key(value: str) -> str:
+    return " ".join((value or "").strip().lower().split())
 
-    seeded_targets: list[str] = []
-    for query in _seed_targets_from_env_or_defaults():
+
+def _ensure_scan_targets(db_path: str, *, settings: RunSettings, discovery_rows: list[dict[str, Any]]) -> list[str]:
+    targets = list_targets(db_path)
+    existing = {_target_key(target.query or target.name): target for target in targets if (target.query or target.name)}
+    added: list[str] = []
+
+    def ensure_target(*, name: str, query: str, max_buy: float | None = None) -> None:
+        key = _target_key(query or name)
+        if not key or key in existing:
+            return
         add_target(
             db_path,
             Target(
                 id=None,
-                name=query,
-                query=query,
+                name=name.strip() or query.strip(),
+                query=query.strip() or name.strip(),
+                max_buy_gbp=max_buy,
             ),
         )
-        seeded_targets.append(query)
-    return seeded_targets
+        existing[key] = Target(id=None, name=name, query=query, max_buy_gbp=max_buy)
+        added.append(query)
+
+    for query in _seed_targets_from_env_or_defaults():
+        ensure_target(name=query, query=query)
+
+    if settings.auto_popular_targets:
+        for target in get_popular_targets(per_category=settings.popular_targets_per_category):
+            ensure_target(name=target.name, query=target.query, max_buy=target.max_buy_gbp)
+
+    if settings.auto_smart_targets and discovery_rows:
+        current_targets = list(existing.values())
+        suggestions = suggest_targets_from_evaluations(
+            discovery_rows,
+            current_targets,
+            limit=settings.auto_smart_target_limit,
+            min_confidence=settings.min_smart_target_confidence,
+            min_profit_gbp=settings.min_smart_target_profit_gbp,
+        )
+        for suggestion in suggestions:
+            ensure_target(
+                name=suggestion.name,
+                query=suggestion.query,
+                max_buy=suggestion.max_buy_gbp,
+            )
+
+    return added
 
 
 def _source_from_row(row: dict[str, Any], *, fallback: str) -> str:
@@ -230,13 +264,18 @@ def main() -> None:
         alerts=AlertSettings(discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL")),
     )
     init_db(config.db_path)
-    seeded_targets = _ensure_scan_targets(config.db_path)
-    if seeded_targets:
-        print(f"Seeded {len(seeded_targets)} target(s): {', '.join(seeded_targets)}")
 
     cycle = 0
     while True:
         cycle += 1
+        discovery_rows = list_evaluations_with_listings(config.db_path)
+        seeded_targets = _ensure_scan_targets(
+            config.db_path,
+            settings=settings,
+            discovery_rows=discovery_rows,
+        )
+        if seeded_targets:
+            print(f"Cycle {cycle}: Auto-added {len(seeded_targets)} target(s): {', '.join(seeded_targets[:8])}")
         snapshot = _run_once(config, history_max_lines=args.history_max_lines)
         print(
             f"Cycle {cycle}: Wrote {snapshot.get('count', 0)} items to {LATEST_PATH} "

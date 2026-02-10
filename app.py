@@ -112,11 +112,11 @@ def _render_app_intro() -> None:
     st.caption("Automated arbitrage scanner - compare buy-side deals against resale comps.")
     with st.expander("New to flipping? Start here", expanded=False):
         st.markdown(
-            "1. Add 3 to 5 targets in **Manage Targets**.\n"
-            "2. Run `python scanner/run_scan.py --watch` for automatic scans.\n"
+            "1. Run `python scanner/run_scan.py --watch` for autopilot scanning.\n"
+            "2. The scanner auto-adds popular-category targets and smart new targets from profitable hits.\n"
             "3. In **Dashboard**, keep only `deal` and set a minimum confidence around `0.50`.\n"
             "4. Use **Max Buy** and **Suggested Offer** to avoid overpaying.\n"
-            "5. Start small with a bankroll plan and reinvest profits."
+            "5. Check **Capital Plan** to control bankroll and position sizing."
         )
 
 

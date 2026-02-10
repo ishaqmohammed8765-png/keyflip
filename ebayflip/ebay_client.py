@@ -22,6 +22,7 @@ from ebayflip import get_logger
 from ebayflip.cache import CacheStore, CachedResponse
 from ebayflip.config import RunSettings
 from ebayflip.filtering import filter_listings
+from ebayflip.fx import FxConverter
 from ebayflip.ebay_api_provider import EbayApiProvider
 from ebayflip.models import Listing, SoldComp, Target
 from ebayflip.search_retry import (
@@ -168,6 +169,11 @@ class EbayClient:
         self.cache = CacheStore(".cache/ebayflip_cache.sqlite", ttl_seconds=300)
         self.session = requests.Session()
         self.api_provider = EbayApiProvider(self)
+        self.fx = FxConverter(
+            fallback_gbp_rate=self.settings.gbp_exchange_rate,
+            enabled=self.settings.live_fx_enabled,
+            cache_minutes=self.settings.fx_cache_minutes,
+        )
         self.search_url = _search_url(self.settings)
         self._apply_session_headers()
 
@@ -267,28 +273,32 @@ class EbayClient:
         try:
             comps_by_source: list[SoldComp] = []
             for source in sell_sources:
-                if source == "craigslist":
-                    comps_by_source.extend(self._search_sold_craigslist(comp_query))
+                try:
+                    if source == "mercari":
+                        comps_by_source.extend(self._search_sold_mercari(comp_query))
+                        continue
+                    if source == "poshmark":
+                        comps_by_source.extend(self._search_sold_poshmark(comp_query))
+                        continue
+                    if source == "ebay":
+                        if self._sell_api_enabled():
+                            try:
+                                comps_by_source.extend(self.api_provider.search_sold_comps(comp_query))
+                                continue
+                            except RequestLimitError as exc:
+                                LOGGER.info("Request cap reached during API comps search: %s", exc)
+                                return comps_by_source
+                            except Exception as exc:
+                                LOGGER.warning("API comps failed, falling back to HTML: %s", exc)
+                        comps_by_source.extend(self._search_sold_html(comp_query))
+                        continue
+                    LOGGER.warning("Unknown sell marketplace '%s'; skipping.", source)
+                except RequestLimitError:
+                    raise
+                except Exception as exc:
+                    # Keep partial comps from other sources to reduce brittleness.
+                    LOGGER.warning("Comps source '%s' failed for query '%s': %s", source, comp_query, exc)
                     continue
-                if source == "mercari":
-                    comps_by_source.extend(self._search_sold_mercari(comp_query))
-                    continue
-                if source == "poshmark":
-                    comps_by_source.extend(self._search_sold_poshmark(comp_query))
-                    continue
-                if source == "ebay":
-                    if self._sell_api_enabled():
-                        try:
-                            comps_by_source.extend(self.api_provider.search_sold_comps(comp_query))
-                            continue
-                        except RequestLimitError as exc:
-                            LOGGER.info("Request cap reached during API comps search: %s", exc)
-                            return comps_by_source
-                        except Exception as exc:
-                            LOGGER.warning("API comps failed, falling back to HTML: %s", exc)
-                    comps_by_source.extend(self._search_sold_html(comp_query))
-                    continue
-                LOGGER.warning("Unknown sell marketplace '%s'; skipping.", source)
             deduped = _dedupe_sold_comps(comps_by_source)
             return deduped[: self.settings.comps_limit]
         except RequestLimitError as exc:
@@ -824,8 +834,7 @@ class EbayClient:
     def _normalize_currency(self, price: float, shipping: float, currency: str) -> tuple[float, float]:
         if currency == "GBP":
             return price, shipping
-        rate = self.settings.gbp_exchange_rate
-        return price * rate, shipping * rate
+        return self.fx.to_gbp(price, currency), self.fx.to_gbp(shipping, currency)
 
     def _apply_missing_shipping(self, shipping_value: float, shipping_missing: bool) -> tuple[float, Optional[float]]:
         if shipping_missing and self.settings.allow_missing_shipping_price:
