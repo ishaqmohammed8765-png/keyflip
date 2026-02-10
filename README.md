@@ -1,10 +1,14 @@
 ﻿# Marketplace Flip Scanner
 
-Streamlit app that scans Craigslist listings for underpriced items, estimates resale value using recent comparable prices, and alerts you when expected profit meets your thresholds.
+Streamlit app that automatically scans listings, compares them against multi-site sell comps, and ranks only opportunities with projected profit.
 
 ## Features
 - Define multiple scan targets with filters (price caps, listing type, category, condition).
-- Manual scan + auto-refresh scanning while the tab is open.
+- Auto arbitrage mode with continuous scan cycles (`--watch`).
+- Explicit buy marketplace vs sell marketplace comparison metadata.
+- Multi-sell-source comps via `SELL_MARKETPLACE` (supports comma-separated values).
+- Delivery-only filtering enabled by default.
+- Automatic stale-item pruning so old listings are periodically removed.
 - Sold/completed comp lookup with median/p25/p75 stats.
 - Profit, ROI, confidence, and deal score with explainable reasons.
 - Discord webhook alerts for new deals.
@@ -27,7 +31,7 @@ streamlit run app.py
 ## Beginner quick win
 1. Open **Manage Targets** and add 3 to 5 products you understand well.
    - Optional: use **Auto-Add Smart Targets** to let the app create new targets from strong recent results.
-2. Run one scan: `python scanner/run_scan.py`
+2. Start automatic scans: `python scanner/run_scan.py --watch`
 3. In **Dashboard**, set:
    - `Minimum confidence`: `0.50`
    - `Decision`: `deal`
@@ -36,7 +40,22 @@ streamlit run app.py
 5. Use **Capital Plan** to avoid overspending your budget.
 
 ## Marketplace mode
-The app defaults to Craigslist HTML search to reduce anti-bot blocking. eBay API mode remains optional if you explicitly set `marketplace="ebay"` in runtime settings.
+The app defaults to buying from Craigslist and selling on eBay comps. You can configure both sides independently.
+
+```bash
+# Buy-side source for active deals
+export MARKETPLACE=ebay
+
+# Sell-side source(s) for comps (default: ebay,mercari,poshmark)
+# Examples: ebay | mercari | poshmark | ebay,mercari,poshmark
+export SELL_MARKETPLACE=ebay,mercari,poshmark
+
+# Delivery-only mode (default is on)
+export DELIVERY_ONLY=1
+
+# Auto-delete listings older than this many hours (default: 72)
+export LISTING_MAX_AGE_HOURS=72
+```
 
 ```bash
 export DISCORD_WEBHOOK_URL=your_discord_webhook
@@ -68,6 +87,9 @@ export DISCORD_WEBHOOK_URL=your_discord_webhook
 - `min_score`: minimum deal score
 - `min_profit`: minimum expected profit
 - `target_profit`: target profit used for max-buy calculations
+
+Standalone server scan trigger (when Streamlit is down):
+- `POST /api/scan/run` to run a fresh scan cycle from Flask.
 
 ## Category selection
 - The Targets form uses a dropdown-driven category tree (up to 3 levels deep).

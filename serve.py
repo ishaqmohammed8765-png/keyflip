@@ -10,10 +10,13 @@ Serves the same scan data as the Streamlit dashboard, plus:
     GET /api/latest  - JSON scan data
     GET /api/health  - Health check
     GET /api/export/csv - Download scan results as CSV
+    POST /api/scan/run - Trigger a fresh scan cycle
 """
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +110,7 @@ DASHBOARD_HTML = """\
 <body>
 <h1>KeyFlip</h1>
 <p class="subtitle">Marketplace flip scanner &mdash; standalone mode (Streamlit-free)</p>
+<p class="subtitle">{{ market_label }}</p>
 
 <div class="status-bar">
   <span class="status-dot {{ 'status-ok' if data else 'status-warn' }}"></span>
@@ -254,6 +258,7 @@ def dashboard():
     items: list[dict[str, Any]] = []
     last_scan = "-"
     zero_targets = []
+    market_label = "Buy: ebay -> Sell comps: ebay,mercari,poshmark"
     summary_stats = {"deal_count": 0, "maybe_count": 0, "total_profit": 0.0, "total_items": 0}
 
     if data:
@@ -263,6 +268,10 @@ def dashboard():
             target_profit_gbp=float(os.getenv("FLIP_TARGET_PROFIT", "20")),
         )
         scan_summary = data.get("scan_summary") or {}
+        marketplaces = data.get("marketplaces") or {}
+        buy_market = marketplaces.get("buy") or scan_summary.get("buy_marketplace") or "buy"
+        sell_market = marketplaces.get("sell") or scan_summary.get("sell_marketplace") or "sell"
+        market_label = f"Buy: {buy_market} -> Sell comps: {sell_market}"
         last_scan = data.get("generated_at", "-")[:19]
         zero_targets = scan_summary.get("zero_result_targets") or []
         summary_stats = summarize_items(items)
@@ -276,6 +285,7 @@ def dashboard():
         total_profit=summary_stats["total_profit"],
         total_items=summary_stats["total_items"],
         last_scan=last_scan,
+        market_label=market_label,
         zero_targets=zero_targets,
     )
 
@@ -366,9 +376,36 @@ def api_history():
     return jsonify({"history": summary})
 
 
+@app.route("/api/scan/run", methods=["POST"])
+def api_scan_run():
+    scanner_path = ROOT_DIR / "scanner" / "run_scan.py"
+    if not scanner_path.exists():
+        return jsonify({"error": "scanner/run_scan.py not found"}), 500
+    cmd = [sys.executable, str(scanner_path), "--max-cycles", "1"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(ROOT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Scan timed out after 600s"}), 504
+    payload = {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout_tail": (proc.stdout or "")[-4000:],
+        "stderr_tail": (proc.stderr or "")[-4000:],
+        "command": cmd,
+    }
+    return (jsonify(payload), 200) if proc.returncode == 0 else (jsonify(payload), 500)
+
+
 if __name__ == "__main__":
     port = int(os.getenv("FLASK_PORT", "5000"))
     debug = os.getenv("FLASK_DEBUG", "").lower() in ("1", "true")
     print(f"KeyFlip standalone server running on http://0.0.0.0:{port}")
-    print("Endpoints: / (dashboard), /api/latest, /api/health, /api/export/csv, /api/history")
+    print("Endpoints: / (dashboard), /api/latest, /api/health, /api/export/csv, /api/history, /api/scan/run")
     app.run(host="0.0.0.0", port=port, debug=debug)

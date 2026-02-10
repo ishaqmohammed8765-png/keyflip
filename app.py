@@ -44,18 +44,22 @@ def _inject_styles() -> None:
     st.markdown(
         """
         <style>
+            @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
             .stApp {
+                font-family: 'Space Grotesk', sans-serif;
                 background:
-                    radial-gradient(1200px 600px at 90% -10%, rgba(14, 165, 233, 0.10), transparent 50%),
-                    radial-gradient(900px 450px at -10% 0%, rgba(34, 197, 94, 0.08), transparent 45%);
+                    radial-gradient(1200px 600px at 90% -10%, rgba(14, 165, 233, 0.14), transparent 50%),
+                    radial-gradient(900px 450px at -10% 0%, rgba(34, 197, 94, 0.12), transparent 45%),
+                    linear-gradient(180deg, #0b1020, #0f172a);
             }
             .summary-card {
-                background: linear-gradient(135deg, #0f172a, #1e293b);
-                border: 1px solid #334155;
+                background: linear-gradient(135deg, #111827, #0f172a);
+                border: 1px solid #1f2937;
                 border-radius: 14px;
                 padding: 0.9rem 1rem;
                 color: #e2e8f0;
                 margin-bottom: 0.8rem;
+                box-shadow: 0 12px 24px rgba(15, 23, 42, 0.24);
             }
             .summary-card h4 {
                 margin: 0;
@@ -67,6 +71,11 @@ def _inject_styles() -> None:
                 margin: 0.2rem 0 0;
                 font-size: 1.25rem;
                 font-weight: 700;
+            }
+            .stDataFrame {
+                border: 1px solid #1f2937;
+                border-radius: 12px;
+                overflow: hidden;
             }
             .deal-tag {
                 display: inline-block;
@@ -100,11 +109,11 @@ def _inject_styles() -> None:
 
 def _render_app_intro() -> None:
     st.title("KeyFlip")
-    st.caption("Personal flip scanner - find underpriced items and flip for profit.")
+    st.caption("Automated arbitrage scanner - compare buy-side deals against resale comps.")
     with st.expander("New to flipping? Start here", expanded=False):
         st.markdown(
             "1. Add 3 to 5 targets in **Manage Targets**.\n"
-            "2. Run `python scanner/run_scan.py` to refresh listings.\n"
+            "2. Run `python scanner/run_scan.py --watch` for automatic scans.\n"
             "3. In **Dashboard**, keep only `deal` and set a minimum confidence around `0.50`.\n"
             "4. Use **Max Buy** and **Suggested Offer** to avoid overpaying.\n"
             "5. Start small with a bankroll plan and reinvest profits."
@@ -116,7 +125,13 @@ def _format_gbp(value: float | None) -> str:
     return f"\u00a3{amount:.2f}"
 
 
-def _render_summary_cards(summary: dict[str, Any], actionable_count: int, total_edge: float, generated_at: str) -> None:
+def _render_summary_cards(
+    summary: dict[str, Any],
+    actionable_count: int,
+    total_edge: float,
+    generated_at: str,
+    marketplaces_label: str | None = None,
+) -> None:
     col1, col2, col3, col4 = st.columns(4)
     col1.markdown(
         f'<div class="summary-card"><h4>Deals Found</h4><p>{summary["deal_count"]}</p></div>',
@@ -137,6 +152,7 @@ def _render_summary_cards(summary: dict[str, Any], actionable_count: int, total_
     st.caption(
         f"Last scan: {generated_at[:19]} | Best score: {summary['best_score']:.1f} | "
         f"Total buy edge: {_format_gbp(total_edge)}"
+        + (f" | {marketplaces_label}" if marketplaces_label else "")
     )
 
 
@@ -251,6 +267,8 @@ def _to_display_dataframe(items: list[dict[str, Any]]) -> pd.DataFrame:
             {
                 "Decision": item.get("decision") or "unknown",
                 "Title": item.get("title") or "Untitled",
+                "Source": item.get("source") or "-",
+                "Buy->Sell": f"{item.get('buy_marketplace', '-')}\u2192{item.get('sell_marketplace', '-')}",
                 "Buy": f"\u00a3{item.get('total_buy_gbp', 0):.2f}",
                 "Resale Est": f"\u00a3{item.get('resale_est_gbp', 0):.2f}",
                 "Profit": f"\u00a3{profit:.2f}" if profit is not None else "-",
@@ -597,11 +615,23 @@ with tab_dashboard:
         summary = summarize_items(items)
         actionable_count = sum(1 for item in items if item.get("is_actionable"))
         total_edge = sum(max(0.0, item.get("buy_edge_gbp", 0.0) or 0.0) for item in items)
+        marketplaces = payload.get("marketplaces") or {}
+        buy_market = str(marketplaces.get("buy") or scan_summary.get("buy_marketplace") or "buy")
+        sell_market = str(marketplaces.get("sell") or scan_summary.get("sell_marketplace") or "sell")
+        stale_pruned = int(scan_summary.get("stale_pruned") or 0)
         age_seconds = scan_age_seconds(payload)
         if age_seconds is not None and age_seconds > 60 * 60 * 6:
             st.warning("Scan data is older than 6 hours. Run a fresh scan before purchasing inventory.")
 
-        _render_summary_cards(summary, actionable_count, total_edge, str(payload.get("generated_at", "-")))
+        _render_summary_cards(
+            summary,
+            actionable_count,
+            total_edge,
+            str(payload.get("generated_at", "-")),
+            marketplaces_label=f"Buy: {buy_market} -> Sell comps: {sell_market}",
+        )
+        if stale_pruned > 0:
+            st.caption(f"Auto-cleanup removed {stale_pruned} stale listing(s) this cycle.")
         _render_zero_result_diagnostics(items, scan_summary)
 
         if not items:

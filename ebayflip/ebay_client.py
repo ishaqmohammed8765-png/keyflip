@@ -34,6 +34,8 @@ LOGGER = get_logger()
 
 EBAY_HTML_SEARCH_URL = "https://www.ebay.co.uk/sch/i.html"
 CRAIGSLIST_SEARCH_URL_TEMPLATE = "https://{site}.craigslist.org/search/sss"
+MERCARI_SEARCH_URL = "https://www.mercari.com/search/"
+POSHMARK_SEARCH_URL = "https://poshmark.com/search"
 DEFAULT_PLAYWRIGHT_BROWSERS_PATH = "/tmp/pw-browsers"
 USER_AGENTS = [
     (
@@ -176,6 +178,9 @@ class EbayClient:
     def _api_enabled(self) -> bool:
         return self.settings.marketplace == "ebay" and self.api_provider.enabled()
 
+    def _sell_api_enabled(self) -> bool:
+        return self.settings.sell_marketplace == "ebay" and self.api_provider.enabled()
+
     def _refresh_session(self, reason: str) -> None:
         LOGGER.info("Refreshing HTTP session due to %s", reason)
         self.session = requests.Session()
@@ -257,18 +262,37 @@ class EbayClient:
             return _empty_search_result()
 
     def search_sold_comps(self, comp_query: str) -> list[SoldComp]:
+        sell_marketplace = (self.settings.sell_marketplace or "ebay").strip().lower()
+        sell_sources = _parse_sell_marketplaces(sell_marketplace)
         try:
-            if self._api_enabled():
-                try:
-                    return self.api_provider.search_sold_comps(comp_query)
-                except RequestLimitError as exc:
-                    LOGGER.info("Request cap reached during API comps search: %s", exc)
-                    return []
-                except Exception as exc:
-                    LOGGER.warning("API comps failed, falling back to HTML: %s", exc)
-            return self._search_sold_html(comp_query)
+            comps_by_source: list[SoldComp] = []
+            for source in sell_sources:
+                if source == "craigslist":
+                    comps_by_source.extend(self._search_sold_craigslist(comp_query))
+                    continue
+                if source == "mercari":
+                    comps_by_source.extend(self._search_sold_mercari(comp_query))
+                    continue
+                if source == "poshmark":
+                    comps_by_source.extend(self._search_sold_poshmark(comp_query))
+                    continue
+                if source == "ebay":
+                    if self._sell_api_enabled():
+                        try:
+                            comps_by_source.extend(self.api_provider.search_sold_comps(comp_query))
+                            continue
+                        except RequestLimitError as exc:
+                            LOGGER.info("Request cap reached during API comps search: %s", exc)
+                            return comps_by_source
+                        except Exception as exc:
+                            LOGGER.warning("API comps failed, falling back to HTML: %s", exc)
+                    comps_by_source.extend(self._search_sold_html(comp_query))
+                    continue
+                LOGGER.warning("Unknown sell marketplace '%s'; skipping.", source)
+            deduped = _dedupe_sold_comps(comps_by_source)
+            return deduped[: self.settings.comps_limit]
         except RequestLimitError as exc:
-            LOGGER.info("Request cap reached during HTML comps search: %s", exc)
+            LOGGER.info("Request cap reached during %s comps search: %s", sell_marketplace, exc)
             return []
         except requests.RequestException as exc:
             LOGGER.warning("Sold comps search failed: %s", exc)
@@ -674,7 +698,7 @@ class EbayClient:
         )
 
     def _search_sold_html(self, comp_query: str) -> list[SoldComp]:
-        # Always use eBay sold listings for comps - Craigslist has no sold data
+        # eBay sold listings HTML fallback for resale comps.
         params = {
             "_nkw": comp_query,
             "LH_Sold": "1",
@@ -710,7 +734,9 @@ class EbayClient:
 
     def _search_sold_craigslist(self, comp_query: str) -> list[SoldComp]:
         params = {"query": comp_query, "sort": "date"}
-        response, _ = self._request(self.search_url, params=params, delay=True)
+        site = self.settings.craigslist_site.strip().lower() or "sfbay"
+        search_url = CRAIGSLIST_SEARCH_URL_TEMPLATE.format(site=site)
+        response, _ = self._request(search_url, params=params, delay=True)
         soup = BeautifulSoup(response.text, "lxml")
         comps: list[SoldComp] = []
         for card in soup.select("li.cl-static-search-result")[: self.settings.comps_limit]:
@@ -724,6 +750,70 @@ class EbayClient:
                 continue
             price_gbp, _ = self._normalize_currency(price_value, 0.0, currency)
             comps.append(SoldComp(price_gbp=price_gbp, title=title_el.get_text(strip=True), url=link_el.get("href") if link_el else None))
+        return comps
+
+    def _search_sold_mercari(self, comp_query: str) -> list[SoldComp]:
+        params = {"keyword": comp_query, "status": "sold"}
+        response, _ = self._request(MERCARI_SEARCH_URL, params=params, delay=True)
+        soup = BeautifulSoup(response.text, "lxml")
+        comps: list[SoldComp] = []
+        cards = soup.select("li[data-testid='ItemCell'], div[data-testid='ItemCell']") or soup.select("li, div")
+        for card in cards[: self.settings.comps_limit * 2]:
+            text = card.get_text(" ", strip=True).lower()
+            if "sold" not in text:
+                continue
+            title_el = card.select_one("img[alt]") or card.select_one("a")
+            price_el = card.select_one("[data-testid='Price'], span, p")
+            if not title_el or not price_el:
+                continue
+            title = title_el.get("alt") if getattr(title_el, "get", None) else None
+            if not title:
+                title = title_el.get_text(strip=True)
+            if not title:
+                continue
+            price_value, currency = _parse_price(price_el.get_text(strip=True))
+            if price_value <= 0 or not self._currency_allowed(currency):
+                continue
+            price_gbp, _ = self._normalize_currency(price_value, 0.0, currency)
+            link_el = card.select_one("a[href]")
+            href = link_el.get("href") if link_el else None
+            if href and href.startswith("/"):
+                href = f"https://www.mercari.com{href}"
+            comps.append(SoldComp(price_gbp=price_gbp, title=title, url=href))
+            if len(comps) >= self.settings.comps_limit:
+                break
+        return comps
+
+    def _search_sold_poshmark(self, comp_query: str) -> list[SoldComp]:
+        params = {"query": comp_query, "availability": "sold_out"}
+        response, _ = self._request(POSHMARK_SEARCH_URL, params=params, delay=True)
+        soup = BeautifulSoup(response.text, "lxml")
+        comps: list[SoldComp] = []
+        cards = soup.select("div.tile") or soup.select("li, div")
+        for card in cards[: self.settings.comps_limit * 2]:
+            text = card.get_text(" ", strip=True).lower()
+            if "sold" not in text:
+                continue
+            title_el = card.select_one("img[alt]") or card.select_one("a")
+            price_el = card.select_one(".p--t--1, .price, span")
+            if not title_el or not price_el:
+                continue
+            title = title_el.get("alt") if getattr(title_el, "get", None) else None
+            if not title:
+                title = title_el.get_text(strip=True)
+            if not title:
+                continue
+            price_value, currency = _parse_price(price_el.get_text(strip=True))
+            if price_value <= 0 or not self._currency_allowed(currency):
+                continue
+            price_gbp, _ = self._normalize_currency(price_value, 0.0, currency)
+            link_el = card.select_one("a[href]")
+            href = link_el.get("href") if link_el else None
+            if href and href.startswith("/"):
+                href = f"https://poshmark.com{href}"
+            comps.append(SoldComp(price_gbp=price_gbp, title=title, url=href))
+            if len(comps) >= self.settings.comps_limit:
+                break
         return comps
 
     def _currency_allowed(self, currency: str) -> bool:
@@ -1555,6 +1645,34 @@ def _parse_price(text: str) -> tuple[float, str]:
     return min(values), currency
 
 
+def _parse_sell_marketplaces(raw: str) -> list[str]:
+    parts = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not parts:
+        return ["ebay"]
+    order: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if part in seen:
+            continue
+        seen.add(part)
+        order.append(part)
+    allowed = {"ebay", "mercari", "poshmark"}
+    filtered = [part for part in order if part in allowed]
+    return filtered or ["ebay"]
+
+
+def _dedupe_sold_comps(comps: list[SoldComp]) -> list[SoldComp]:
+    deduped: list[SoldComp] = []
+    seen: set[tuple[str, int]] = set()
+    for comp in comps:
+        key = ((comp.title or "").strip().lower(), int(round(comp.price_gbp * 100)))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(comp)
+    return deduped
+
+
 def _extract_item_id(url: str) -> str:
     if not url:
         return ""
@@ -1664,6 +1782,9 @@ def _parse_craigslist_listings(
         image_url = None
         if image_el:
             image_url = image_el.get("src") or image_el.get("data-src")
+        card_text = card.get_text(" ", strip=True) if card else ""
+        card_text_lower = card_text.lower()
+        delivery_hint = any(token in card_text_lower for token in ("delivery", "shipping", "postage", "ship"))
         listings.append(
             Listing(
                 ebay_item_id=str(listing_id),
@@ -1679,7 +1800,11 @@ def _parse_craigslist_listings(
                 listing_type="fixed",
                 location=_get_text(location_el),
                 image_url=image_url,
-                raw_json={"source": "craigslist_html"},
+                raw_json={
+                    "source": "craigslist_html",
+                    "card_text": card_text[:1000],
+                    "delivery_hint": delivery_hint,
+                },
             )
         )
     return listings, metrics
@@ -1757,6 +1882,10 @@ def _parse_html_listings(
                 "assumed_shipping_gbp": assumed_shipping,
                 "price_text": price_text,
                 "shipping_text": shipping_text,
+                "free_shipping": bool(shipping_text and "free" in shipping_text.lower()),
+                "shipping_type": "pickup"
+                if shipping_text and any(token in shipping_text.lower() for token in ("collection", "pickup"))
+                else "delivery",
             },
         )
         listings.append(listing)
@@ -1930,6 +2059,7 @@ def _parse_json_ld_listings(
                     "source": "html-jsonld",
                     "shipping_missing": True,
                     "assumed_shipping_gbp": assumed_shipping,
+                    "shipping_type": "delivery",
                 },
             )
         )
@@ -1977,6 +2107,7 @@ def _parse_initial_state_listings(
                     "source": "html-initial-state",
                     "shipping_missing": True,
                     "assumed_shipping_gbp": assumed_shipping,
+                    "shipping_type": "delivery",
                 },
             )
         )

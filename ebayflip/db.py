@@ -217,6 +217,11 @@ def upsert_listing(db_path: str, listing: Listing) -> tuple[int, bool]:
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_connection(db_path) as conn:
         cursor = conn.cursor()
+        existing = conn.execute(
+            "SELECT id FROM listings WHERE ebay_item_id = ?",
+            (listing.ebay_item_id,),
+        ).fetchone()
+        is_new = existing is None
         cursor.execute(
             """
             INSERT INTO listings
@@ -269,9 +274,6 @@ def upsert_listing(db_path: str, listing: Listing) -> tuple[int, bool]:
             (listing.ebay_item_id,),
         ).fetchone()
         listing_id = int(row["id"])
-        # rowcount == 1 for insert, but ON CONFLICT UPDATE also reports 1
-        # Use lastrowid: non-zero only on actual INSERT
-        is_new = cursor.lastrowid is not None and cursor.lastrowid > 0 and cursor.lastrowid == listing_id
         return listing_id, is_new
 
 
@@ -404,7 +406,8 @@ def list_evaluations_with_listings(db_path: str) -> list[dict]:
                 l.returns_accepted,
                 l.listing_type,
                 l.start_time,
-                l.end_time
+                l.end_time,
+                l.raw_json
             FROM evaluations e
             JOIN listings l ON l.id = e.listing_id
             ORDER BY e.evaluated_at DESC
@@ -448,3 +451,27 @@ def was_alert_sent(db_path: str, listing_id: int, channel: str) -> bool:
             (listing_id, channel),
         ).fetchone()
     return row is not None
+
+
+def prune_stale_listings(db_path: str, *, max_age_hours: int) -> int:
+    if max_age_hours <= 0:
+        return 0
+    with get_connection(db_path) as conn:
+        cutoff_expr = f"-{int(max_age_hours)} hours"
+        stale_ids = conn.execute(
+            """
+            SELECT id FROM listings
+            WHERE datetime(last_seen_at) < datetime('now', ?)
+            """,
+            (cutoff_expr,),
+        ).fetchall()
+        if not stale_ids:
+            return 0
+        ids = [int(row["id"]) for row in stale_ids]
+        placeholders = ",".join("?" for _ in ids)
+        conn.execute(f"DELETE FROM alerts_sent WHERE listing_id IN ({placeholders})", ids)
+        conn.execute(f"DELETE FROM evaluations WHERE listing_id IN ({placeholders})", ids)
+        conn.execute(f"DELETE FROM comps WHERE listing_id IN ({placeholders})", ids)
+        conn.execute(f"DELETE FROM listings WHERE id IN ({placeholders})", ids)
+        LOGGER.info("Pruned %s stale listing(s) older than %s hour(s).", len(ids), max_age_hours)
+        return len(ids)

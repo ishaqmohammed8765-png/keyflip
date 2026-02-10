@@ -85,14 +85,23 @@ def _condition_matches(listing_condition: str, target_condition: str) -> bool:
 
 
 def _has_delivery(listing: Listing) -> bool:
-    if listing.shipping_gbp is not None and listing.shipping_gbp >= 0:
-        return True
     if listing.raw_json:
-        shipping_type = listing.raw_json.get("shipping_type", "")
-        if shipping_type and shipping_type.lower() not in ("pickup", "local_pickup", "collection"):
+        source = str(listing.raw_json.get("source", "")).lower()
+        shipping_type = str(listing.raw_json.get("shipping_type", "")).lower()
+        if shipping_type and shipping_type not in ("pickup", "local_pickup", "collection"):
             return True
         if listing.raw_json.get("free_shipping"):
             return True
+        if source.startswith("craigslist"):
+            if listing.raw_json.get("delivery_hint") is True:
+                return True
+            text = str(listing.raw_json.get("card_text", "")).lower()
+            title = (listing.title or "").lower()
+            if any(token in text or token in title for token in ("delivery", "shipping", "postage", "ship")):
+                return True
+            return False
+    if listing.shipping_gbp is not None and listing.shipping_gbp > 0:
+        return True
     return False
 
 
