@@ -429,7 +429,7 @@ def list_comps_by_listing(db_path: str, listing_id: int) -> list[CompStats]:
     return [CompStats.from_row(row) for row in rows]
 
 
-def mark_alert_sent(db_path: str, listing_id: int, channel: str) -> None:
+def reserve_alert_send(db_path: str, listing_id: int, channel: str) -> bool:
     with get_connection(db_path) as conn:
         try:
             conn.execute(
@@ -439,9 +439,25 @@ def mark_alert_sent(db_path: str, listing_id: int, channel: str) -> None:
                 """,
                 (listing_id, channel, datetime.now(timezone.utc).isoformat()),
             )
+            return True
         except sqlite3.IntegrityError:
             # Concurrent alert writers can race; uniqueness protects against duplicate notifications.
-            return
+            return False
+
+
+def release_alert_send(db_path: str, listing_id: int, channel: str) -> None:
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            DELETE FROM alerts_sent
+            WHERE listing_id = ? AND channel = ?
+            """,
+            (listing_id, channel),
+        )
+
+
+def mark_alert_sent(db_path: str, listing_id: int, channel: str) -> None:
+    reserve_alert_send(db_path, listing_id, channel)
 
 
 def was_alert_sent(db_path: str, listing_id: int, channel: str) -> bool:

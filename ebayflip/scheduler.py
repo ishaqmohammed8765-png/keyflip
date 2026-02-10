@@ -16,11 +16,11 @@ from ebayflip.db import (
     insert_comps,
     insert_evaluation,
     list_targets,
-    mark_alert_sent,
+    reserve_alert_send,
+    release_alert_send,
     upsert_listing,
-    was_alert_sent,
 )
-from ebayflip.ebay_client import EbayClient, SearchAttemptLog, SearchResult
+from ebayflip.ebay_client import EbayClient, RequestBudget, SearchAttemptLog, SearchResult
 from ebayflip.models import CompStats, Evaluation, Listing, Target
 from ebayflip.scoring import evaluate_listing
 
@@ -123,6 +123,8 @@ class ArbitrageScanner:
         self.opportunities: list[ArbitrageOpportunity] = []
         self.stop_scan = False
         self.total_request_count = 0
+        self.request_budget = RequestBudget(self.config.run.request_cap)
+        self._attach_budget(self.client)
 
     def scan(self) -> ScanSummary:
         init_db(self.config.db_path)
@@ -135,7 +137,7 @@ class ArbitrageScanner:
                     break
                 result = self._scan_target(target, self.client)
                 self._merge_result(result)
-                self.total_request_count = self.client.request_count
+                self.total_request_count = self._client_total_requests(self.client)
                 if result.request_cap_reached:
                     self.stop_scan = True
                     self.request_cap_reached = True
@@ -164,7 +166,11 @@ class ArbitrageScanner:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {}
             for target in targets:
-                worker_client = EbayClient(self.config.run, app_id=self.client.app_id)
+                worker_client = EbayClient(
+                    self.config.run,
+                    app_id=self.client.app_id,
+                    request_budget=self.request_budget,
+                )
                 worker_clients.append(worker_client)
                 future = executor.submit(self._scan_target, target, worker_client)
                 futures[future] = target
@@ -176,7 +182,7 @@ class ArbitrageScanner:
                     LOGGER.exception("Target scan failed for %s", target.name)
                     continue
                 self._merge_result(result)
-        self.total_request_count = sum(client.request_count for client in worker_clients)
+        self.total_request_count = self.request_budget.used
 
     def _scan_target(self, target: Target, client: EbayClient) -> TargetScanResult:
         result = TargetScanResult()
@@ -199,12 +205,12 @@ class ArbitrageScanner:
                     debug_artifacts=[],
                 )
             )
-            result.request_count = client.request_count
+            result.request_count = self._client_total_requests(client)
             return result
-        if client.request_count >= self.config.run.request_cap:
+        if self._client_cap_reached(client):
             LOGGER.info("Request cap reached, stopping scan.")
             result.request_cap_reached = True
-            result.request_count = client.request_count
+            result.request_count = self._client_total_requests(client)
             return result
 
         result.scanned_targets = 1
@@ -272,17 +278,17 @@ class ArbitrageScanner:
             if evaluation.decision in ("deal", "maybe"):
                 result.deals += 1
                 _send_alert_if_needed(self.config, listing_id, listing, evaluation)
-            if client.request_cap_reached:
+            if self._client_cap_reached(client):
                 result.request_cap_reached = True
                 break
-        result.request_count = client.request_count
+        result.request_count = self._client_total_requests(client)
         return result
 
     def _comps_for_listing(self, listing_id: int, listing: Listing, target: Target, *, client: EbayClient) -> CompStats:
         comps = get_latest_comps(self.config.db_path, listing_id)
         if comps is None or _comps_stale(comps.computed_at, self.config.run.comps_ttl_hours):
             comp_query = _comp_query_for_listing(listing, target)
-            if client.request_count >= self.config.run.request_cap:
+            if self._client_cap_reached(client):
                 if comps is None:
                     LOGGER.info("Request cap reached before comps search; using empty comps.")
                     comps = compute_comp_stats(comp_query, [])
@@ -306,9 +312,25 @@ class ArbitrageScanner:
         if result.request_cap_reached:
             self.request_cap_reached = True
 
+    def _attach_budget(self, client: EbayClient) -> None:
+        if hasattr(client, "attach_request_budget"):
+            client.attach_request_budget(self.request_budget)
+
+    def _client_cap_reached(self, client: EbayClient) -> bool:
+        if hasattr(client, "cap_reached"):
+            return bool(client.cap_reached())
+        return bool(getattr(client, "request_cap_reached", False)) or (
+            int(getattr(client, "request_count", 0)) >= self.config.run.request_cap
+        )
+
+    def _client_total_requests(self, client: EbayClient) -> int:
+        if hasattr(client, "total_request_count"):
+            return int(client.total_request_count())
+        return int(getattr(client, "request_count", 0))
+
 
 def _send_alert_if_needed(config: AppConfig, listing_id: int, listing: Listing, evaluation: Evaluation) -> None:
-    if was_alert_sent(config.db_path, listing_id, "discord"):
+    if not reserve_alert_send(config.db_path, listing_id, "discord"):
         return
     sent = send_discord_alert(
         config.alerts.discord_webhook_url,
@@ -321,8 +343,8 @@ def _send_alert_if_needed(config: AppConfig, listing_id: int, listing: Listing, 
         evaluation.confidence,
         evaluation.reasons,
     )
-    if sent:
-        mark_alert_sent(config.db_path, listing_id, "discord")
+    if not sent:
+        release_alert_send(config.db_path, listing_id, "discord")
 
 
 def _normalize_target_query(target: Target) -> tuple[Target, Optional[str]]:
@@ -357,5 +379,7 @@ def _comps_stale(computed_at: Optional[str], ttl_hours: int) -> bool:
         computed_time = datetime.fromisoformat(computed_at)
     except ValueError:
         return True
+    if computed_time.tzinfo is None:
+        computed_time = computed_time.replace(tzinfo=timezone.utc)
     age = datetime.now(timezone.utc) - computed_time
     return age.total_seconds() >= ttl_hours * 3600

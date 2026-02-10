@@ -15,8 +15,11 @@ Serves the same scan data as the Streamlit dashboard, plus:
 from __future__ import annotations
 
 import os
+import hmac
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +37,8 @@ LATEST_SCAN_PATH = ROOT_DIR / "data" / "latest.json"
 HISTORY_PATH = ROOT_DIR / "data" / "history.jsonl"
 
 app = Flask(__name__)
+_SCAN_LOCK = threading.Lock()
+_LAST_SCAN_TRIGGER_MONO = 0.0
 
 from ebayflip.dashboard_data import (
     filter_items,
@@ -252,6 +257,40 @@ def _query_float(name: str) -> float | None:
         return None
 
 
+def _scan_trigger_enabled() -> bool:
+    return os.getenv("SCAN_RUN_ENABLED", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _extract_scan_token() -> str | None:
+    auth_header = request.headers.get("Authorization", "").strip()
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header[7:].strip()
+        if token:
+            return token
+    token = request.headers.get("X-Scan-Token", "").strip()
+    return token or None
+
+
+def _scan_token_valid() -> bool:
+    expected = os.getenv("SCAN_RUN_TOKEN", "").strip()
+    provided = _extract_scan_token() or ""
+    if not expected:
+        return False
+    return hmac.compare_digest(provided, expected)
+
+
+def _acquire_scan_slot() -> bool:
+    global _LAST_SCAN_TRIGGER_MONO
+    min_interval = max(1, int(os.getenv("SCAN_RUN_MIN_INTERVAL_SECONDS", "120")))
+    now = time.monotonic()
+    with _SCAN_LOCK:
+        elapsed = now - _LAST_SCAN_TRIGGER_MONO
+        if elapsed < min_interval:
+            return False
+        _LAST_SCAN_TRIGGER_MONO = now
+        return True
+
+
 @app.route("/")
 def dashboard():
     data = load_latest_scan(LATEST_SCAN_PATH)
@@ -378,6 +417,13 @@ def api_history():
 
 @app.route("/api/scan/run", methods=["POST"])
 def api_scan_run():
+    if not _scan_trigger_enabled():
+        return jsonify({"error": "Scan trigger endpoint disabled"}), 403
+    if not _scan_token_valid():
+        return jsonify({"error": "Unauthorized"}), 401
+    if not _acquire_scan_slot():
+        return jsonify({"error": "Rate limited; try again later"}), 429
+
     scanner_path = ROOT_DIR / "scanner" / "run_scan.py"
     if not scanner_path.exists():
         return jsonify({"error": "scanner/run_scan.py not found"}), 500
@@ -396,16 +442,18 @@ def api_scan_run():
     payload = {
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
-        "stdout_tail": (proc.stdout or "")[-4000:],
-        "stderr_tail": (proc.stderr or "")[-4000:],
         "command": cmd,
     }
+    if os.getenv("SCAN_RUN_VERBOSE_RESPONSE", "").strip().lower() in {"1", "true", "yes", "y", "on"}:
+        payload["stdout_tail"] = (proc.stdout or "")[-4000:]
+        payload["stderr_tail"] = (proc.stderr or "")[-4000:]
     return (jsonify(payload), 200) if proc.returncode == 0 else (jsonify(payload), 500)
 
 
 if __name__ == "__main__":
+    host = os.getenv("FLASK_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.getenv("FLASK_PORT", "5000"))
     debug = os.getenv("FLASK_DEBUG", "").lower() in ("1", "true")
-    print(f"KeyFlip standalone server running on http://0.0.0.0:{port}")
+    print(f"KeyFlip standalone server running on http://{host}:{port}")
     print("Endpoints: / (dashboard), /api/latest, /api/health, /api/export/csv, /api/history, /api/scan/run")
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host=host, port=port, debug=debug)

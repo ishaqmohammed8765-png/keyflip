@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
@@ -160,12 +161,41 @@ class SearchCriteria:
     listing_type: str
 
 
+class RequestBudget:
+    def __init__(self, max_requests: int) -> None:
+        self.max_requests = max(1, int(max_requests))
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        with self._lock:
+            if self._used >= self.max_requests:
+                return False
+            self._used += 1
+            return True
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    def reached(self) -> bool:
+        with self._lock:
+            return self._used >= self.max_requests
+
+
 class EbayClient:
-    def __init__(self, settings: RunSettings, app_id: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        settings: RunSettings,
+        app_id: Optional[str] = None,
+        request_budget: Optional[RequestBudget] = None,
+    ) -> None:
         self.settings = settings
         self.app_id = app_id
         self.request_count = 0
         self.request_cap_reached = False
+        self.request_budget = request_budget or RequestBudget(self.settings.request_cap)
         self.cache = CacheStore(".cache/ebayflip_cache.sqlite", ttl_seconds=300)
         self.session = requests.Session()
         self.api_provider = EbayApiProvider(self)
@@ -176,6 +206,17 @@ class EbayClient:
         )
         self.search_url = _search_url(self.settings)
         self._apply_session_headers()
+
+    def attach_request_budget(self, request_budget: RequestBudget) -> None:
+        self.request_budget = request_budget
+        self.request_cap_reached = request_budget.reached()
+        self.request_count = request_budget.used
+
+    def total_request_count(self) -> int:
+        return self.request_budget.used
+
+    def cap_reached(self) -> bool:
+        return self.request_cap_reached or self.request_budget.reached()
 
     def _apply_session_headers(self) -> None:
         user_agent = random.choice(USER_AGENTS)
@@ -211,8 +252,9 @@ class EbayClient:
                 return _cached_to_response(cached, cache_key), True
         response: Optional[requests.Response] = None
         for attempt in range(max_attempts):
-            if self.request_count >= self.settings.request_cap:
+            if not self.request_budget.try_acquire():
                 self.request_cap_reached = True
+                self.request_count = self.request_budget.used
                 raise RequestLimitError("Request cap reached.")
             if delay:
                 time.sleep(random.uniform(0.6, 1.4))

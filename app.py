@@ -398,28 +398,21 @@ def _render_history_tab() -> None:
 
 
 def _render_targets_tab() -> None:
-    st.subheader("Manage Scan Targets")
-    st.caption("Beginner tip: start with 3 to 5 specific products with strong resale demand.")
+    st.subheader("Automatic Targets")
+    st.caption("Targets are managed automatically by scanner discovery and popular-category seeding.")
     try:
-        from ebayflip.db import (
-            add_target,
-            delete_target,
-            init_db,
-            list_evaluations_with_listings,
-            list_targets,
-            update_target,
-        )
-        from ebayflip.models import Target
-        from ebayflip.target_suggestions import suggest_targets_from_evaluations
+        from ebayflip.db import init_db, list_targets
 
         db_path = str(DB_PATH)
         init_db(db_path)
         targets = list_targets(db_path)
         if not targets:
-            st.info("No targets yet. Add one manually or use Smart Auto-Add after at least one scan.")
+            st.info(
+                "No targets yet. Run `python scanner/run_scan.py --watch` and the scanner will auto-seed targets."
+            )
 
         if targets:
-            st.caption(f"{len(targets)} target(s) configured")
+            st.caption(f"{len(targets)} auto-managed target(s) configured")
             for target in targets:
                 with st.expander(f"{'[ON]' if target.enabled else '[OFF]'} {target.name}"):
                     st.text(f"ID: {target.id}")
@@ -434,155 +427,12 @@ def _render_targets_tab() -> None:
                     )
                     st.text(f"Country: {target.country}")
                     st.text(f"Created: {target.created_at}")
-
-                    col_toggle, col_delete = st.columns(2)
-                    with col_toggle:
-                        new_enabled = st.checkbox(
-                            "Enabled",
-                            value=target.enabled,
-                            key=f"toggle_{target.id}",
-                        )
-                        if new_enabled != target.enabled:
-                            import dataclasses
-
-                            updated = dataclasses.replace(target, enabled=new_enabled)
-                            update_target(db_path, updated)
-                            st.rerun()
-                    with col_delete:
-                        if st.button("Delete", key=f"delete_{target.id}"):
-                            delete_target(db_path, target.id)
-                            st.rerun()
-
         st.divider()
-        st.subheader("Smart Auto-Add")
-        st.caption("Adds new targets automatically from recent high-confidence deals.")
-        country_options = ["UK", "US", "DE", "FR", "AU"]
-        default_country = "UK"
-        if targets:
-            existing_country = (targets[0].country or "").upper()
-            if existing_country in country_options:
-                default_country = existing_country
-        smart_col1, smart_col2, smart_col3, smart_col4 = st.columns([1, 1, 1, 1])
-        with smart_col1:
-            smart_limit = st.slider("Auto-add count", min_value=1, max_value=5, value=2, step=1)
-        with smart_col2:
-            smart_min_conf = st.slider(
-                "Min confidence",
-                min_value=0.30,
-                max_value=0.95,
-                value=0.60,
-                step=0.05,
-                help="Uses only stronger historical picks.",
-            )
-        with smart_col3:
-            smart_min_profit = st.number_input(
-                "Min expected profit (GBP)",
-                min_value=0.0,
-                value=15.0,
-                step=1.0,
-            )
-        with smart_col4:
-            smart_country = st.selectbox(
-                "Country",
-                country_options,
-                index=country_options.index(default_country),
-            )
-        if st.button("Auto-Add Smart Targets", type="primary"):
-            init_db(db_path)
-            evaluation_rows = list_evaluations_with_listings(db_path)
-            # Fallback: use latest snapshot if evaluation history is empty.
-            if not evaluation_rows:
-                payload = load_latest_scan(LATEST_SCAN_PATH) or {}
-                raw_items = payload.get("items") or []
-                evaluation_rows = [
-                    {
-                        "decision": item.get("decision"),
-                        "confidence": item.get("confidence"),
-                        "expected_profit_gbp": item.get("expected_profit_gbp"),
-                        "title": item.get("title"),
-                        "total_buy_gbp": item.get("total_buy_gbp"),
-                    }
-                    for item in raw_items
-                ]
-            suggestions = suggest_targets_from_evaluations(
-                evaluation_rows,
-                targets,
-                limit=smart_limit,
-                min_confidence=smart_min_conf,
-                min_profit_gbp=smart_min_profit,
-            )
-            if not suggestions:
-                st.info(
-                    "No smart suggestions yet. Run a fresh scan so the app has profitable listings to learn from."
-                )
-            else:
-                added: list[str] = []
-                for suggestion in suggestions:
-                    add_target(
-                        db_path,
-                        Target(
-                            id=None,
-                            name=suggestion.name,
-                            query=suggestion.query,
-                            max_buy_gbp=suggestion.max_buy_gbp,
-                            country=smart_country,
-                        ),
-                    )
-                    added.append(suggestion.name)
-                st.success(f"Added {len(added)} smart target(s): {', '.join(added)}")
-                st.rerun()
-
-        st.divider()
-        st.subheader("Add New Target")
-        with st.form("add_target_form"):
-            new_name = st.text_input("Target Name", placeholder="e.g., iPhone 15 Pro")
-            new_query = st.text_input("Search Query", placeholder="e.g., iPhone 15 Pro 128GB")
-            new_max_buy = st.number_input(
-                "Max Buy Price (GBP)",
-                min_value=0.0,
-                value=0.0,
-                step=10.0,
-                help="Set a hard cap so the scanner ignores expensive listings.",
-            )
-            new_max_shipping = st.number_input(
-                "Max Shipping (GBP)",
-                min_value=0.0,
-                value=0.0,
-                step=1.0,
-            )
-            new_country = st.selectbox("Country", ["UK", "US", "DE", "FR", "AU"], index=0)
-            submitted = st.form_submit_button("Add Target")
-            if submitted:
-                cleaned_name = new_name.strip()
-                cleaned_query = new_query.strip() or cleaned_name
-                if not cleaned_name:
-                    st.error("Target name is required.")
-                elif not cleaned_query:
-                    st.error("Search query is required.")
-                else:
-                    duplicate = any(
-                        (target.name or "").strip().lower() == cleaned_name.lower()
-                        and (target.query or "").strip().lower() == cleaned_query.lower()
-                        and (target.country or "").strip().upper() == new_country
-                        for target in targets
-                    )
-                    if duplicate:
-                        st.warning("A matching target already exists. Edit the existing one instead of adding a duplicate.")
-                    else:
-                        init_db(db_path)
-                        add_target(
-                            db_path,
-                            Target(
-                                id=None,
-                                name=cleaned_name,
-                                query=cleaned_query,
-                                max_buy_gbp=new_max_buy if new_max_buy > 0 else None,
-                                shipping_max_gbp=new_max_shipping if new_max_shipping > 0 else None,
-                                country=new_country,
-                            ),
-                        )
-                        st.success(f"Added target: {cleaned_name}")
-                        st.rerun()
+        st.caption(
+            "Automatic behavior is controlled from environment variables: "
+            "`AUTO_POPULAR_TARGETS`, `POPULAR_TARGETS_PER_CATEGORY`, `AUTO_SMART_TARGETS`, "
+            "`AUTO_SMART_TARGET_LIMIT`, `MIN_SMART_TARGET_CONFIDENCE`, `MIN_SMART_TARGET_PROFIT_GBP`."
+        )
 
     except Exception as exc:
         st.error(f"Could not load target management: {exc}")
@@ -593,7 +443,7 @@ _render_app_intro()
 
 
 # --- Navigation tabs ---
-tab_dashboard, tab_history, tab_targets = st.tabs(["Dashboard", "Scan History", "Manage Targets"])
+tab_dashboard, tab_history, tab_targets = st.tabs(["Dashboard", "Scan History", "Automatic Targets"])
 
 # ======== DASHBOARD TAB ========
 with tab_dashboard:

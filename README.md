@@ -24,6 +24,7 @@ Streamlit app that automatically scans listings, compares them against multi-sit
 - Deal intelligence: max buy at target profit, break-even buy, suggested offer price, and buy-edge.
 - Capital planner: pick a portfolio of actionable flips within your bankroll budget.
 - Smart target auto-add: proposes and inserts new targets from recent high-confidence deals.
+- Targets are auto-managed; manual target creation is disabled in the dashboard UI.
 
 ## Quick start
 ```bash
@@ -32,9 +33,8 @@ streamlit run app.py
 ```
 
 ## Beginner quick win
-1. Open **Manage Targets** and add 3 to 5 products you understand well.
-   - Optional: use **Auto-Add Smart Targets** to let the app create new targets from strong recent results.
-2. Start automatic scans: `python scanner/run_scan.py --watch`
+1. Start automatic scans: `python scanner/run_scan.py --watch`
+2. Let scanner auto-manage targets from defaults, popular categories, and smart discovery.
 3. In **Dashboard**, set:
    - `Minimum confidence`: `0.50`
    - `Decision`: `deal`
@@ -104,6 +104,10 @@ export DISCORD_WEBHOOK_URL=your_discord_webhook
 
 Standalone server scan trigger (when Streamlit is down):
 - `POST /api/scan/run` to run a fresh scan cycle from Flask.
+- Disabled by default. Enable with `SCAN_RUN_ENABLED=1` and set `SCAN_RUN_TOKEN`.
+- Authenticate with `Authorization: Bearer <token>` or `X-Scan-Token: <token>`.
+- Trigger calls are rate-limited by `SCAN_RUN_MIN_INTERVAL_SECONDS` (default `120`).
+- Scan logs are excluded from API responses by default; enable with `SCAN_RUN_VERBOSE_RESPONSE=1`.
 
 ## Category selection
 - The Targets form uses a dropdown-driven category tree (up to 3 levels deep).
