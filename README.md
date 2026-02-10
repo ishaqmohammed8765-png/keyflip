@@ -48,6 +48,10 @@ The app defaults to buying from Craigslist and selling on eBay comps. You can co
 ```bash
 # Buy-side source for active deals
 export MARKETPLACE=ebay
+#
+# If eBay blocks (splashui/captcha), auto-fallback can switch buy-side to Mercari.
+export BUY_BLOCKED_FALLBACK_ENABLED=1
+export BUY_BLOCKED_FALLBACK_MARKETPLACE=mercari
 
 # Sell-side source(s) for comps (default: ebay,mercari,poshmark)
 # Examples: ebay | mercari | poshmark | ebay,mercari,poshmark
@@ -69,6 +73,11 @@ export AUTO_SMART_TARGETS=1
 
 # Live FX conversion (fallback remains available)
 export LIVE_FX_ENABLED=1
+```
+
+If you want to fully avoid eBay buy-side scraping, set:
+```bash
+export MARKETPLACE=mercari
 ```
 
 ```bash

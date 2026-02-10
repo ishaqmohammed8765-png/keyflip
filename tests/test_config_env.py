@@ -28,10 +28,10 @@ def test_delivery_only_defaults_to_true(monkeypatch) -> None:
     assert settings.delivery_only is True
 
 
-def test_marketplace_craigslist_is_coerced_to_ebay(monkeypatch) -> None:
+def test_marketplace_craigslist_is_supported(monkeypatch) -> None:
     monkeypatch.setenv("MARKETPLACE", "craigslist")
     settings = RunSettings.from_env()
-    assert settings.marketplace == "ebay"
+    assert settings.marketplace == "craigslist"
 
 
 def test_sanitize_sell_marketplaces(monkeypatch) -> None:

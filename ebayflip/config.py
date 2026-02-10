@@ -104,8 +104,6 @@ class RunSettings:
     @classmethod
     def from_env(cls, **overrides: object) -> "RunSettings":
         marketplace = os.getenv("MARKETPLACE", "ebay").strip().lower() or "ebay"
-        if marketplace == "craigslist":
-            marketplace = "ebay"
         sell_marketplace_raw = (
             os.getenv("SELL_MARKETPLACE", "ebay,mercari,poshmark").strip().lower()
             or "ebay,mercari,poshmark"

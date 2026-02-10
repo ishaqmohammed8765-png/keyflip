@@ -228,6 +228,75 @@ class EbayClient:
     def _sell_api_enabled(self) -> bool:
         return self.settings.sell_marketplace == "ebay" and self.api_provider.enabled()
 
+    def _buy_fallback_enabled(self) -> bool:
+        return os.getenv("BUY_BLOCKED_FALLBACK_ENABLED", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+
+    def _blocked_buy_fallback_marketplace(self) -> str:
+        return os.getenv("BUY_BLOCKED_FALLBACK_MARKETPLACE", "mercari").strip().lower() or "mercari"
+
+    def _search_active_with_blocked_fallback(
+        self,
+        target: Target,
+        *,
+        blocked_result: SearchResult,
+    ) -> SearchResult:
+        if self.settings.marketplace != "ebay":
+            return blocked_result
+        if not self._buy_fallback_enabled():
+            return blocked_result
+        fallback_marketplace = self._blocked_buy_fallback_marketplace()
+        if fallback_marketplace not in {"craigslist", "mercari", "poshmark"}:
+            LOGGER.warning("Unsupported buy fallback marketplace '%s'; returning blocked result.", fallback_marketplace)
+            return blocked_result
+        fallback_settings = dataclasses.replace(self.settings, marketplace=fallback_marketplace)
+        fallback_client = EbayClient(
+            fallback_settings,
+            app_id=self.app_id,
+            request_budget=self.request_budget,
+        )
+        LOGGER.warning(
+            "Buy-side fallback activated after eBay block. from=%s to=%s query=%s reason=%s",
+            self.settings.marketplace,
+            fallback_marketplace,
+            target.query,
+            blocked_result.blocked.reason if blocked_result.blocked else "blocked",
+        )
+        fallback_result = fallback_client._search_active_with_retry(target, mode="html")
+        self.request_count = self.request_budget.used
+        self.request_cap_reached = fallback_client.request_cap_reached or self.request_budget.reached()
+        if fallback_result.listings:
+            merged_retry_report = list(blocked_result.retry_report) + [
+                f"fallback: buy marketplace switched from ebay to {fallback_marketplace} due to anti-bot challenge"
+            ] + list(fallback_result.retry_report)
+            return SearchResult(
+                listings=fallback_result.listings,
+                retry_report=merged_retry_report,
+                diagnostics=list(blocked_result.diagnostics) + list(fallback_result.diagnostics),
+                rejection_counts=fallback_result.rejection_counts,
+                raw_count=fallback_result.raw_count,
+                filtered_count=fallback_result.filtered_count,
+                last_request_url=fallback_result.last_request_url,
+                status="ok",
+                blocked=None,
+            )
+        return SearchResult(
+            listings=[],
+            retry_report=list(blocked_result.retry_report) + list(fallback_result.retry_report),
+            diagnostics=list(blocked_result.diagnostics) + list(fallback_result.diagnostics),
+            rejection_counts=fallback_result.rejection_counts or blocked_result.rejection_counts,
+            raw_count=fallback_result.raw_count or blocked_result.raw_count,
+            filtered_count=fallback_result.filtered_count or blocked_result.filtered_count,
+            last_request_url=fallback_result.last_request_url or blocked_result.last_request_url,
+            status=blocked_result.status,
+            blocked=blocked_result.blocked,
+        )
+
     def _refresh_session(self, reason: str) -> None:
         LOGGER.info("Refreshing HTTP session due to %s", reason)
         self.session = requests.Session()
@@ -278,7 +347,10 @@ class EbayClient:
         try:
             if self._api_enabled():
                 try:
-                    return self._search_active_with_retry(target, mode="api")
+                    result = self._search_active_with_retry(target, mode="api")
+                    if result.status == "blocked":
+                        return self._search_active_with_blocked_fallback(target, blocked_result=result)
+                    return result
                 except RequestLimitError as exc:
                     LOGGER.info("Request cap reached during API listing search: %s", exc)
                     return _empty_search_result()
@@ -286,7 +358,10 @@ class EbayClient:
                     raise
                 except Exception as exc:
                     LOGGER.warning("API search failed, falling back to HTML: %s", exc)
-            return self._search_active_with_retry(target, mode="html")
+            result = self._search_active_with_retry(target, mode="html")
+            if result.status == "blocked":
+                return self._search_active_with_blocked_fallback(target, blocked_result=result)
+            return result
         except RequestLimitError as exc:
             LOGGER.info("Request cap reached during HTML listing search: %s", exc)
             return _empty_search_result()
@@ -458,7 +533,7 @@ class EbayClient:
             max_attempts=1,
         )
         response_text = response.text
-        if self.settings.marketplace == "craigslist":
+        if self.settings.marketplace in {"craigslist", "mercari", "poshmark"}:
             raw_listings, parse_metrics = parse_html(response_text, target, self)
             filtered = filter_listings(raw_listings, _criteria_to_target(criteria, target), self.settings)
             diagnostics.append(
@@ -971,6 +1046,10 @@ def _search_url(settings: RunSettings) -> str:
     if settings.marketplace == "craigslist":
         site = settings.craigslist_site.strip().lower() or "london"
         return CRAIGSLIST_SEARCH_URL_TEMPLATE.format(site=site)
+    if settings.marketplace == "mercari":
+        return MERCARI_SEARCH_URL
+    if settings.marketplace == "poshmark":
+        return POSHMARK_SEARCH_URL
     return EBAY_HTML_SEARCH_URL
 
 
@@ -1109,6 +1188,10 @@ def parse_html(
     soup = BeautifulSoup(html, "lxml")
     if client.settings.marketplace == "craigslist":
         return _parse_craigslist_listings(soup, target, client)
+    if client.settings.marketplace == "mercari":
+        return _parse_mercari_listings(soup, target, client)
+    if client.settings.marketplace == "poshmark":
+        return _parse_poshmark_listings(soup, target, client)
     return _parse_html_listings(soup, target, client)
 
 
@@ -1126,6 +1209,14 @@ def _build_html_params(criteria: SearchCriteria, page: int, settings: Optional[R
             params["purveyor"] = "owner"
         elif criteria.listing_type == "dealer":
             params["purveyor"] = "dealer"
+        return params
+    if settings.marketplace == "mercari":
+        params = {"keyword": criteria.query}
+        if criteria.max_buy_gbp is not None:
+            params["price_max"] = int(criteria.max_buy_gbp)
+        return params
+    if settings.marketplace == "poshmark":
+        params = {"query": criteria.query}
         return params
 
     params = {
@@ -1748,6 +1839,132 @@ def _get_image_url(item: Any) -> Optional[str]:
     if not image_el:
         return None
     return image_el.get("src") or image_el.get("data-src")
+
+
+def _extract_id_from_href(href: str, *, prefix: str, idx: int) -> str:
+    if not href:
+        return f"{prefix}-{idx}"
+    for pattern in (r"/item/([a-zA-Z0-9_-]+)", r"/listing/([a-zA-Z0-9_-]+)", r"/([0-9]{8,})"):
+        match = re.search(pattern, href)
+        if match:
+            return match.group(1)
+    return f"{prefix}-{idx}"
+
+
+def _parse_mercari_listings(
+    soup: BeautifulSoup,
+    target: Target,
+    client: EbayClient,
+) -> tuple[list[Listing], dict[str, int]]:
+    cards = soup.select("li[data-testid='ItemCell'], div[data-testid='ItemCell']") or soup.select("li, div")
+    metrics = {"card_count": len(cards), "title_count": 0, "link_count": 0, "price_count": 0}
+    listings: list[Listing] = []
+    seen_ids: set[str] = set()
+    for idx, card in enumerate(cards):
+        title_el = card.select_one("img[alt]") or card.select_one("a")
+        link_el = card.select_one("a[href]")
+        price_el = card.select_one("[data-testid='Price'], span, p")
+        if title_el:
+            metrics["title_count"] += 1
+        if link_el and link_el.get("href"):
+            metrics["link_count"] += 1
+        if price_el:
+            metrics["price_count"] += 1
+        if not title_el or not price_el:
+            continue
+        title = title_el.get("alt") if getattr(title_el, "get", None) else None
+        if not title:
+            title = title_el.get_text(strip=True)
+        if not title:
+            continue
+        price_value, currency = _parse_price(price_el.get_text(strip=True))
+        if price_value <= 0 or not client._currency_allowed(currency):
+            continue
+        price_gbp, shipping_gbp = client._normalize_currency(price_value, 0.0, currency)
+        href = link_el.get("href") if link_el else ""
+        if href and href.startswith("/"):
+            href = f"https://www.mercari.com{href}"
+        listing_id = _extract_id_from_href(href or "", prefix="mercari", idx=idx)
+        if listing_id in seen_ids:
+            continue
+        seen_ids.add(listing_id)
+        listings.append(
+            Listing(
+                ebay_item_id=listing_id,
+                target_id=target.id or 0,
+                title=title[:200],
+                url=href or "",
+                price_gbp=price_gbp,
+                shipping_gbp=shipping_gbp,
+                total_buy_gbp=price_gbp + shipping_gbp,
+                condition=None,
+                seller_feedback_pct=None,
+                seller_feedback_score=None,
+                listing_type="fixed",
+                location=None,
+                image_url=None,
+                raw_json={"source": "mercari_html"},
+            )
+        )
+    return listings, metrics
+
+
+def _parse_poshmark_listings(
+    soup: BeautifulSoup,
+    target: Target,
+    client: EbayClient,
+) -> tuple[list[Listing], dict[str, int]]:
+    cards = soup.select("div.tile") or soup.select("li, div")
+    metrics = {"card_count": len(cards), "title_count": 0, "link_count": 0, "price_count": 0}
+    listings: list[Listing] = []
+    seen_ids: set[str] = set()
+    for idx, card in enumerate(cards):
+        title_el = card.select_one("img[alt]") or card.select_one("a")
+        link_el = card.select_one("a[href]")
+        price_el = card.select_one(".price, span, p")
+        if title_el:
+            metrics["title_count"] += 1
+        if link_el and link_el.get("href"):
+            metrics["link_count"] += 1
+        if price_el:
+            metrics["price_count"] += 1
+        if not title_el or not price_el:
+            continue
+        title = title_el.get("alt") if getattr(title_el, "get", None) else None
+        if not title:
+            title = title_el.get_text(strip=True)
+        if not title:
+            continue
+        price_value, currency = _parse_price(price_el.get_text(strip=True))
+        if price_value <= 0 or not client._currency_allowed(currency):
+            continue
+        price_gbp, shipping_gbp = client._normalize_currency(price_value, 0.0, currency)
+        href = link_el.get("href") if link_el else ""
+        if href and href.startswith("/"):
+            href = f"https://poshmark.com{href}"
+        listing_id = _extract_id_from_href(href or "", prefix="poshmark", idx=idx)
+        if listing_id in seen_ids:
+            continue
+        seen_ids.add(listing_id)
+        listings.append(
+            Listing(
+                ebay_item_id=listing_id,
+                target_id=target.id or 0,
+                title=title[:200],
+                url=href or "",
+                price_gbp=price_gbp,
+                shipping_gbp=shipping_gbp,
+                total_buy_gbp=price_gbp + shipping_gbp,
+                condition=None,
+                seller_feedback_pct=None,
+                seller_feedback_score=None,
+                listing_type="fixed",
+                location=None,
+                image_url=None,
+                raw_json={"source": "poshmark_html"},
+            )
+        )
+    return listings, metrics
 
 
 def _parse_craigslist_listings(
