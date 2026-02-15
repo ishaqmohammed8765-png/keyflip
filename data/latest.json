@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-02-15T17:15:52.220762+00:00",
+  "generated_at": "2026-02-15T17:48:22.036939+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,8 +12,16 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-02-15T17:15:52.220184+00:00",
-    "zero_result_targets": [],
+    "last_scan": "2026-02-15T17:48:22.036388+00:00",
+    "zero_result_targets": [
+      {
+        "target_name": "Sony WH-1000XM5",
+        "target_query": "Sony WH-1000XM5",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      }
+    ],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
   },
