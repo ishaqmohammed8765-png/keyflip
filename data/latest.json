@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-02-22T07:09:36.168699+00:00",
+  "generated_at": "2026-02-22T07:52:27.133900+00:00",
   "count": 1,
   "marketplaces": {
     "buy": "ebay",
@@ -12,7 +12,7 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-02-22T07:09:36.168136+00:00",
+    "last_scan": "2026-02-22T07:52:27.133310+00:00",
     "zero_result_targets": [],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
@@ -32,7 +32,7 @@
       "reasons": [
         "No sold comps found - cannot estimate profit."
       ],
-      "evaluated_at": "2026-02-22T07:09:36.165625+00:00",
+      "evaluated_at": "2026-02-22T07:52:26.872926+00:00",
       "image_url": null,
       "location": "Angel, London",
       "listing_type": "fixed",
