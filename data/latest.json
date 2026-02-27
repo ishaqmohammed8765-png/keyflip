@@ -1,19 +1,27 @@
 {
-  "generated_at": "2026-02-27T16:34:47.132832+00:00",
+  "generated_at": "2026-02-27T17:25:07.715294+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
     "sell": "ebay"
   },
   "scan_summary": {
-    "scanned_targets": 16,
+    "scanned_targets": 17,
     "new_listings": 0,
     "evaluated": 0,
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-02-27T16:34:47.132228+00:00",
-    "zero_result_targets": [],
+    "last_scan": "2026-02-27T17:25:07.714684+00:00",
+    "zero_result_targets": [
+      {
+        "target_name": "AirPods Pro 2",
+        "target_query": "AirPods Pro 2",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      }
+    ],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
   },
