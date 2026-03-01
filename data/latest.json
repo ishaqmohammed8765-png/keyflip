@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-03-01T05:16:48.788280+00:00",
+  "generated_at": "2026-03-01T06:06:31.211014+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,7 +12,7 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-03-01T05:16:48.787392+00:00",
+    "last_scan": "2026-03-01T06:06:31.210330+00:00",
     "zero_result_targets": [],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
