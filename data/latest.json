@@ -1,41 +1,19 @@
 {
-  "generated_at": "2026-03-14T09:53:43.582408+00:00",
+  "generated_at": "2026-03-14T10:16:41.103434+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
     "sell": "ebay"
   },
   "scan_summary": {
-    "scanned_targets": 18,
+    "scanned_targets": 16,
     "new_listings": 0,
     "evaluated": 0,
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-03-14T09:53:43.581833+00:00",
-    "zero_result_targets": [
-      {
-        "target_name": "Fujifilm X-T4",
-        "target_query": "fujifilm x-t4",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Sony A7 III",
-        "target_query": "sony a7 iii",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "MacBook Air M2",
-        "target_query": "macbook air m2",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      }
-    ],
+    "last_scan": "2026-03-14T10:16:41.101883+00:00",
+    "zero_result_targets": [],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
   },
