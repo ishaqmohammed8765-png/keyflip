@@ -1,19 +1,27 @@
 {
-  "generated_at": "2026-03-21T15:45:54.435382+00:00",
+  "generated_at": "2026-03-21T16:15:19.216715+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
     "sell": "ebay"
   },
   "scan_summary": {
-    "scanned_targets": 16,
+    "scanned_targets": 17,
     "new_listings": 0,
     "evaluated": 0,
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-03-21T15:45:54.434813+00:00",
-    "zero_result_targets": [],
+    "last_scan": "2026-03-21T16:15:19.216124+00:00",
+    "zero_result_targets": [
+      {
+        "target_name": "Apple Watch Series 9",
+        "target_query": "apple watch series 9",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      }
+    ],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
   },
