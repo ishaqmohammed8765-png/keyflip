@@ -1,27 +1,19 @@
 {
-  "generated_at": "2026-03-25T14:09:15.283887+00:00",
+  "generated_at": "2026-03-25T15:40:37.194801+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
     "sell": "ebay"
   },
   "scan_summary": {
-    "scanned_targets": 17,
+    "scanned_targets": 16,
     "new_listings": 0,
     "evaluated": 0,
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-03-25T14:09:15.283331+00:00",
-    "zero_result_targets": [
-      {
-        "target_name": "Samsung Galaxy S23 Ultra",
-        "target_query": "samsung galaxy s23 ultra",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      }
-    ],
+    "last_scan": "2026-03-25T15:40:37.193946+00:00",
+    "zero_result_targets": [],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
   },
