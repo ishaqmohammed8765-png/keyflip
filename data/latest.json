@@ -1,19 +1,27 @@
 {
-  "generated_at": "2026-04-15T04:21:04.132980+00:00",
+  "generated_at": "2026-04-15T06:15:40.611992+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
     "sell": "ebay"
   },
   "scan_summary": {
-    "scanned_targets": 14,
+    "scanned_targets": 16,
     "new_listings": 0,
     "evaluated": 0,
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-04-15T04:21:04.132200+00:00",
-    "zero_result_targets": [],
+    "last_scan": "2026-04-15T06:15:40.611511+00:00",
+    "zero_result_targets": [
+      {
+        "target_name": "Canon EOS R6",
+        "target_query": "canon eos r6",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      }
+    ],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
   },
