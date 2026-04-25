@@ -1,18 +1,18 @@
 {
-  "generated_at": "2026-04-25T21:38:13.592920+00:00",
+  "generated_at": "2026-04-25T22:23:18.911754+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
     "sell": "ebay"
   },
   "scan_summary": {
-    "scanned_targets": 15,
+    "scanned_targets": 16,
     "new_listings": 0,
     "evaluated": 0,
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-04-25T21:38:13.592363+00:00",
+    "last_scan": "2026-04-25T22:23:18.911050+00:00",
     "zero_result_targets": [],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
