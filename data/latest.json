@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-26T10:34:36.955411+00:00",
+  "generated_at": "2026-04-26T11:31:11.253245+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,8 +12,16 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": true,
-    "last_scan": "2026-04-26T10:34:36.954875+00:00",
-    "zero_result_targets": [],
+    "last_scan": "2026-04-26T11:31:11.252564+00:00",
+    "zero_result_targets": [
+      {
+        "target_name": "Apple iPhone 14 Pro",
+        "target_query": "apple iphone 14 pro",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      }
+    ],
     "buy_marketplace": "ebay",
     "sell_marketplace": "ebay"
   },
