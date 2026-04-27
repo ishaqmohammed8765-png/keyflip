@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-27T12:57:19.394931+00:00",
+  "generated_at": "2026-04-27T14:59:39.176716+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,7 +12,7 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-04-27T12:57:19.394298+00:00",
+    "last_scan": "2026-04-27T14:59:39.175944+00:00",
     "zero_result_targets": [
       {
         "target_name": "Fujifilm X-T4",
@@ -29,15 +29,15 @@
         "filtered_count": 0
       },
       {
-        "target_name": "RTX 4070",
-        "target_query": "rtx 4070 graphics card",
+        "target_name": "Sony A7 III",
+        "target_query": "sony a7 iii",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
       },
       {
-        "target_name": "Sony A7 III",
-        "target_query": "sony a7 iii",
+        "target_name": "RTX 4070",
+        "target_query": "rtx 4070 graphics card",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -71,13 +71,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Bose QuietComfort Ultra",
-        "target_query": "bose quietcomfort ultra",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "Apple Watch Series 9",
         "target_query": "apple watch series 9",
         "retry_report": [],
@@ -85,8 +78,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "PlayStation 5 Slim",
-        "target_query": "playstation 5 slim",
+        "target_name": "Bose QuietComfort Ultra",
+        "target_query": "bose quietcomfort ultra",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -94,6 +87,13 @@
       {
         "target_name": "Xbox Series X",
         "target_query": "xbox series x",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "PlayStation 5 Slim",
+        "target_query": "playstation 5 slim",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
