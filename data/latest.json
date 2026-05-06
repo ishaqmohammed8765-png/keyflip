@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-06T19:07:50.571225+00:00",
+  "generated_at": "2026-05-06T20:50:56.666241+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,7 +12,7 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-05-06T19:07:50.569915+00:00",
+    "last_scan": "2026-05-06T20:50:56.665521+00:00",
     "zero_result_targets": [
       {
         "target_name": "Sony A7 III",
@@ -50,8 +50,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Garmin Fenix 7",
-        "target_query": "garmin fenix 7",
+        "target_name": "MacBook Air M2",
+        "target_query": "macbook air m2",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -64,22 +64,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "MacBook Air M2",
-        "target_query": "macbook air m2",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Apple Watch Series 9",
-        "target_query": "apple watch series 9",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Xbox Series X",
-        "target_query": "xbox series x",
+        "target_name": "Garmin Fenix 7",
+        "target_query": "garmin fenix 7",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -99,15 +85,22 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Samsung Galaxy S23 Ultra",
-        "target_query": "samsung galaxy s23 ultra",
+        "target_name": "Xbox Series X",
+        "target_query": "xbox series x",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
       },
       {
-        "target_name": "Apple iPhone 14 Pro",
-        "target_query": "apple iphone 14 pro",
+        "target_name": "Apple Watch Series 9",
+        "target_query": "apple watch series 9",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Samsung Galaxy S23 Ultra",
+        "target_query": "samsung galaxy s23 ultra",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -127,8 +120,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Nintendo Switch OLED",
-        "target_query": "Nintendo Switch OLED",
+        "target_name": "Apple iPhone 14 Pro",
+        "target_query": "apple iphone 14 pro",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -136,6 +129,13 @@
       {
         "target_name": "AirPods Pro 2",
         "target_query": "AirPods Pro 2",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Nintendo Switch OLED",
+        "target_query": "Nintendo Switch OLED",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
