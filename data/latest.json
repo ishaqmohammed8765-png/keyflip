@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-11T20:40:15.659770+00:00",
+  "generated_at": "2026-06-11T22:44:28.953150+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,18 +12,11 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-06-11T20:40:15.658981+00:00",
+    "last_scan": "2026-06-11T22:44:28.952441+00:00",
     "zero_result_targets": [
       {
-        "target_name": "Sony A7 III",
-        "target_query": "sony a7 iii",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Fujifilm X-T4",
-        "target_query": "fujifilm x-t4",
+        "target_name": "RTX 4070",
+        "target_query": "rtx 4070 graphics card",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -36,36 +29,15 @@
         "filtered_count": 0
       },
       {
-        "target_name": "RTX 4070",
-        "target_query": "rtx 4070 graphics card",
+        "target_name": "Fujifilm X-T4",
+        "target_query": "fujifilm x-t4",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
       },
       {
-        "target_name": "iPad Pro 11",
-        "target_query": "ipad pro 11",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Galaxy Watch 6 Classic",
-        "target_query": "galaxy watch 6 classic",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "MacBook Air M2",
-        "target_query": "macbook air m2",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Apple Watch Series 9",
-        "target_query": "apple watch series 9",
+        "target_name": "Sony A7 III",
+        "target_query": "sony a7 iii",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -78,8 +50,22 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Xbox Series X",
-        "target_query": "xbox series x",
+        "target_name": "iPad Pro 11",
+        "target_query": "ipad pro 11",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "MacBook Air M2",
+        "target_query": "macbook air m2",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Galaxy Watch 6 Classic",
+        "target_query": "galaxy watch 6 classic",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -99,8 +85,15 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Samsung Galaxy S23 Ultra",
-        "target_query": "samsung galaxy s23 ultra",
+        "target_name": "Apple Watch Series 9",
+        "target_query": "apple watch series 9",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Xbox Series X",
+        "target_query": "xbox series x",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -113,6 +106,13 @@
         "filtered_count": 0
       },
       {
+        "target_name": "Samsung Galaxy S23 Ultra",
+        "target_query": "samsung galaxy s23 ultra",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
         "target_name": "Apple iPhone 14 Pro",
         "target_query": "apple iphone 14 pro",
         "retry_report": [],
@@ -120,15 +120,15 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Sony WH-1000XM5",
-        "target_query": "Sony WH-1000XM5",
+        "target_name": "AirPods Pro 2",
+        "target_query": "AirPods Pro 2",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
       },
       {
-        "target_name": "AirPods Pro 2",
-        "target_query": "AirPods Pro 2",
+        "target_name": "Sony WH-1000XM5",
+        "target_query": "Sony WH-1000XM5",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
