@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-19T05:30:11.274267+00:00",
+  "generated_at": "2026-06-19T09:58:16.881207+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,11 +12,11 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-06-19T05:30:11.273554+00:00",
+    "last_scan": "2026-06-19T09:58:16.880558+00:00",
     "zero_result_targets": [
       {
-        "target_name": "RTX 4070",
-        "target_query": "rtx 4070 graphics card",
+        "target_name": "Canon EOS R6",
+        "target_query": "canon eos r6",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -29,13 +29,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Canon EOS R6",
-        "target_query": "canon eos r6",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "Fujifilm X-T4",
         "target_query": "fujifilm x-t4",
         "retry_report": [],
@@ -43,8 +36,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "iPad Pro 11",
-        "target_query": "ipad pro 11",
+        "target_name": "RTX 4070",
+        "target_query": "rtx 4070 graphics card",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -64,8 +57,22 @@
         "filtered_count": 0
       },
       {
+        "target_name": "iPad Pro 11",
+        "target_query": "ipad pro 11",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
         "target_name": "Garmin Fenix 7",
         "target_query": "garmin fenix 7",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Bose QuietComfort Ultra",
+        "target_query": "bose quietcomfort ultra",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -78,13 +85,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Samsung Galaxy S23 Ultra",
-        "target_query": "samsung galaxy s23 ultra",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "Xbox Series X",
         "target_query": "xbox series x",
         "retry_report": [],
@@ -92,8 +92,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Bose QuietComfort Ultra",
-        "target_query": "bose quietcomfort ultra",
+        "target_name": "Samsung Galaxy S23 Ultra",
+        "target_query": "samsung galaxy s23 ultra",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
