@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-11T21:36:53.480309+00:00",
+  "generated_at": "2026-07-11T22:34:26.314877+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,7 +12,7 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-07-11T21:36:53.479661+00:00",
+    "last_scan": "2026-07-11T22:34:26.314240+00:00",
     "zero_result_targets": [
       {
         "target_name": "Sony A7 III",
@@ -50,8 +50,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "MacBook Air M2",
-        "target_query": "macbook air m2",
+        "target_name": "Garmin Fenix 7",
+        "target_query": "garmin fenix 7",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -64,15 +64,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Garmin Fenix 7",
-        "target_query": "garmin fenix 7",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Xbox Series X",
-        "target_query": "xbox series x",
+        "target_name": "MacBook Air M2",
+        "target_query": "macbook air m2",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -92,22 +85,15 @@
         "filtered_count": 0
       },
       {
+        "target_name": "Xbox Series X",
+        "target_query": "xbox series x",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
         "target_name": "PlayStation 5 Slim",
         "target_query": "playstation 5 slim",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Apple iPhone 14 Pro",
-        "target_query": "apple iphone 14 pro",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Apple iPhone 15 Pro",
-        "target_query": "apple iphone 15 pro",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -120,15 +106,29 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Sony WH-1000XM5",
-        "target_query": "Sony WH-1000XM5",
+        "target_name": "AirPods Pro 2",
+        "target_query": "AirPods Pro 2",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
       },
       {
-        "target_name": "AirPods Pro 2",
-        "target_query": "AirPods Pro 2",
+        "target_name": "Apple iPhone 15 Pro",
+        "target_query": "apple iphone 15 pro",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Apple iPhone 14 Pro",
+        "target_query": "apple iphone 14 pro",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Sony WH-1000XM5",
+        "target_query": "Sony WH-1000XM5",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
