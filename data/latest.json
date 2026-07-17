@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-17T09:24:28.268936+00:00",
+  "generated_at": "2026-07-17T11:00:27.503147+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,7 +12,7 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-07-17T09:24:28.268426+00:00",
+    "last_scan": "2026-07-17T11:00:27.502454+00:00",
     "zero_result_targets": [
       {
         "target_name": "Sony A7 III",
@@ -43,13 +43,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Galaxy Watch 6 Classic",
-        "target_query": "galaxy watch 6 classic",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "MacBook Air M2",
         "target_query": "macbook air m2",
         "retry_report": [],
@@ -59,6 +52,13 @@
       {
         "target_name": "Garmin Fenix 7",
         "target_query": "garmin fenix 7",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Galaxy Watch 6 Classic",
+        "target_query": "galaxy watch 6 classic",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -78,13 +78,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Xbox Series X",
-        "target_query": "xbox series x",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "Bose QuietComfort Ultra",
         "target_query": "bose quietcomfort ultra",
         "retry_report": [],
@@ -94,6 +87,13 @@
       {
         "target_name": "PlayStation 5 Slim",
         "target_query": "playstation 5 slim",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Xbox Series X",
+        "target_query": "xbox series x",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -113,13 +113,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Sony WH-1000XM5",
-        "target_query": "Sony WH-1000XM5",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "Apple iPhone 14 Pro",
         "target_query": "apple iphone 14 pro",
         "retry_report": [],
@@ -129,6 +122,13 @@
       {
         "target_name": "AirPods Pro 2",
         "target_query": "AirPods Pro 2",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Sony WH-1000XM5",
+        "target_query": "Sony WH-1000XM5",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
