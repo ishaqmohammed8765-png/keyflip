@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-19T22:38:19.768520+00:00",
+  "generated_at": "2026-07-19T23:43:09.764273+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,25 +12,18 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-07-19T22:38:19.767914+00:00",
+    "last_scan": "2026-07-19T23:43:09.763560+00:00",
     "zero_result_targets": [
-      {
-        "target_name": "Sony A7 III",
-        "target_query": "sony a7 iii",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Canon EOS R6",
-        "target_query": "canon eos r6",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
       {
         "target_name": "Fujifilm X-T4",
         "target_query": "fujifilm x-t4",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Sony A7 III",
+        "target_query": "sony a7 iii",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -43,8 +36,22 @@
         "filtered_count": 0
       },
       {
+        "target_name": "Canon EOS R6",
+        "target_query": "canon eos r6",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
         "target_name": "MacBook Air M2",
         "target_query": "macbook air m2",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Galaxy Watch 6 Classic",
+        "target_query": "galaxy watch 6 classic",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -59,13 +66,6 @@
       {
         "target_name": "Garmin Fenix 7",
         "target_query": "garmin fenix 7",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Galaxy Watch 6 Classic",
-        "target_query": "galaxy watch 6 classic",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -92,6 +92,13 @@
         "filtered_count": 0
       },
       {
+        "target_name": "Samsung Galaxy S23 Ultra",
+        "target_query": "samsung galaxy s23 ultra",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
         "target_name": "PlayStation 5 Slim",
         "target_query": "playstation 5 slim",
         "retry_report": [],
@@ -106,8 +113,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Samsung Galaxy S23 Ultra",
-        "target_query": "samsung galaxy s23 ultra",
+        "target_name": "Nintendo Switch OLED",
+        "target_query": "Nintendo Switch OLED",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -129,13 +136,6 @@
       {
         "target_name": "AirPods Pro 2",
         "target_query": "AirPods Pro 2",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Nintendo Switch OLED",
-        "target_query": "Nintendo Switch OLED",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
