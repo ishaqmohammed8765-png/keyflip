@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-24T04:40:36.309088+00:00",
+  "generated_at": "2026-07-24T07:23:38.721482+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,22 +12,8 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-07-24T04:40:36.308428+00:00",
+    "last_scan": "2026-07-24T07:23:38.720657+00:00",
     "zero_result_targets": [
-      {
-        "target_name": "Sony A7 III",
-        "target_query": "sony a7 iii",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "RTX 4070",
-        "target_query": "rtx 4070 graphics card",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
       {
         "target_name": "Fujifilm X-T4",
         "target_query": "fujifilm x-t4",
@@ -38,6 +24,20 @@
       {
         "target_name": "Canon EOS R6",
         "target_query": "canon eos r6",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Sony A7 III",
+        "target_query": "sony a7 iii",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "RTX 4070",
+        "target_query": "rtx 4070 graphics card",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -78,13 +78,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Bose QuietComfort Ultra",
-        "target_query": "bose quietcomfort ultra",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "Xbox Series X",
         "target_query": "xbox series x",
         "retry_report": [],
@@ -92,15 +85,15 @@
         "filtered_count": 0
       },
       {
-        "target_name": "PlayStation 5 Slim",
-        "target_query": "playstation 5 slim",
+        "target_name": "Bose QuietComfort Ultra",
+        "target_query": "bose quietcomfort ultra",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
       },
       {
-        "target_name": "Samsung Galaxy S23 Ultra",
-        "target_query": "samsung galaxy s23 ultra",
+        "target_name": "PlayStation 5 Slim",
+        "target_query": "playstation 5 slim",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -120,8 +113,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "AirPods Pro 2",
-        "target_query": "AirPods Pro 2",
+        "target_name": "Samsung Galaxy S23 Ultra",
+        "target_query": "samsung galaxy s23 ultra",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -129,6 +122,13 @@
       {
         "target_name": "Sony WH-1000XM5",
         "target_query": "Sony WH-1000XM5",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "AirPods Pro 2",
+        "target_query": "AirPods Pro 2",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
