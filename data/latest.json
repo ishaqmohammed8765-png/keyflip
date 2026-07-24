@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-24T21:51:57.798649+00:00",
+  "generated_at": "2026-07-24T22:48:44.466590+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,8 +12,22 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-07-24T21:51:57.798079+00:00",
+    "last_scan": "2026-07-24T22:48:44.465919+00:00",
     "zero_result_targets": [
+      {
+        "target_name": "Sony A7 III",
+        "target_query": "sony a7 iii",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "RTX 4070",
+        "target_query": "rtx 4070 graphics card",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
       {
         "target_name": "Canon EOS R6",
         "target_query": "canon eos r6",
@@ -29,15 +43,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Sony A7 III",
-        "target_query": "sony a7 iii",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "RTX 4070",
-        "target_query": "rtx 4070 graphics card",
+        "target_name": "MacBook Air M2",
+        "target_query": "macbook air m2",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -57,20 +64,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "MacBook Air M2",
-        "target_query": "macbook air m2",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Garmin Fenix 7",
-        "target_query": "garmin fenix 7",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "Apple Watch Series 9",
         "target_query": "apple watch series 9",
         "retry_report": [],
@@ -85,6 +78,20 @@
         "filtered_count": 0
       },
       {
+        "target_name": "Garmin Fenix 7",
+        "target_query": "garmin fenix 7",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Samsung Galaxy S23 Ultra",
+        "target_query": "samsung galaxy s23 ultra",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
         "target_name": "Xbox Series X",
         "target_query": "xbox series x",
         "retry_report": [],
@@ -94,13 +101,6 @@
       {
         "target_name": "PlayStation 5 Slim",
         "target_query": "playstation 5 slim",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "Samsung Galaxy S23 Ultra",
-        "target_query": "samsung galaxy s23 ultra",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
