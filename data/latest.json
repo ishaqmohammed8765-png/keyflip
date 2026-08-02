@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-02T17:48:54.356919+00:00",
+  "generated_at": "2026-08-02T18:47:33.767820+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,18 +12,18 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-08-02T17:48:54.356268+00:00",
+    "last_scan": "2026-08-02T18:47:33.767070+00:00",
     "zero_result_targets": [
       {
-        "target_name": "RTX 4070",
-        "target_query": "rtx 4070 graphics card",
+        "target_name": "Sony A7 III",
+        "target_query": "sony a7 iii",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
       },
       {
-        "target_name": "Sony A7 III",
-        "target_query": "sony a7 iii",
+        "target_name": "RTX 4070",
+        "target_query": "rtx 4070 graphics card",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -43,8 +43,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "MacBook Air M2",
-        "target_query": "macbook air m2",
+        "target_name": "iPad Pro 11",
+        "target_query": "ipad pro 11",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -57,15 +57,15 @@
         "filtered_count": 0
       },
       {
-        "target_name": "iPad Pro 11",
-        "target_query": "ipad pro 11",
+        "target_name": "Garmin Fenix 7",
+        "target_query": "garmin fenix 7",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
       },
       {
-        "target_name": "Garmin Fenix 7",
-        "target_query": "garmin fenix 7",
+        "target_name": "MacBook Air M2",
+        "target_query": "macbook air m2",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -113,6 +113,13 @@
         "filtered_count": 0
       },
       {
+        "target_name": "AirPods Pro 2",
+        "target_query": "AirPods Pro 2",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
         "target_name": "Apple iPhone 14 Pro",
         "target_query": "apple iphone 14 pro",
         "retry_report": [],
@@ -122,13 +129,6 @@
       {
         "target_name": "Sony WH-1000XM5",
         "target_query": "Sony WH-1000XM5",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "AirPods Pro 2",
-        "target_query": "AirPods Pro 2",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
