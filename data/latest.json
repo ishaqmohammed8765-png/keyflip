@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-08-15T04:52:40.912821+00:00",
+  "generated_at": "2026-08-15T05:13:50.703099+00:00",
   "count": 0,
   "marketplaces": {
     "buy": "ebay",
@@ -12,8 +12,15 @@
     "deals": 0,
     "stale_pruned": 0,
     "request_cap_reached": false,
-    "last_scan": "2026-08-15T04:52:40.912181+00:00",
+    "last_scan": "2026-08-15T05:13:50.702332+00:00",
     "zero_result_targets": [
+      {
+        "target_name": "RTX 4070",
+        "target_query": "rtx 4070 graphics card",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
       {
         "target_name": "Canon EOS R6",
         "target_query": "canon eos r6",
@@ -29,22 +36,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "RTX 4070",
-        "target_query": "rtx 4070 graphics card",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "Fujifilm X-T4",
         "target_query": "fujifilm x-t4",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
-        "target_name": "iPad Pro 11",
-        "target_query": "ipad pro 11",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -64,8 +57,8 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Garmin Fenix 7",
-        "target_query": "garmin fenix 7",
+        "target_name": "iPad Pro 11",
+        "target_query": "ipad pro 11",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -73,6 +66,13 @@
       {
         "target_name": "Apple Watch Series 9",
         "target_query": "apple watch series 9",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Garmin Fenix 7",
+        "target_query": "garmin fenix 7",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
@@ -120,13 +120,6 @@
         "filtered_count": 0
       },
       {
-        "target_name": "Sony WH-1000XM5",
-        "target_query": "Sony WH-1000XM5",
-        "retry_report": [],
-        "raw_count": 0,
-        "filtered_count": 0
-      },
-      {
         "target_name": "AirPods Pro 2",
         "target_query": "AirPods Pro 2",
         "retry_report": [],
@@ -136,6 +129,13 @@
       {
         "target_name": "Nintendo Switch OLED",
         "target_query": "Nintendo Switch OLED",
+        "retry_report": [],
+        "raw_count": 0,
+        "filtered_count": 0
+      },
+      {
+        "target_name": "Sony WH-1000XM5",
+        "target_query": "Sony WH-1000XM5",
         "retry_report": [],
         "raw_count": 0,
         "filtered_count": 0
